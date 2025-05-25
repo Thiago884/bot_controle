@@ -5,8 +5,10 @@ import pytz
 import asyncio
 import json
 import os
+import time
 import mysql.connector
 from mysql.connector import Error
+from mysql.connector.errors import OperationalError, InterfaceError
 from typing import Dict, List, Optional, Tuple
 from flask import Flask, jsonify
 from threading import Thread
@@ -60,7 +62,10 @@ class Database:
                 database=os.getenv('DB_NAME'),
                 user=os.getenv('DB_USER'),
                 password=os.getenv('DB_PASS'),
-                port=int(os.getenv('DB_PORT', 3306))
+                port=int(os.getenv('DB_PORT', 3306)),
+                pool_name="bot_pool",
+                pool_size=3,
+                pool_reset_session=True
             )
             if self.connection.is_connected():
                 print("Conexão ao MySQL estabelecida com sucesso")
@@ -68,15 +73,30 @@ class Database:
             print(f"Erro ao conectar ao MySQL: {e}")
             raise
 
+    def ensure_connection(self, func):
+        def wrapper(*args, **kwargs):
+            try:
+                if not self.connection or not self.connection.is_connected():
+                    self.connect()
+                return func(*args, **kwargs)
+            except (OperationalError, InterfaceError) as e:
+                print(f"Erro de conexão, tentando reconectar: {e}")
+                self.connect()
+                return func(*args, **kwargs)
+        return wrapper
+
     def reconnect(self):
-        if self.connection is None or not self.connection.is_connected():
+        try:
+            self.connection.reconnect(attempts=3, delay=1)
+        except:
             self.connect()
 
     def create_tables(self):
-        cursor = self.connection.cursor(dictionary=True)
-        
+        cursor = None
         try:
-            # Tabela de atividade de usuários (modificada para incluir tempo em voz)
+            cursor = self.connection.cursor(dictionary=True)
+            
+            # Tabela de atividade de usuários
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS user_activity (
                 user_id BIGINT,
@@ -84,11 +104,11 @@ class Database:
                 last_voice_join DATETIME,
                 last_voice_leave DATETIME,
                 voice_sessions INT DEFAULT 0,
-                total_voice_time INT DEFAULT 0,  -- Em segundos
+                total_voice_time INT DEFAULT 0,
                 PRIMARY KEY (user_id, guild_id)
             )''')
             
-            # Tabela de sessões de voz detalhadas (nova tabela)
+            # Tabela de sessões de voz detalhadas
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS voice_sessions (
                 id INT AUTO_INCREMENT PRIMARY KEY,
@@ -96,7 +116,7 @@ class Database:
                 guild_id BIGINT,
                 join_time DATETIME,
                 leave_time DATETIME,
-                duration INT,  -- Em segundos
+                duration INT,
                 INDEX (user_id, guild_id, join_time)
             )''')
             
@@ -110,7 +130,7 @@ class Database:
                 PRIMARY KEY (user_id, guild_id, warning_type)
             )''')
             
-            # Tabela de cargos removidos (histórico)
+            # Tabela de cargos removidos
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS removed_roles (
                 user_id BIGINT,
@@ -120,7 +140,7 @@ class Database:
                 PRIMARY KEY (user_id, guild_id, role_id)
             )''')
             
-            # Tabela de membros expulsos (histórico)
+            # Tabela de membros expulsos
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS kicked_members (
                 id INT AUTO_INCREMENT PRIMARY KEY,
@@ -130,7 +150,7 @@ class Database:
                 reason TEXT
             )''')
             
-            # Tabela de períodos verificados (nova tabela)
+            # Tabela de períodos verificados
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS checked_periods (
                 user_id BIGINT,
@@ -147,13 +167,16 @@ class Database:
             print(f"Erro ao criar tabelas: {e}")
             raise
         finally:
-            cursor.close()
+            if cursor:
+                cursor.close()
 
+    @ensure_connection
     def log_voice_join(self, user_id: int, guild_id: int):
-        cursor = self.connection.cursor()
+        cursor = None
         now = datetime.utcnow()
         
         try:
+            cursor = self.connection.cursor()
             cursor.execute('''
             INSERT INTO user_activity 
             (user_id, guild_id, last_voice_join, voice_sessions) 
@@ -166,15 +189,21 @@ class Database:
             self.connection.commit()
         except Error as e:
             print(f"Erro ao registrar entrada em voz: {e}")
-            self.connection.rollback()
+            if self.connection:
+                self.connection.rollback()
+            raise
         finally:
-            cursor.close()
+            if cursor:
+                cursor.close()
 
+    @ensure_connection
     def log_voice_leave(self, user_id: int, guild_id: int, duration: int):
-        cursor = self.connection.cursor()
+        cursor = None
         now = datetime.utcnow()
         
         try:
+            cursor = self.connection.cursor()
+            
             # Atualiza a atividade geral do usuário
             cursor.execute('''
             UPDATE user_activity 
@@ -194,14 +223,19 @@ class Database:
             self.connection.commit()
         except Error as e:
             print(f"Erro ao registrar saída de voz: {e}")
-            self.connection.rollback()
+            if self.connection:
+                self.connection.rollback()
+            raise
         finally:
-            cursor.close()
+            if cursor:
+                cursor.close()
 
+    @ensure_connection
     def get_user_activity(self, user_id: int, guild_id: int) -> Dict:
-        cursor = self.connection.cursor(dictionary=True)
+        cursor = None
         
         try:
+            cursor = self.connection.cursor(dictionary=True)
             cursor.execute('''
             SELECT last_voice_join, last_voice_leave, voice_sessions, total_voice_time 
             FROM user_activity 
@@ -214,12 +248,15 @@ class Database:
             print(f"Erro ao obter atividade do usuário: {e}")
             return {}
         finally:
-            cursor.close()
+            if cursor:
+                cursor.close()
 
+    @ensure_connection
     def get_voice_sessions(self, user_id: int, guild_id: int, start_date: datetime, end_date: datetime) -> List[Dict]:
-        cursor = self.connection.cursor(dictionary=True)
+        cursor = None
         
         try:
+            cursor = self.connection.cursor(dictionary=True)
             cursor.execute('''
             SELECT join_time, leave_time, duration 
             FROM voice_sessions
@@ -233,12 +270,15 @@ class Database:
             print(f"Erro ao obter sessões de voz: {e}")
             return []
         finally:
-            cursor.close()
+            if cursor:
+                cursor.close()
 
+    @ensure_connection
     def log_period_check(self, user_id: int, guild_id: int, start_date: datetime, end_date: datetime, meets_requirements: bool):
-        cursor = self.connection.cursor()
+        cursor = None
         
         try:
+            cursor = self.connection.cursor()
             cursor.execute('''
             INSERT INTO checked_periods
             (user_id, guild_id, period_start, period_end, meets_requirements)
@@ -250,14 +290,19 @@ class Database:
             self.connection.commit()
         except Error as e:
             print(f"Erro ao registrar verificação de período: {e}")
-            self.connection.rollback()
+            if self.connection:
+                self.connection.rollback()
+            raise
         finally:
-            cursor.close()
+            if cursor:
+                cursor.close()
 
+    @ensure_connection
     def get_last_period_check(self, user_id: int, guild_id: int) -> Optional[Dict]:
-        cursor = self.connection.cursor(dictionary=True)
+        cursor = None
         
         try:
+            cursor = self.connection.cursor(dictionary=True)
             cursor.execute('''
             SELECT period_start, period_end, meets_requirements
             FROM checked_periods
@@ -271,13 +316,16 @@ class Database:
             print(f"Erro ao obter última verificação de período: {e}")
             return None
         finally:
-            cursor.close()
+            if cursor:
+                cursor.close()
 
+    @ensure_connection
     def log_warning(self, user_id: int, guild_id: int, warning_type: str):
-        cursor = self.connection.cursor()
+        cursor = None
         now = datetime.utcnow()
         
         try:
+            cursor = self.connection.cursor()
             cursor.execute('''
             INSERT INTO user_warnings 
             (user_id, guild_id, warning_type, warning_date) 
@@ -289,14 +337,19 @@ class Database:
             self.connection.commit()
         except Error as e:
             print(f"Erro ao registrar aviso: {e}")
-            self.connection.rollback()
+            if self.connection:
+                self.connection.rollback()
+            raise
         finally:
-            cursor.close()
+            if cursor:
+                cursor.close()
 
+    @ensure_connection
     def get_last_warning(self, user_id: int, guild_id: int) -> Optional[Tuple[str, datetime]]:
-        cursor = self.connection.cursor(dictionary=True)
+        cursor = None
         
         try:
+            cursor = self.connection.cursor(dictionary=True)
             cursor.execute('''
             SELECT warning_type, warning_date 
             FROM user_warnings 
@@ -313,13 +366,16 @@ class Database:
             print(f"Erro ao obter último aviso: {e}")
             return None
         finally:
-            cursor.close()
+            if cursor:
+                cursor.close()
 
+    @ensure_connection
     def log_removed_roles(self, user_id: int, guild_id: int, role_ids: List[int]):
-        cursor = self.connection.cursor()
+        cursor = None
         now = datetime.utcnow()
         
         try:
+            cursor = self.connection.cursor()
             for role_id in role_ids:
                 cursor.execute('''
                 INSERT INTO removed_roles 
@@ -332,15 +388,20 @@ class Database:
             self.connection.commit()
         except Error as e:
             print(f"Erro ao registrar cargos removidos: {e}")
-            self.connection.rollback()
+            if self.connection:
+                self.connection.rollback()
+            raise
         finally:
-            cursor.close()
+            if cursor:
+                cursor.close()
 
+    @ensure_connection
     def log_kicked_member(self, user_id: int, guild_id: int, reason: str):
-        cursor = self.connection.cursor()
+        cursor = None
         now = datetime.utcnow()
         
         try:
+            cursor = self.connection.cursor()
             cursor.execute('''
             INSERT INTO kicked_members 
             (user_id, guild_id, kick_date, reason) 
@@ -350,9 +411,12 @@ class Database:
             self.connection.commit()
         except Error as e:
             print(f"Erro ao registrar membro expulso: {e}")
-            self.connection.rollback()
+            if self.connection:
+                self.connection.rollback()
+            raise
         finally:
-            cursor.close()
+            if cursor:
+                cursor.close()
 
 class InactivityBot(commands.Bot):
     def __init__(self, *args, **kwargs):
@@ -360,8 +424,21 @@ class InactivityBot(commands.Bot):
         self.config = {}
         self.load_config()
         self.timezone = pytz.timezone(self.config.get('timezone', 'America/Sao_Paulo'))
-        self.db = Database()
-        self.active_sessions = {}  # Para rastrear sessões ativas: {(user_id, guild_id): join_time}
+        self.db = None
+        self.initialize_db()
+        self.active_sessions = {}
+
+    def initialize_db(self):
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                self.db = Database()
+                break
+            except Error as e:
+                print(f"Tentativa {attempt + 1} de conexão ao banco de dados falhou: {e}")
+                if attempt == max_retries - 1:
+                    raise
+                time.sleep(5)
 
     def load_config(self):
         if os.path.exists(CONFIG_FILE):
@@ -443,22 +520,29 @@ async def on_ready():
 
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
-    # Registrar entrada em canal de voz
-    if before.channel is None and after.channel is not None:
-        bot.db.log_voice_join(member.id, member.guild.id)
-        bot.active_sessions[(member.id, member.guild.id)] = datetime.utcnow()
-        await bot.log_action("Entrou em voz", member, f"Canal: {after.channel.name}")
-    
-    # Registrar saída de canal de voz
-    elif before.channel is not None and after.channel is None:
-        session_start = bot.active_sessions.get((member.id, member.guild.id))
-        if session_start:
-            duration = (datetime.utcnow() - session_start).total_seconds()
-            if duration >= bot.config['required_minutes'] * 60:  # Ignorar sessões muito curtas
-                bot.db.log_voice_leave(member.id, member.guild.id, int(duration))
-            del bot.active_sessions[(member.id, member.guild.id)]
-            await bot.log_action("Saiu de voz", member, 
-                               f"Canal: {before.channel.name} | Duração: {int(duration//60)} minutos")
+    try:
+        # Registrar entrada em canal de voz
+        if before.channel is None and after.channel is not None:
+            bot.db.log_voice_join(member.id, member.guild.id)
+            bot.active_sessions[(member.id, member.guild.id)] = datetime.utcnow()
+            await bot.log_action("Entrou em voz", member, f"Canal: {after.channel.name}")
+        
+        # Registrar saída de canal de voz
+        elif before.channel is not None and after.channel is None:
+            session_start = bot.active_sessions.get((member.id, member.guild.id))
+            if session_start:
+                duration = (datetime.utcnow() - session_start).total_seconds()
+                if duration >= bot.config['required_minutes'] * 60:
+                    bot.db.log_voice_leave(member.id, member.guild.id, int(duration))
+                del bot.active_sessions[(member.id, member.guild.id)]
+                await bot.log_action("Saiu de voz", member, 
+                                   f"Canal: {before.channel.name} | Duração: {int(duration//60)} minutos")
+    except Exception as e:
+        print(f"Erro ao processar atualização de estado de voz: {e}")
+        try:
+            bot.db.reconnect()
+        except Exception as db_error:
+            print(f"Falha ao reconectar ao banco de dados: {db_error}")
 
 @tasks.loop(hours=24)
 async def inactivity_check():
@@ -475,55 +559,60 @@ async def inactivity_check():
     for guild in bot.guilds:
         for member in guild.members:
             if any(role.id in tracked_roles for role in member.roles):
-                # Verificar se já foi verificado recentemente
-                last_check = bot.db.get_last_period_check(member.id, guild.id)
-                now = datetime.now(bot.timezone)
-                
-                if last_check:
-                    last_period_end = last_check['period_end'].replace(tzinfo=bot.timezone)
-                    # Se o último período verificado ainda não terminou, pule
-                    if now < last_period_end:
-                        continue
-                
-                # Definir o período de verificação atual
-                period_end = now
-                period_start = period_end - timedelta(days=monitoring_period)
-                
-                # Obter todas as sessões de voz no período
-                sessions = bot.db.get_voice_sessions(member.id, guild.id, period_start, period_end)
-                
-                # Verificar se atende aos requisitos
-                meets_requirements = False
-                if sessions:
-                    # Agrupar por dia e contar dias com sessões válidas (>=15 minutos)
-                    valid_days = set()
-                    for session in sessions:
-                        if session['duration'] >= required_minutes * 60:
-                            day = session['join_time'].replace(tzinfo=bot.timezone).date()
-                            valid_days.add(day)
+                try:
+                    # Verificar se já foi verificado recentemente
+                    last_check = bot.db.get_last_period_check(member.id, guild.id)
+                    now = datetime.now(bot.timezone)
                     
-                    meets_requirements = len(valid_days) >= required_days
-                
-                # Registrar o resultado da verificação
-                bot.db.log_period_check(member.id, guild.id, period_start, period_end, meets_requirements)
-                
-                # Se não atender aos requisitos, remover cargos
-                if not meets_requirements:
-                    roles_to_remove = [role for role in member.roles if role.id in tracked_roles]
-                    if roles_to_remove:
-                        try:
-                            await member.remove_roles(*roles_to_remove)
-                            await bot.send_warning(member, 'final')
-                            bot.db.log_removed_roles(member.id, guild.id, [r.id for r in roles_to_remove])
-                            await bot.log_action(
-                                "Cargo Removido",
-                                member,
-                                f"Cargos removidos: {', '.join([r.name for r in roles_to_remove])}")
-                            await bot.notify_roles(
-                                f"🚨 Cargos removidos de {member.mention} por inatividade: " +
-                                ", ".join([f"`{r.name}`" for r in roles_to_remove]))
-                        except discord.Forbidden:
-                            await bot.log_action("Erro ao Remover Cargo", member, "Permissões insuficientes")
+                    if last_check:
+                        last_period_end = last_check['period_end'].replace(tzinfo=bot.timezone)
+                        if now < last_period_end:
+                            continue
+                    
+                    # Definir o período de verificação atual
+                    period_end = now
+                    period_start = period_end - timedelta(days=monitoring_period)
+                    
+                    # Obter todas as sessões de voz no período
+                    sessions = bot.db.get_voice_sessions(member.id, guild.id, period_start, period_end)
+                    
+                    # Verificar se atende aos requisitos
+                    meets_requirements = False
+                    if sessions:
+                        valid_days = set()
+                        for session in sessions:
+                            if session['duration'] >= required_minutes * 60:
+                                day = session['join_time'].replace(tzinfo=bot.timezone).date()
+                                valid_days.add(day)
+                        
+                        meets_requirements = len(valid_days) >= required_days
+                    
+                    # Registrar o resultado da verificação
+                    bot.db.log_period_check(member.id, guild.id, period_start, period_end, meets_requirements)
+                    
+                    # Se não atender aos requisitos, remover cargos
+                    if not meets_requirements:
+                        roles_to_remove = [role for role in member.roles if role.id in tracked_roles]
+                        if roles_to_remove:
+                            try:
+                                await member.remove_roles(*roles_to_remove)
+                                await bot.send_warning(member, 'final')
+                                bot.db.log_removed_roles(member.id, guild.id, [r.id for r in roles_to_remove])
+                                await bot.log_action(
+                                    "Cargo Removido",
+                                    member,
+                                    f"Cargos removidos: {', '.join([r.name for r in roles_to_remove])}")
+                                await bot.notify_roles(
+                                    f"🚨 Cargos removidos de {member.mention} por inatividade: " +
+                                    ", ".join([f"`{r.name}`" for r in roles_to_remove]))
+                            except discord.Forbidden:
+                                await bot.log_action("Erro ao Remover Cargo", member, "Permissões insuficientes")
+                except Exception as e:
+                    print(f"Erro ao verificar inatividade para {member}: {e}")
+                    try:
+                        bot.db.reconnect()
+                    except Exception as db_error:
+                        print(f"Falha ao reconectar ao banco de dados: {db_error}")
 
 @tasks.loop(hours=24)
 async def check_warnings():
@@ -544,26 +633,33 @@ async def check_warnings():
     for guild in bot.guilds:
         for member in guild.members:
             if any(role.id in tracked_roles for role in member.roles):
-                # Verificar o último período verificado
-                last_check = bot.db.get_last_period_check(member.id, guild.id)
-                if not last_check:
-                    continue
-                
-                period_end = last_check['period_end'].replace(tzinfo=bot.timezone)
-                days_remaining = (period_end - datetime.now(bot.timezone)).days
-                
-                # Obter último aviso
-                last_warning = bot.db.get_last_warning(member.id, guild.id)
-                
-                # Primeiro aviso (3 dias antes do fim do período)
-                if days_remaining <= first_warning_days and (
-                    not last_warning or last_warning[0] != 'first'):
-                    await bot.send_warning(member, 'first')
-                
-                # Segundo aviso (1 dia antes do fim do período)
-                elif days_remaining <= second_warning_days and (
-                    not last_warning or last_warning[0] != 'second'):
-                    await bot.send_warning(member, 'second')
+                try:
+                    # Verificar o último período verificado
+                    last_check = bot.db.get_last_period_check(member.id, guild.id)
+                    if not last_check:
+                        continue
+                    
+                    period_end = last_check['period_end'].replace(tzinfo=bot.timezone)
+                    days_remaining = (period_end - datetime.now(bot.timezone)).days
+                    
+                    # Obter último aviso
+                    last_warning = bot.db.get_last_warning(member.id, guild.id)
+                    
+                    # Primeiro aviso (3 dias antes do fim do período)
+                    if days_remaining <= first_warning_days and (
+                        not last_warning or last_warning[0] != 'first'):
+                        await bot.send_warning(member, 'first')
+                    
+                    # Segundo aviso (1 dia antes do fim do período)
+                    elif days_remaining <= second_warning_days and (
+                        not last_warning or last_warning[0] != 'second'):
+                        await bot.send_warning(member, 'second')
+                except Exception as e:
+                    print(f"Erro ao verificar avisos para {member}: {e}")
+                    try:
+                        bot.db.reconnect()
+                    except Exception as db_error:
+                        print(f"Falha ao reconectar ao banco de dados: {db_error}")
 
 @tasks.loop(hours=24)
 async def cleanup_members():
@@ -577,22 +673,29 @@ async def cleanup_members():
     
     for guild in bot.guilds:
         for member in guild.members:
-            # Verificar membros sem nenhum cargo (exceto @everyone)
-            if len(member.roles) == 1:  # Apenas @everyone
-                # Verificar se já está sem cargo há mais de X dias
-                joined_at = member.joined_at.replace(tzinfo=bot.timezone) if member.joined_at else None
-                if joined_at and joined_at < cutoff_date:
-                    try:
-                        await member.kick(reason=f"Sem cargos há mais de {kick_after_days} dias")
-                        bot.db.log_kicked_member(member.id, guild.id, f"Sem cargos há mais de {kick_after_days} dias")
-                        await bot.log_action(
-                            "Membro Expulso",
-                            member,
-                            f"Motivo: Sem cargos há mais de {kick_after_days} dias")
-                        await bot.notify_roles(
-                            f"👢 {member.mention} foi expulso por estar sem cargos há mais de {kick_after_days} dias")
-                    except discord.Forbidden:
-                        await bot.log_action("Erro ao Expulsar", member, "Permissões insuficientes")
+            try:
+                # Verificar membros sem nenhum cargo (exceto @everyone)
+                if len(member.roles) == 1:
+                    # Verificar se já está sem cargo há mais de X dias
+                    joined_at = member.joined_at.replace(tzinfo=bot.timezone) if member.joined_at else None
+                    if joined_at and joined_at < cutoff_date:
+                        try:
+                            await member.kick(reason=f"Sem cargos há mais de {kick_after_days} dias")
+                            bot.db.log_kicked_member(member.id, guild.id, f"Sem cargos há mais de {kick_after_days} dias")
+                            await bot.log_action(
+                                "Membro Expulso",
+                                member,
+                                f"Motivo: Sem cargos há mais de {kick_after_days} dias")
+                            await bot.notify_roles(
+                                f"👢 {member.mention} foi expulso por estar sem cargos há mais de {kick_after_days} dias")
+                        except discord.Forbidden:
+                            await bot.log_action("Erro ao Expulsar", member, "Permissões insuficientes")
+            except Exception as e:
+                print(f"Erro ao verificar membro para expulsão {member}: {e}")
+                try:
+                    bot.db.reconnect()
+                except Exception as db_error:
+                    print(f"Falha ao reconectar ao banco de dados: {db_error}")
 
 # Comandos slash de administração
 @bot.tree.command(name="set_inactivity", description="Define o número de dias do período de monitoramento")
@@ -741,100 +844,120 @@ async def show_config(interaction: discord.Interaction):
 @commands.has_permissions(administrator=True)
 async def check_user(interaction: discord.Interaction, member: discord.Member):
     """Verifica a atividade de um usuário"""
-    user_data = bot.db.get_user_activity(member.id, member.guild.id)
-    last_join = user_data.get('last_voice_join')
-    sessions = user_data.get('voice_sessions', 0)
-    total_time = user_data.get('total_voice_time', 0)
-    last_warning = bot.db.get_last_warning(member.id, member.guild.id)
-    last_check = bot.db.get_last_period_check(member.id, member.guild.id)
-    
-    embed = discord.Embed(
-        title=f"Atividade de {member.display_name}",
-        color=discord.Color.green())
-    embed.add_field(
-        name="Última entrada em voz",
-        value=last_join.strftime("%d/%m/%Y %H:%M") if last_join else "Nunca",
-        inline=True)
-    embed.add_field(
-        name="Sessões de voz",
-        value=str(sessions),
-        inline=True)
-    embed.add_field(
-        name="Tempo total em voz",
-        value=f"{int(total_time//3600)}h {int((total_time%3600)//60)}m",
-        inline=True)
-    
-    if last_check:
-        period_end = last_check['period_end'].replace(tzinfo=bot.timezone)
-        days_remaining = (period_end - datetime.now(bot.timezone)).days
+    try:
+        user_data = bot.db.get_user_activity(member.id, member.guild.id)
+        last_join = user_data.get('last_voice_join')
+        sessions = user_data.get('voice_sessions', 0)
+        total_time = user_data.get('total_voice_time', 0)
+        last_warning = bot.db.get_last_warning(member.id, member.guild.id)
+        last_check = bot.db.get_last_period_check(member.id, member.guild.id)
+        
+        embed = discord.Embed(
+            title=f"Atividade de {member.display_name}",
+            color=discord.Color.green())
         embed.add_field(
-            name="Período Atual",
-            value=f"Termina em {days_remaining} dias",
-            inline=False)
-    
-    if last_warning:
-        warning_type, warning_date = last_warning
+            name="Última entrada em voz",
+            value=last_join.strftime("%d/%m/%Y %H:%M") if last_join else "Nunca",
+            inline=True)
         embed.add_field(
-            name="Último aviso recebido",
-            value=f"{warning_type} em {warning_date.strftime('%d/%m/%Y %H:%M')}",
-            inline=False)
-    
-    if last_join and last_check:
-        meets_requirements = last_check['meets_requirements']
-        status = "✅ Ativo (requisitos cumpridos)" if meets_requirements else "❌ Inativo (requisitos não cumpridos)"
-        embed.add_field(name="Status", value=status, inline=False)
-    
-    await interaction.response.send_message(embed=embed)
+            name="Sessões de voz",
+            value=str(sessions),
+            inline=True)
+        embed.add_field(
+            name="Tempo total em voz",
+            value=f"{int(total_time//3600)}h {int((total_time%3600)//60)}m",
+            inline=True)
+        
+        if last_check:
+            period_end = last_check['period_end'].replace(tzinfo=bot.timezone)
+            days_remaining = (period_end - datetime.now(bot.timezone)).days
+            embed.add_field(
+                name="Período Atual",
+                value=f"Termina em {days_remaining} dias",
+                inline=False)
+        
+        if last_warning:
+            warning_type, warning_date = last_warning
+            embed.add_field(
+                name="Último aviso recebido",
+                value=f"{warning_type} em {warning_date.strftime('%d/%m/%Y %H:%M')}",
+                inline=False)
+        
+        if last_join and last_check:
+            meets_requirements = last_check['meets_requirements']
+            status = "✅ Ativo (requisitos cumpridos)" if meets_requirements else "❌ Inativo (requisitos não cumpridos)"
+            embed.add_field(name="Status", value=status, inline=False)
+        
+        await interaction.response.send_message(embed=embed)
+    except Exception as e:
+        print(f"Erro ao verificar usuário: {e}")
+        await interaction.response.send_message(
+            "Ocorreu um erro ao verificar o usuário. Por favor, tente novamente mais tarde.",
+            ephemeral=True)
+        try:
+            bot.db.reconnect()
+        except Exception as db_error:
+            print(f"Falha ao reconectar ao banco de dados: {db_error}")
 
 @bot.tree.command(name="check_user_history", description="Verifica o histórico completo de um usuário")
 @commands.has_permissions(administrator=True)
 async def check_user_history(interaction: discord.Interaction, member: discord.Member):
     """Verifica o histórico completo de um usuário"""
-    user_data = bot.db.get_user_activity(member.id, member.guild.id)
-    last_warning = bot.db.get_last_warning(member.id, member.guild.id)
-    last_check = bot.db.get_last_period_check(member.id, member.guild.id)
-    
-    embed = discord.Embed(
-        title=f"Histórico de {member.display_name}",
-        color=discord.Color.blue())
-    
-    # Informações de atividade
-    if user_data:
-        last_join = user_data.get('last_voice_join')
-        last_leave = user_data.get('last_voice_leave')
-        sessions = user_data.get('voice_sessions', 0)
-        total_time = user_data.get('total_voice_time', 0)
+    try:
+        user_data = bot.db.get_user_activity(member.id, member.guild.id)
+        last_warning = bot.db.get_last_warning(member.id, member.guild.id)
+        last_check = bot.db.get_last_period_check(member.id, member.guild.id)
         
-        embed.add_field(
-            name="Atividade de Voz",
-            value=f"Última entrada: {last_join.strftime('%d/%m/%Y %H:%M') if last_join else 'Nunca'}\n"
-                  f"Última saída: {last_leave.strftime('%d/%m/%Y %H:%M') if last_leave else 'N/A'}\n"
-                  f"Sessões: {sessions}\n"
-                  f"Tempo total: {int(total_time//3600)}h {int((total_time%3600)//60)}m",
-            inline=False)
-    
-    # Último período verificado
-    if last_check:
-        period_start = last_check['period_start'].replace(tzinfo=bot.timezone)
-        period_end = last_check['period_end'].replace(tzinfo=bot.timezone)
-        meets_requirements = last_check['meets_requirements']
+        embed = discord.Embed(
+            title=f"Histórico de {member.display_name}",
+            color=discord.Color.blue())
         
-        embed.add_field(
-            name="Último Período Verificado",
-            value=f"De {period_start.strftime('%d/%m/%Y')} a {period_end.strftime('%d/%m/%Y')}\n"
-                  f"Status: {'✅ Cumpriu' if meets_requirements else '❌ Não cumpriu'} os requisitos",
-            inline=False)
-    
-    # Último aviso
-    if last_warning:
-        warning_type, warning_date = last_warning
-        embed.add_field(
-            name="Último Aviso",
-            value=f"Tipo: {warning_type}\n"
-                  f"Data: {warning_date.strftime('%d/%m/%Y %H:%M')}",
-            inline=False)
-    
-    await interaction.response.send_message(embed=embed)
+        # Informações de atividade
+        if user_data:
+            last_join = user_data.get('last_voice_join')
+            last_leave = user_data.get('last_voice_leave')
+            sessions = user_data.get('voice_sessions', 0)
+            total_time = user_data.get('total_voice_time', 0)
+            
+            embed.add_field(
+                name="Atividade de Voz",
+                value=f"Última entrada: {last_join.strftime('%d/%m/%Y %H:%M') if last_join else 'Nunca'}\n"
+                      f"Última saída: {last_leave.strftime('%d/%m/%Y %H:%M') if last_leave else 'N/A'}\n"
+                      f"Sessões: {sessions}\n"
+                      f"Tempo total: {int(total_time//3600)}h {int((total_time%3600)//60)}m",
+                inline=False)
+        
+        # Último período verificado
+        if last_check:
+            period_start = last_check['period_start'].replace(tzinfo=bot.timezone)
+            period_end = last_check['period_end'].replace(tzinfo=bot.timezone)
+            meets_requirements = last_check['meets_requirements']
+            
+            embed.add_field(
+                name="Último Período Verificado",
+                value=f"De {period_start.strftime('%d/%m/%Y')} a {period_end.strftime('%d/%m/%Y')}\n"
+                      f"Status: {'✅ Cumpriu' if meets_requirements else '❌ Não cumpriu'} os requisitos",
+                inline=False)
+        
+        # Último aviso
+        if last_warning:
+            warning_type, warning_date = last_warning
+            embed.add_field(
+                name="Último Aviso",
+                value=f"Tipo: {warning_type}\n"
+                      f"Data: {warning_date.strftime('%d/%m/%Y %H:%M')}",
+                inline=False)
+        
+        await interaction.response.send_message(embed=embed)
+    except Exception as e:
+        print(f"Erro ao verificar histórico do usuário: {e}")
+        await interaction.response.send_message(
+            "Ocorreu um erro ao verificar o histórico do usuário. Por favor, tente novamente mais tarde.",
+            ephemeral=True)
+        try:
+            bot.db.reconnect()
+        except Exception as db_error:
+            print(f"Falha ao reconectar ao banco de dados: {db_error}")
 
 # Iniciar o bot
 if __name__ == "__main__":
