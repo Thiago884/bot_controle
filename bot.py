@@ -73,19 +73,17 @@ class Database:
             print(f"Erro ao conectar ao MySQL: {e}")
             raise
 
-    def ensure_connection(self):
-        def decorator(func):
-            def wrapper(*args, **kwargs):
-                try:
-                    if not self.connection or not self.connection.is_connected():
-                        self.connect()
-                    return func(*args, **kwargs)
-                except (OperationalError, InterfaceError) as e:
-                    print(f"Erro de conexão, tentando reconectar: {e}")
+    def ensure_connection(self, func):
+        def wrapper(*args, **kwargs):
+            try:
+                if not self.connection or not self.connection.is_connected():
                     self.connect()
-                    return func(*args, **kwargs)
-            return wrapper
-        return decorator
+                return func(*args, **kwargs)
+            except (OperationalError, InterfaceError) as e:
+                print(f"Erro de conexão, tentando reconectar: {e}")
+                self.connect()
+                return func(*args, **kwargs)
+        return wrapper
 
     def reconnect(self):
         try:
@@ -172,7 +170,7 @@ class Database:
             if cursor:
                 cursor.close()
 
-    @ensure_connection()
+    @ensure_connection
     def log_voice_join(self, user_id: int, guild_id: int):
         cursor = None
         now = datetime.utcnow()
@@ -198,7 +196,7 @@ class Database:
             if cursor:
                 cursor.close()
 
-    @ensure_connection()
+    @ensure_connection
     def log_voice_leave(self, user_id: int, guild_id: int, duration: int):
         cursor = None
         now = datetime.utcnow()
@@ -232,7 +230,7 @@ class Database:
             if cursor:
                 cursor.close()
 
-    @ensure_connection()
+    @ensure_connection
     def get_user_activity(self, user_id: int, guild_id: int) -> Dict:
         cursor = None
         
@@ -253,7 +251,7 @@ class Database:
             if cursor:
                 cursor.close()
 
-    @ensure_connection()
+    @ensure_connection
     def get_voice_sessions(self, user_id: int, guild_id: int, start_date: datetime, end_date: datetime) -> List[Dict]:
         cursor = None
         
@@ -275,7 +273,7 @@ class Database:
             if cursor:
                 cursor.close()
 
-    @ensure_connection()
+    @ensure_connection
     def log_period_check(self, user_id: int, guild_id: int, start_date: datetime, end_date: datetime, meets_requirements: bool):
         cursor = None
         
@@ -299,7 +297,7 @@ class Database:
             if cursor:
                 cursor.close()
 
-    @ensure_connection()
+    @ensure_connection
     def get_last_period_check(self, user_id: int, guild_id: int) -> Optional[Dict]:
         cursor = None
         
@@ -321,7 +319,7 @@ class Database:
             if cursor:
                 cursor.close()
 
-    @ensure_connection()
+    @ensure_connection
     def log_warning(self, user_id: int, guild_id: int, warning_type: str):
         cursor = None
         now = datetime.utcnow()
@@ -346,7 +344,7 @@ class Database:
             if cursor:
                 cursor.close()
 
-    @ensure_connection()
+    @ensure_connection
     def get_last_warning(self, user_id: int, guild_id: int) -> Optional[Tuple[str, datetime]]:
         cursor = None
         
@@ -371,7 +369,7 @@ class Database:
             if cursor:
                 cursor.close()
 
-    @ensure_connection()
+    @ensure_connection
     def log_removed_roles(self, user_id: int, guild_id: int, role_ids: List[int]):
         cursor = None
         now = datetime.utcnow()
@@ -397,7 +395,7 @@ class Database:
             if cursor:
                 cursor.close()
 
-    @ensure_connection()
+    @ensure_connection
     def log_kicked_member(self, user_id: int, guild_id: int, reason: str):
         cursor = None
         now = datetime.utcnow()
