@@ -96,7 +96,6 @@ class Database:
         try:
             cursor = self.connection.cursor(dictionary=True)
             
-            # Tabela de atividade de usuários
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS user_activity (
                 user_id BIGINT,
@@ -108,7 +107,6 @@ class Database:
                 PRIMARY KEY (user_id, guild_id)
             )''')
             
-            # Tabela de sessões de voz detalhadas
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS voice_sessions (
                 id INT AUTO_INCREMENT PRIMARY KEY,
@@ -120,7 +118,6 @@ class Database:
                 INDEX (user_id, guild_id, join_time)
             )''')
             
-            # Tabela de avisos enviados
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS user_warnings (
                 user_id BIGINT,
@@ -130,7 +127,6 @@ class Database:
                 PRIMARY KEY (user_id, guild_id, warning_type)
             )''')
             
-            # Tabela de cargos removidos
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS removed_roles (
                 user_id BIGINT,
@@ -140,7 +136,6 @@ class Database:
                 PRIMARY KEY (user_id, guild_id, role_id)
             )''')
             
-            # Tabela de membros expulsos
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS kicked_members (
                 id INT AUTO_INCREMENT PRIMARY KEY,
@@ -150,7 +145,6 @@ class Database:
                 reason TEXT
             )''')
             
-            # Tabela de períodos verificados
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS checked_periods (
                 user_id BIGINT,
@@ -204,7 +198,6 @@ class Database:
         try:
             cursor = self.connection.cursor()
             
-            # Atualiza a atividade geral do usuário
             cursor.execute('''
             UPDATE user_activity 
             SET last_voice_leave = %s,
@@ -212,7 +205,6 @@ class Database:
             WHERE user_id = %s AND guild_id = %s
             ''', (now, duration, user_id, guild_id))
             
-            # Registra a sessão detalhada
             join_time = now - timedelta(seconds=duration)
             cursor.execute('''
             INSERT INTO voice_sessions
@@ -521,13 +513,11 @@ async def on_ready():
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
     try:
-        # Registrar entrada em canal de voz
         if before.channel is None and after.channel is not None:
             bot.db.log_voice_join(member.id, member.guild.id)
             bot.active_sessions[(member.id, member.guild.id)] = datetime.utcnow()
             await bot.log_action("Entrou em voz", member, f"Canal: {after.channel.name}")
         
-        # Registrar saída de canal de voz
         elif before.channel is not None and after.channel is None:
             session_start = bot.active_sessions.get((member.id, member.guild.id))
             if session_start:
@@ -560,7 +550,6 @@ async def inactivity_check():
         for member in guild.members:
             if any(role.id in tracked_roles for role in member.roles):
                 try:
-                    # Verificar se já foi verificado recentemente
                     last_check = bot.db.get_last_period_check(member.id, guild.id)
                     now = datetime.now(bot.timezone)
                     
@@ -569,14 +558,11 @@ async def inactivity_check():
                         if now < last_period_end:
                             continue
                     
-                    # Definir o período de verificação atual
                     period_end = now
                     period_start = period_end - timedelta(days=monitoring_period)
                     
-                    # Obter todas as sessões de voz no período
                     sessions = bot.db.get_voice_sessions(member.id, guild.id, period_start, period_end)
                     
-                    # Verificar se atende aos requisitos
                     meets_requirements = False
                     if sessions:
                         valid_days = set()
@@ -587,10 +573,8 @@ async def inactivity_check():
                         
                         meets_requirements = len(valid_days) >= required_days
                     
-                    # Registrar o resultado da verificação
                     bot.db.log_period_check(member.id, guild.id, period_start, period_end, meets_requirements)
                     
-                    # Se não atender aos requisitos, remover cargos
                     if not meets_requirements:
                         roles_to_remove = [role for role in member.roles if role.id in tracked_roles]
                         if roles_to_remove:
@@ -634,7 +618,6 @@ async def check_warnings():
         for member in guild.members:
             if any(role.id in tracked_roles for role in member.roles):
                 try:
-                    # Verificar o último período verificado
                     last_check = bot.db.get_last_period_check(member.id, guild.id)
                     if not last_check:
                         continue
@@ -642,15 +625,12 @@ async def check_warnings():
                     period_end = last_check['period_end'].replace(tzinfo=bot.timezone)
                     days_remaining = (period_end - datetime.now(bot.timezone)).days
                     
-                    # Obter último aviso
                     last_warning = bot.db.get_last_warning(member.id, guild.id)
                     
-                    # Primeiro aviso (3 dias antes do fim do período)
                     if days_remaining <= first_warning_days and (
                         not last_warning or last_warning[0] != 'first'):
                         await bot.send_warning(member, 'first')
                     
-                    # Segundo aviso (1 dia antes do fim do período)
                     elif days_remaining <= second_warning_days and (
                         not last_warning or last_warning[0] != 'second'):
                         await bot.send_warning(member, 'second')
@@ -674,9 +654,7 @@ async def cleanup_members():
     for guild in bot.guilds:
         for member in guild.members:
             try:
-                # Verificar membros sem nenhum cargo (exceto @everyone)
                 if len(member.roles) == 1:
-                    # Verificar se já está sem cargo há mais de X dias
                     joined_at = member.joined_at.replace(tzinfo=bot.timezone) if member.joined_at else None
                     if joined_at and joined_at < cutoff_date:
                         try:
@@ -697,11 +675,9 @@ async def cleanup_members():
                 except Exception as db_error:
                     print(f"Falha ao reconectar ao banco de dados: {db_error}")
 
-# Comandos slash de administração
 @bot.tree.command(name="set_inactivity", description="Define o número de dias do período de monitoramento")
 @commands.has_permissions(administrator=True)
 async def set_inactivity(interaction: discord.Interaction, days: int):
-    """Define o número de dias do período de monitoramento"""
     bot.config['monitoring_period'] = days
     bot.save_config()
     await interaction.response.send_message(
@@ -710,7 +686,6 @@ async def set_inactivity(interaction: discord.Interaction, days: int):
 @bot.tree.command(name="set_requirements", description="Define os requisitos de atividade (minutos e dias)")
 @commands.has_permissions(administrator=True)
 async def set_requirements(interaction: discord.Interaction, minutes: int, days: int):
-    """Define os requisitos de atividade (minutos necessários e dias diferentes)"""
     bot.config['required_minutes'] = minutes
     bot.config['required_days'] = days
     bot.save_config()
@@ -721,7 +696,6 @@ async def set_requirements(interaction: discord.Interaction, minutes: int, days:
 @bot.tree.command(name="set_kick_days", description="Define após quantos dias sem cargo o membro será expulso")
 @commands.has_permissions(administrator=True)
 async def set_kick_days(interaction: discord.Interaction, days: int):
-    """Define após quantos dias sem cargo o membro será expulso"""
     bot.config['kick_after_days'] = days
     bot.save_config()
     await interaction.response.send_message(
@@ -730,7 +704,6 @@ async def set_kick_days(interaction: discord.Interaction, days: int):
 @bot.tree.command(name="add_tracked_role", description="Adiciona um cargo à lista de cargos monitorados")
 @commands.has_permissions(administrator=True)
 async def add_tracked_role(interaction: discord.Interaction, role: discord.Role):
-    """Adiciona um cargo à lista de cargos monitorados"""
     if role.id not in bot.config['tracked_roles']:
         bot.config['tracked_roles'].append(role.id)
         bot.save_config()
@@ -742,7 +715,6 @@ async def add_tracked_role(interaction: discord.Interaction, role: discord.Role)
 @bot.tree.command(name="remove_tracked_role", description="Remove um cargo da lista de cargos monitorados")
 @commands.has_permissions(administrator=True)
 async def remove_tracked_role(interaction: discord.Interaction, role: discord.Role):
-    """Remove um cargo da lista de cargos monitorados"""
     if role.id in bot.config['tracked_roles']:
         bot.config['tracked_roles'].remove(role.id)
         bot.save_config()
@@ -754,7 +726,6 @@ async def remove_tracked_role(interaction: discord.Interaction, role: discord.Ro
 @bot.tree.command(name="set_notification_channel", description="Define o canal para notificações de cargos")
 @commands.has_permissions(administrator=True)
 async def set_notification_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    """Define o canal para notificações de cargos"""
     bot.config['notification_channel'] = channel.id
     bot.save_config()
     await interaction.response.send_message(f"Canal de notificações definido para {channel.mention}")
@@ -763,7 +734,6 @@ async def set_notification_channel(interaction: discord.Interaction, channel: di
 @bot.tree.command(name="set_warning_days", description="Define os dias para os avisos de inatividade")
 @commands.has_permissions(administrator=True)
 async def set_warning_days(interaction: discord.Interaction, first: int, second: int):
-    """Define os dias para os avisos de inatividade (primeiro e segundo aviso)"""
     if first <= second:
         return await interaction.response.send_message(
             "O primeiro aviso deve ser enviado antes do segundo aviso.")
@@ -777,7 +747,6 @@ async def set_warning_days(interaction: discord.Interaction, first: int, second:
 @bot.tree.command(name="set_warning_message", description="Define a mensagem para um tipo de aviso")
 @commands.has_permissions(administrator=True)
 async def set_warning_message(interaction: discord.Interaction, warning_type: str, message: str):
-    """Define a mensagem para um tipo de aviso (first, second, final)"""
     if warning_type not in ['first', 'second', 'final']:
         return await interaction.response.send_message(
             "Tipo de aviso inválido. Use 'first', 'second' ou 'final'.")
@@ -789,7 +758,6 @@ async def set_warning_message(interaction: discord.Interaction, warning_type: st
 @bot.tree.command(name="show_config", description="Mostra a configuração atual do bot")
 @commands.has_permissions(administrator=True)
 async def show_config(interaction: discord.Interaction):
-    """Mostra a configuração atual do bot"""
     config = bot.config
     tracked_roles = []
     for role_id in config['tracked_roles']:
@@ -843,7 +811,6 @@ async def show_config(interaction: discord.Interaction):
 @bot.tree.command(name="check_user", description="Verifica a atividade de um usuário")
 @commands.has_permissions(administrator=True)
 async def check_user(interaction: discord.Interaction, member: discord.Member):
-    """Verifica a atividade de um usuário"""
     try:
         user_data = bot.db.get_user_activity(member.id, member.guild.id)
         last_join = user_data.get('last_voice_join')
@@ -902,7 +869,6 @@ async def check_user(interaction: discord.Interaction, member: discord.Member):
 @bot.tree.command(name="check_user_history", description="Verifica o histórico completo de um usuário")
 @commands.has_permissions(administrator=True)
 async def check_user_history(interaction: discord.Interaction, member: discord.Member):
-    """Verifica o histórico completo de um usuário"""
     try:
         user_data = bot.db.get_user_activity(member.id, member.guild.id)
         last_warning = bot.db.get_last_warning(member.id, member.guild.id)
@@ -912,7 +878,6 @@ async def check_user_history(interaction: discord.Interaction, member: discord.M
             title=f"Histórico de {member.display_name}",
             color=discord.Color.blue())
         
-        # Informações de atividade
         if user_data:
             last_join = user_data.get('last_voice_join')
             last_leave = user_data.get('last_voice_leave')
@@ -927,7 +892,6 @@ async def check_user_history(interaction: discord.Interaction, member: discord.M
                       f"Tempo total: {int(total_time//3600)}h {int((total_time%3600)//60)}m",
                 inline=False)
         
-        # Último período verificado
         if last_check:
             period_start = last_check['period_start'].replace(tzinfo=bot.timezone)
             period_end = last_check['period_end'].replace(tzinfo=bot.timezone)
@@ -939,7 +903,6 @@ async def check_user_history(interaction: discord.Interaction, member: discord.M
                       f"Status: {'✅ Cumpriu' if meets_requirements else '❌ Não cumpriu'} os requisitos",
                 inline=False)
         
-        # Último aviso
         if last_warning:
             warning_type, warning_date = last_warning
             embed.add_field(
@@ -961,20 +924,16 @@ async def check_user_history(interaction: discord.Interaction, member: discord.M
 
 # Iniciar o bot
 if __name__ == "__main__":
-    # Configuração para o Render (usando variáveis de ambiente)
     from dotenv import load_dotenv
     
-    load_dotenv()  # Carrega variáveis de ambiente do arquivo .env
+    load_dotenv()
     
-    # Verifica se todas as variáveis de ambiente necessárias estão definidas
     required_env_vars = ['DISCORD_TOKEN', 'DB_HOST', 'DB_NAME', 'DB_USER', 'DB_PASS']
     missing_vars = [var for var in required_env_vars if not os.getenv(var)]
     
     if missing_vars:
         raise ValueError(f"Variáveis de ambiente ausentes: {', '.join(missing_vars)}")
     
-    # Inicia o servidor Flask para health checks
     keep_alive()
     
-    # Inicia o bot Discord
     bot.run(os.getenv('DISCORD_TOKEN'))
