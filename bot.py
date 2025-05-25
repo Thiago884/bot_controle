@@ -52,37 +52,43 @@ def keep_alive():
 class Database:
     def __init__(self):
         self.connection = None
-        self.connect()
+        self.connect(retries=3, delay=5)
         self.create_tables()
 
-    def connect(self):
-        try:
-            self.connection = mysql.connector.connect(
-                host=os.getenv('DB_HOST'),
-                database=os.getenv('DB_NAME'),
-                user=os.getenv('DB_USER'),
-                password=os.getenv('DB_PASS'),
-                port=int(os.getenv('DB_PORT', 3306)),
-                pool_name="bot_pool",
-                pool_size=3,
-                pool_reset_session=True
-            )
-            if self.connection.is_connected():
-                print("Conexão ao MySQL estabelecida com sucesso")
-        except Error as e:
-            print(f"Erro ao conectar ao MySQL: {e}")
-            raise
+    def connect(self, retries=3, delay=5):
+        for attempt in range(retries):
+            try:
+                self.connection = mysql.connector.connect(
+                    host=os.getenv('DB_HOST'),
+                    database=os.getenv('DB_NAME'),
+                    user=os.getenv('DB_USER'),
+                    password=os.getenv('DB_PASS'),
+                    port=int(os.getenv('DB_PORT', 3306)),
+                    pool_name="bot_pool",
+                    pool_size=3,
+                    pool_reset_session=True
+                )
+                if self.connection.is_connected():
+                    print("Conexão ao MySQL estabelecida com sucesso")
+                    return
+            except Error as e:
+                print(f"Erro ao conectar ao MySQL (tentativa {attempt + 1}/{retries}): {e}")
+                if attempt < retries - 1:
+                    time.sleep(delay)
+                else:
+                    raise
 
-    def ensure_connection(self, func):
-        def wrapper(*args, **kwargs):
+    @staticmethod
+    def ensure_connection(func):
+        def wrapper(self, *args, **kwargs):
             try:
                 if not self.connection or not self.connection.is_connected():
                     self.connect()
-                return func(*args, **kwargs)
+                return func(self, *args, **kwargs)
             except (OperationalError, InterfaceError) as e:
                 print(f"Erro de conexão, tentando reconectar: {e}")
                 self.connect()
-                return func(*args, **kwargs)
+                return func(self, *args, **kwargs)
         return wrapper
 
     def reconnect(self):
@@ -514,25 +520,29 @@ async def on_ready():
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
     try:
         if before.channel is None and after.channel is not None:
-            bot.db.log_voice_join(member.id, member.guild.id)
-            bot.active_sessions[(member.id, member.guild.id)] = datetime.utcnow()
-            await bot.log_action("Entrou em voz", member, f"Canal: {after.channel.name}")
+            try:
+                bot.db.log_voice_join(member.id, member.guild.id)
+                bot.active_sessions[(member.id, member.guild.id)] = datetime.utcnow()
+                await bot.log_action("Entrou em voz", member, f"Canal: {after.channel.name}")
+            except Exception as e:
+                print(f"Erro ao registrar entrada em voz: {e}")
+                await bot.log_action("Erro DB - Entrada em voz", member, str(e))
         
         elif before.channel is not None and after.channel is None:
             session_start = bot.active_sessions.get((member.id, member.guild.id))
             if session_start:
                 duration = (datetime.utcnow() - session_start).total_seconds()
                 if duration >= bot.config['required_minutes'] * 60:
-                    bot.db.log_voice_leave(member.id, member.guild.id, int(duration))
+                    try:
+                        bot.db.log_voice_leave(member.id, member.guild.id, int(duration))
+                    except Exception as e:
+                        print(f"Erro ao registrar saída de voz: {e}")
+                        await bot.log_action("Erro DB - Saída de voz", member, str(e))
                 del bot.active_sessions[(member.id, member.guild.id)]
                 await bot.log_action("Saiu de voz", member, 
                                    f"Canal: {before.channel.name} | Duração: {int(duration//60)} minutos")
     except Exception as e:
         print(f"Erro ao processar atualização de estado de voz: {e}")
-        try:
-            bot.db.reconnect()
-        except Exception as db_error:
-            print(f"Falha ao reconectar ao banco de dados: {db_error}")
 
 @tasks.loop(hours=24)
 async def inactivity_check():
