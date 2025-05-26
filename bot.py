@@ -12,17 +12,42 @@ from mysql.connector.errors import OperationalError, InterfaceError
 from typing import Dict, List, Optional, Tuple
 from flask import Flask, jsonify
 from threading import Thread
+import logging
+from logging.handlers import RotatingFileHandler
+
+# Configuração do logger
+def setup_logger():
+    logger = logging.getLogger('inactivity_bot')
+    logger.setLevel(logging.INFO)
+    
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    
+    file_handler = RotatingFileHandler(
+        'bot.log', 
+        maxBytes=5*1024*1024,
+        backupCount=3
+    )
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+    
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+    
+    return logger
+
+logger = setup_logger()
 
 # Configurações iniciais
 CONFIG_FILE = 'config.json'
 DEFAULT_CONFIG = {
-    "required_minutes": 15,  # Minutos necessários por sessão
-    "required_days": 2,      # Dias diferentes com atividade necessária
-    "monitoring_period": 14, # Período de monitoramento em dias
+    "required_minutes": 15,
+    "required_days": 2,
+    "monitoring_period": 14,
     "kick_after_days": 30,
     "tracked_roles": [],
-    "log_channel": 1376013013206827161,  # Canal principal do bot
-    "notification_channel": None,  # Canal para notificar cargos
+    "log_channel": 1376013013206827161,
+    "notification_channel": None,
     "timezone": "America/Sao_Paulo",
     "warnings": {
         "first_warning": 3,
@@ -65,19 +90,19 @@ class Database:
                     password=os.getenv('DB_PASS'),
                     port=int(os.getenv('DB_PORT', 3306)),
                     pool_name="bot_pool",
-                    pool_size=10,  # Aumentado de 3 para 10
+                    pool_size=10,
                     pool_reset_session=True,
-                    connect_timeout=30,  # Adicionado timeout
-                    connection_timeout=30  # Adicionado timeout
+                    connect_timeout=30,
+                    connection_timeout=30
                 )
                 if self.connection.is_connected():
-                    print("Conexão ao MySQL estabelecida com sucesso")
+                    logger.info("Conexão ao MySQL estabelecida com sucesso")
                     return
             except Error as e:
-                print(f"Erro ao conectar ao MySQL (tentativa {attempt + 1}/{retries}): {e}")
+                logger.error(f"Erro ao conectar ao MySQL (tentativa {attempt + 1}/{retries}): {e}")
                 if attempt < retries - 1:
-                    sleep_time = initial_delay * (2 ** attempt)  # Backoff exponencial
-                    print(f"Tentando novamente em {sleep_time} segundos...")
+                    sleep_time = initial_delay * (2 ** attempt)
+                    logger.info(f"Tentando novamente em {sleep_time} segundos...")
                     time.sleep(sleep_time)
                 else:
                     raise
@@ -85,24 +110,28 @@ class Database:
     @staticmethod
     def ensure_connection(func):
         async def wrapper(self, *args, **kwargs):
-            try:
-                if not self.connection or not self.connection.is_connected():
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    if not self.connection or not self.connection.is_connected():
+                        self.connect()
+                    return await func(self, *args, **kwargs)
+                except (OperationalError, InterfaceError) as e:
+                    logger.error(f"Erro de conexão (tentativa {attempt + 1}/{max_retries}): {e}")
+                    if attempt == max_retries - 1:
+                        raise
+                    time.sleep(2 ** attempt)
                     self.connect()
-                return await func(self, *args, **kwargs)
-            except (OperationalError, InterfaceError) as e:
-                print(f"Erro de conexão, tentando reconectar: {e}")
-                self.connect()
-                return await func(self, *args, **kwargs)
-            except Exception as e:
-                print(f"Erro inesperado: {e}")
-                raise
+                except Exception as e:
+                    logger.error(f"Erro inesperado: {e}")
+                    raise
         return wrapper
 
     def reconnect(self):
         try:
             self.connection.reconnect(attempts=3, delay=1)
         except Exception as e:
-            print(f"Falha ao reconectar: {e}")
+            logger.error(f"Falha ao reconectar: {e}")
             self.connect()
 
     def create_tables(self):
@@ -118,7 +147,10 @@ class Database:
                 last_voice_leave DATETIME,
                 voice_sessions INT DEFAULT 0,
                 total_voice_time INT DEFAULT 0,
-                PRIMARY KEY (user_id, guild_id)
+                PRIMARY KEY (user_id, guild_id),
+                INDEX idx_guild_user (guild_id, user_id),
+                INDEX idx_last_join (last_voice_join),
+                INDEX idx_last_leave (last_voice_leave)
             )''')
             
             cursor.execute('''
@@ -129,7 +161,10 @@ class Database:
                 join_time DATETIME,
                 leave_time DATETIME,
                 duration INT,
-                INDEX (user_id, guild_id, join_time)
+                INDEX idx_user_guild (user_id, guild_id),
+                INDEX idx_join_time (join_time),
+                INDEX idx_leave_time (leave_time),
+                INDEX idx_user_guild_time (user_id, guild_id, join_time, leave_time)
             )''')
             
             cursor.execute('''
@@ -138,7 +173,9 @@ class Database:
                 guild_id BIGINT,
                 warning_type VARCHAR(20),
                 warning_date DATETIME,
-                PRIMARY KEY (user_id, guild_id, warning_type)
+                PRIMARY KEY (user_id, guild_id, warning_type),
+                INDEX idx_warning_date (warning_date),
+                INDEX idx_user_guild_warning (user_id, guild_id, warning_type, warning_date)
             )''')
             
             cursor.execute('''
@@ -147,7 +184,8 @@ class Database:
                 guild_id BIGINT,
                 role_id BIGINT,
                 removal_date DATETIME,
-                PRIMARY KEY (user_id, guild_id, role_id)
+                PRIMARY KEY (user_id, guild_id, role_id),
+                INDEX idx_removal_date (removal_date)
             )''')
             
             cursor.execute('''
@@ -156,7 +194,9 @@ class Database:
                 user_id BIGINT,
                 guild_id BIGINT,
                 kick_date DATETIME,
-                reason TEXT
+                reason TEXT,
+                INDEX idx_user_guild (user_id, guild_id),
+                INDEX idx_kick_date (kick_date)
             )''')
             
             cursor.execute('''
@@ -166,13 +206,16 @@ class Database:
                 period_start DATETIME,
                 period_end DATETIME,
                 meets_requirements BOOLEAN,
-                PRIMARY KEY (user_id, guild_id, period_start)
+                PRIMARY KEY (user_id, guild_id, period_start),
+                INDEX idx_period_end (period_end),
+                INDEX idx_requirements (meets_requirements),
+                INDEX idx_user_guild_period (user_id, guild_id, period_start, period_end)
             )''')
             
             self.connection.commit()
-            print("Tabelas criadas/verificadas com sucesso")
+            logger.info("Tabelas criadas/verificadas com sucesso")
         except Error as e:
-            print(f"Erro ao criar tabelas: {e}")
+            logger.error(f"Erro ao criar tabelas: {e}")
             raise
         finally:
             if cursor:
@@ -196,7 +239,7 @@ class Database:
             
             self.connection.commit()
         except Error as e:
-            print(f"Erro ao registrar entrada em voz: {e}")
+            logger.error(f"Erro ao registrar entrada em voz: {e}")
             if self.connection:
                 self.connection.rollback()
             raise
@@ -228,7 +271,7 @@ class Database:
             
             self.connection.commit()
         except Error as e:
-            print(f"Erro ao registrar saída de voz: {e}")
+            logger.error(f"Erro ao registrar saída de voz: {e}")
             if self.connection:
                 self.connection.rollback()
             raise
@@ -251,7 +294,7 @@ class Database:
             result = cursor.fetchone()
             return result if result else {}
         except Error as e:
-            print(f"Erro ao obter atividade do usuário: {e}")
+            logger.error(f"Erro ao obter atividade do usuário: {e}")
             return {}
         finally:
             if cursor:
@@ -273,7 +316,7 @@ class Database:
             
             return cursor.fetchall()
         except Error as e:
-            print(f"Erro ao obter sessões de voz: {e}")
+            logger.error(f"Erro ao obter sessões de voz: {e}")
             return []
         finally:
             if cursor:
@@ -295,7 +338,7 @@ class Database:
             
             self.connection.commit()
         except Error as e:
-            print(f"Erro ao registrar verificação de período: {e}")
+            logger.error(f"Erro ao registrar verificação de período: {e}")
             if self.connection:
                 self.connection.rollback()
             raise
@@ -319,7 +362,7 @@ class Database:
             
             return cursor.fetchone()
         except Error as e:
-            print(f"Erro ao obter última verificação de período: {e}")
+            logger.error(f"Erro ao obter última verificação de período: {e}")
             return None
         finally:
             if cursor:
@@ -342,7 +385,7 @@ class Database:
             
             self.connection.commit()
         except Error as e:
-            print(f"Erro ao registrar aviso: {e}")
+            logger.error(f"Erro ao registrar aviso: {e}")
             if self.connection:
                 self.connection.rollback()
             raise
@@ -369,7 +412,7 @@ class Database:
                 return result['warning_type'], result['warning_date']
             return None
         except Error as e:
-            print(f"Erro ao obter último aviso: {e}")
+            logger.error(f"Erro ao obter último aviso: {e}")
             return None
         finally:
             if cursor:
@@ -393,7 +436,7 @@ class Database:
             
             self.connection.commit()
         except Error as e:
-            print(f"Erro ao registrar cargos removidos: {e}")
+            logger.error(f"Erro ao registrar cargos removidos: {e}")
             if self.connection:
                 self.connection.rollback()
             raise
@@ -416,7 +459,7 @@ class Database:
             
             self.connection.commit()
         except Error as e:
-            print(f"Erro ao registrar membro expulso: {e}")
+            logger.error(f"Erro ao registrar membro expulso: {e}")
             if self.connection:
                 self.connection.rollback()
             raise
@@ -427,9 +470,9 @@ class Database:
     @ensure_connection
     async def log_pool_status(self):
         try:
-            print(f"Pool status: {self.connection.pool_size()} connections, {self.connection.pool_name()}")
+            logger.info(f"Pool status: {self.connection.pool_size()} connections, {self.connection.pool_name()}")
         except Exception as e:
-            print(f"Erro ao verificar status do pool: {e}")
+            logger.error(f"Erro ao verificar status do pool: {e}")
 
 class InactivityBot(commands.Bot):
     def __init__(self, *args, **kwargs):
@@ -448,67 +491,85 @@ class InactivityBot(commands.Bot):
                 self.db = Database()
                 break
             except Error as e:
-                print(f"Tentativa {attempt + 1} de conexão ao banco de dados falhou: {e}")
+                logger.error(f"Tentativa {attempt + 1} de conexão ao banco de dados falhou: {e}")
                 if attempt == max_retries - 1:
                     raise
                 time.sleep(5)
 
     def load_config(self):
-        if os.path.exists(CONFIG_FILE):
-            with open(CONFIG_FILE, 'r') as f:
-                self.config = json.load(f)
-        else:
+        try:
+            if os.path.exists(CONFIG_FILE):
+                with open(CONFIG_FILE, 'r') as f:
+                    self.config = json.load(f)
+            else:
+                self.config = DEFAULT_CONFIG
+                self.save_config()
+        except Exception as e:
+            logger.error(f"Erro ao carregar configuração: {e}")
             self.config = DEFAULT_CONFIG
-            self.save_config()
 
     def save_config(self):
-        with open(CONFIG_FILE, 'w') as f:
-            json.dump(self.config, f, indent=4)
+        try:
+            with open(CONFIG_FILE, 'w') as f:
+                json.dump(self.config, f, indent=4)
+        except Exception as e:
+            logger.error(f"Erro ao salvar configuração: {e}")
 
     async def log_action(self, action: str, member: discord.Member, details: str = None):
-        channel = self.get_channel(self.config.get('log_channel', 1376013013206827161))
-        if channel:
-            embed = discord.Embed(
-                title=f"Ação: {action}",
-                description=f"Usuário: {member.mention}",
-                color=discord.Color.orange(),
-                timestamp=datetime.now(self.timezone)
-            )
-            if details:
-                embed.add_field(name="Detalhes", value=details, inline=False)
-            await channel.send(embed=embed)
+        try:
+            channel = self.get_channel(self.config.get('log_channel', 1376013013206827161))
+            if channel:
+                embed = discord.Embed(
+                    title=f"Ação: {action}",
+                    description=f"Usuário: {member.mention}",
+                    color=discord.Color.orange(),
+                    timestamp=datetime.now(self.timezone)
+                )
+                if details:
+                    embed.add_field(name="Detalhes", value=details, inline=False)
+                await channel.send(embed=embed)
+        except Exception as e:
+            logger.error(f"Erro ao registrar ação no log: {e}")
 
     async def notify_roles(self, message: str):
-        channel = self.get_channel(self.config.get('notification_channel'))
-        if channel:
-            await channel.send(message)
+        try:
+            channel = self.get_channel(self.config.get('notification_channel'))
+            if channel:
+                await channel.send(message)
+        except Exception as e:
+            logger.error(f"Erro ao enviar notificação de cargos: {e}")
 
     async def send_dm(self, member: discord.Member, message: str):
         try:
             await member.send(message)
         except discord.Forbidden:
             await self.log_action("DM Falhou", member, "Não foi possível enviar mensagem direta para o usuário.")
+        except Exception as e:
+            logger.error(f"Erro ao enviar DM para {member}: {e}")
 
     async def send_warning(self, member: discord.Member, warning_type: str):
-        warnings_config = self.config.get('warnings', {})
-        messages = warnings_config.get('messages', {})
-        
-        if warning_type == 'first' and 'first' in messages:
-            message = messages['first'].format(
-                days=self.config['warnings']['first_warning'],
-                monitoring_period=self.config['monitoring_period'])
-        elif warning_type == 'second' and 'second' in messages:
-            message = messages['second']
-        elif warning_type == 'final' and 'final' in messages:
-            message = messages['final'].format(
-                guild=member.guild.name,
-                monitoring_period=self.config['monitoring_period'])
-        else:
-            return
-        
-        await self.send_dm(member, message)
-        await self.db.log_warning(member.id, member.guild.id, warning_type)
-        await self.log_action(f"Aviso Enviado ({warning_type})", member)
+        try:
+            warnings_config = self.config.get('warnings', {})
+            messages = warnings_config.get('messages', {})
+            
+            if warning_type == 'first' and 'first' in messages:
+                message = messages['first'].format(
+                    days=self.config['warnings']['first_warning'],
+                    monitoring_period=self.config['monitoring_period'])
+            elif warning_type == 'second' and 'second' in messages:
+                message = messages['second']
+            elif warning_type == 'final' and 'final' in messages:
+                message = messages['final'].format(
+                    guild=member.guild.name,
+                    monitoring_period=self.config['monitoring_period'])
+            else:
+                return
+            
+            await self.send_dm(member, message)
+            await self.db.log_warning(member.id, member.guild.id, warning_type)
+            await self.log_action(f"Aviso Enviado ({warning_type})", member)
+        except Exception as e:
+            logger.error(f"Erro ao enviar aviso para {member}: {e}")
 
 intents = discord.Intents.default()
 intents.members = True
@@ -519,12 +580,12 @@ bot = InactivityBot(command_prefix='!', intents=intents)
 
 @bot.event
 async def on_ready():
-    print(f'Bot conectado como {bot.user}')
+    logger.info(f'Bot conectado como {bot.user}')
     try:
         synced = await bot.tree.sync()
-        print(f"Comandos slash sincronizados: {len(synced)} comandos")
+        logger.info(f"Comandos slash sincronizados: {len(synced)} comandos")
     except Exception as e:
-        print(f"Erro ao sincronizar comandos slash: {e}")
+        logger.error(f"Erro ao sincronizar comandos slash: {e}")
     
     inactivity_check.start()
     cleanup_members.start()
@@ -540,7 +601,7 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
                 bot.active_sessions[(member.id, member.guild.id)] = datetime.utcnow()
                 await bot.log_action("Entrou em voz", member, f"Canal: {after.channel.name}")
             except Exception as e:
-                print(f"Erro ao registrar entrada em voz: {e}")
+                logger.error(f"Erro ao registrar entrada em voz: {e}")
                 await bot.log_action("Erro DB - Entrada em voz", member, str(e))
         
         elif before.channel is not None and after.channel is None:
@@ -551,13 +612,13 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
                     try:
                         await bot.db.log_voice_leave(member.id, member.guild.id, int(duration))
                     except Exception as e:
-                        print(f"Erro ao registrar saída de voz: {e}")
+                        logger.error(f"Erro ao registrar saída de voz: {e}")
                         await bot.log_action("Erro DB - Saída de voz", member, str(e))
                 del bot.active_sessions[(member.id, member.guild.id)]
                 await bot.log_action("Saiu de voz", member, 
                                    f"Canal: {before.channel.name} | Duração: {int(duration//60)} minutos")
     except Exception as e:
-        print(f"Erro ao processar atualização de estado de voz: {e}")
+        logger.error(f"Erro ao processar atualização de estado de voz: {e}")
 
 @tasks.loop(hours=24)
 async def inactivity_check():
@@ -616,12 +677,14 @@ async def inactivity_check():
                                     ", ".join([f"`{r.name}`" for r in roles_to_remove]))
                             except discord.Forbidden:
                                 await bot.log_action("Erro ao Remover Cargo", member, "Permissões insuficientes")
+                            except Exception as e:
+                                logger.error(f"Erro ao remover cargos de {member}: {e}")
                 except Exception as e:
-                    print(f"Erro ao verificar inatividade para {member}: {e}")
+                    logger.error(f"Erro ao verificar inatividade para {member}: {e}")
                     try:
                         bot.db.reconnect()
                     except Exception as db_error:
-                        print(f"Falha ao reconectar ao banco de dados: {db_error}")
+                        logger.error(f"Falha ao reconectar ao banco de dados: {db_error}")
 
 @tasks.loop(hours=24)
 async def check_warnings():
@@ -660,11 +723,11 @@ async def check_warnings():
                         not last_warning or last_warning[0] != 'second'):
                         await bot.send_warning(member, 'second')
                 except Exception as e:
-                    print(f"Erro ao verificar avisos para {member}: {e}")
+                    logger.error(f"Erro ao verificar avisos para {member}: {e}")
                     try:
                         bot.db.reconnect()
                     except Exception as db_error:
-                        print(f"Falha ao reconectar ao banco de dados: {db_error}")
+                        logger.error(f"Falha ao reconectar ao banco de dados: {db_error}")
 
 @tasks.loop(hours=24)
 async def cleanup_members():
@@ -693,145 +756,201 @@ async def cleanup_members():
                                 f"👢 {member.mention} foi expulso por estar sem cargos há mais de {kick_after_days} dias")
                         except discord.Forbidden:
                             await bot.log_action("Erro ao Expulsar", member, "Permissões insuficientes")
+                        except Exception as e:
+                            logger.error(f"Erro ao expulsar membro {member}: {e}")
             except Exception as e:
-                print(f"Erro ao verificar membro para expulsão {member}: {e}")
+                logger.error(f"Erro ao verificar membro para expulsão {member}: {e}")
                 try:
                     bot.db.reconnect()
                 except Exception as db_error:
-                    print(f"Falha ao reconectar ao banco de dados: {db_error}")
+                    logger.error(f"Falha ao reconectar ao banco de dados: {db_error}")
 
 @bot.tree.command(name="set_inactivity", description="Define o número de dias do período de monitoramento")
 @commands.has_permissions(administrator=True)
 async def set_inactivity(interaction: discord.Interaction, days: int):
-    bot.config['monitoring_period'] = days
-    bot.save_config()
-    await interaction.response.send_message(
-        f"Configuração atualizada: Período de monitoramento definido para {days} dias.")
+    try:
+        bot.config['monitoring_period'] = days
+        bot.save_config()
+        await interaction.response.send_message(
+            f"Configuração atualizada: Período de monitoramento definido para {days} dias.")
+    except Exception as e:
+        logger.error(f"Erro ao definir período de inatividade: {e}")
+        await interaction.response.send_message(
+            "Ocorreu um erro ao atualizar a configuração. Por favor, tente novamente.",
+            ephemeral=True)
 
 @bot.tree.command(name="set_requirements", description="Define os requisitos de atividade (minutos e dias)")
 @commands.has_permissions(administrator=True)
 async def set_requirements(interaction: discord.Interaction, minutes: int, days: int):
-    bot.config['required_minutes'] = minutes
-    bot.config['required_days'] = days
-    bot.save_config()
-    await interaction.response.send_message(
-        f"Configuração atualizada: Requisitos definidos para {minutes} minutos em {days} dias diferentes "
-        f"dentro de {bot.config['monitoring_period']} dias.")
+    try:
+        bot.config['required_minutes'] = minutes
+        bot.config['required_days'] = days
+        bot.save_config()
+        await interaction.response.send_message(
+            f"Configuração atualizada: Requisitos definidos para {minutes} minutos em {days} dias diferentes "
+            f"dentro de {bot.config['monitoring_period']} dias.")
+    except Exception as e:
+        logger.error(f"Erro ao definir requisitos: {e}")
+        await interaction.response.send_message(
+            "Ocorreu um erro ao atualizar a configuração. Por favor, tente novamente.",
+            ephemeral=True)
 
 @bot.tree.command(name="set_kick_days", description="Define após quantos dias sem cargo o membro será expulso")
 @commands.has_permissions(administrator=True)
 async def set_kick_days(interaction: discord.Interaction, days: int):
-    bot.config['kick_after_days'] = days
-    bot.save_config()
-    await interaction.response.send_message(
-        f"Configuração atualizada: Membros sem cargo serão expulsos após {days} dias.")
+    try:
+        bot.config['kick_after_days'] = days
+        bot.save_config()
+        await interaction.response.send_message(
+            f"Configuração atualizada: Membros sem cargo serão expulsos após {days} dias.")
+    except Exception as e:
+        logger.error(f"Erro ao definir dias para expulsão: {e}")
+        await interaction.response.send_message(
+            "Ocorreu um erro ao atualizar a configuração. Por favor, tente novamente.",
+            ephemeral=True)
 
 @bot.tree.command(name="add_tracked_role", description="Adiciona um cargo à lista de cargos monitorados")
 @commands.has_permissions(administrator=True)
 async def add_tracked_role(interaction: discord.Interaction, role: discord.Role):
-    if role.id not in bot.config['tracked_roles']:
-        bot.config['tracked_roles'].append(role.id)
-        bot.save_config()
-        await interaction.response.send_message(f"Cargo {role.name} adicionado à lista de monitorados.")
-        await bot.notify_roles(f"🔔 Cargo `{role.name}` adicionado à lista de monitorados de inatividade.")
-    else:
-        await interaction.response.send_message("Este cargo já está sendo monitorado.")
+    try:
+        if role.id not in bot.config['tracked_roles']:
+            bot.config['tracked_roles'].append(role.id)
+            bot.save_config()
+            await interaction.response.send_message(f"Cargo {role.name} adicionado à lista de monitorados.")
+            await bot.notify_roles(f"🔔 Cargo `{role.name}` adicionado à lista de monitorados de inatividade.")
+        else:
+            await interaction.response.send_message("Este cargo já está sendo monitorado.")
+    except Exception as e:
+        logger.error(f"Erro ao adicionar cargo monitorado: {e}")
+        await interaction.response.send_message(
+            "Ocorreu um erro ao adicionar o cargo. Por favor, tente novamente.",
+            ephemeral=True)
 
 @bot.tree.command(name="remove_tracked_role", description="Remove um cargo da lista de cargos monitorados")
 @commands.has_permissions(administrator=True)
 async def remove_tracked_role(interaction: discord.Interaction, role: discord.Role):
-    if role.id in bot.config['tracked_roles']:
-        bot.config['tracked_roles'].remove(role.id)
-        bot.save_config()
-        await interaction.response.send_message(f"Cargo {role.name} removido da lista de monitorados.")
-        await bot.notify_roles(f"🔕 Cargo `{role.name}` removido da lista de monitorados de inatividade.")
-    else:
-        await interaction.response.send_message("Este cargo não estava sendo monitorado.")
+    try:
+        if role.id in bot.config['tracked_roles']:
+            bot.config['tracked_roles'].remove(role.id)
+            bot.save_config()
+            await interaction.response.send_message(f"Cargo {role.name} removido da lista de monitorados.")
+            await bot.notify_roles(f"🔕 Cargo `{role.name}` removido da lista de monitorados de inatividade.")
+        else:
+            await interaction.response.send_message("Este cargo não estava sendo monitorado.")
+    except Exception as e:
+        logger.error(f"Erro ao remover cargo monitorado: {e}")
+        await interaction.response.send_message(
+            "Ocorreu um erro ao remover o cargo. Por favor, tente novamente.",
+            ephemeral=True)
 
 @bot.tree.command(name="set_notification_channel", description="Define o canal para notificações de cargos")
 @commands.has_permissions(administrator=True)
 async def set_notification_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    bot.config['notification_channel'] = channel.id
-    bot.save_config()
-    await interaction.response.send_message(f"Canal de notificações definido para {channel.mention}")
-    await channel.send("✅ Este canal foi definido como o canal de notificações de cargos!")
+    try:
+        bot.config['notification_channel'] = channel.id
+        bot.save_config()
+        await interaction.response.send_message(f"Canal de notificações definido para {channel.mention}")
+        await channel.send("✅ Este canal foi definido como o canal de notificações de cargos!")
+    except Exception as e:
+        logger.error(f"Erro ao definir canal de notificações: {e}")
+        await interaction.response.send_message(
+            "Ocorreu um erro ao definir o canal. Por favor, tente novamente.",
+            ephemeral=True)
 
 @bot.tree.command(name="set_warning_days", description="Define os dias para os avisos de inatividade")
 @commands.has_permissions(administrator=True)
 async def set_warning_days(interaction: discord.Interaction, first: int, second: int):
-    if first <= second:
-        return await interaction.response.send_message(
-            "O primeiro aviso deve ser enviado antes do segundo aviso.")
-    
-    bot.config['warnings']['first_warning'] = first
-    bot.config['warnings']['second_warning'] = second
-    bot.save_config()
-    await interaction.response.send_message(
-        f"Avisos configurados: primeiro aviso {first} dias antes, segundo aviso {second} dia(s) antes.")
+    try:
+        if first <= second:
+            return await interaction.response.send_message(
+                "O primeiro aviso deve ser enviado antes do segundo aviso.")
+        
+        bot.config['warnings']['first_warning'] = first
+        bot.config['warnings']['second_warning'] = second
+        bot.save_config()
+        await interaction.response.send_message(
+            f"Avisos configurados: primeiro aviso {first} dias antes, segundo aviso {second} dia(s) antes.")
+    except Exception as e:
+        logger.error(f"Erro ao configurar dias de aviso: {e}")
+        await interaction.response.send_message(
+            "Ocorreu um erro ao configurar os avisos. Por favor, tente novamente.",
+            ephemeral=True)
 
 @bot.tree.command(name="set_warning_message", description="Define a mensagem para um tipo de aviso")
 @commands.has_permissions(administrator=True)
 async def set_warning_message(interaction: discord.Interaction, warning_type: str, message: str):
-    if warning_type not in ['first', 'second', 'final']:
-        return await interaction.response.send_message(
-            "Tipo de aviso inválido. Use 'first', 'second' ou 'final'.")
-    
-    bot.config['warnings']['messages'][warning_type] = message
-    bot.save_config()
-    await interaction.response.send_message(f"Mensagem de {warning_type} atualizada com sucesso.")
+    try:
+        if warning_type not in ['first', 'second', 'final']:
+            return await interaction.response.send_message(
+                "Tipo de aviso inválido. Use 'first', 'second' ou 'final'.")
+        
+        bot.config['warnings']['messages'][warning_type] = message
+        bot.save_config()
+        await interaction.response.send_message(f"Mensagem de {warning_type} atualizada com sucesso.")
+    except Exception as e:
+        logger.error(f"Erro ao definir mensagem de aviso: {e}")
+        await interaction.response.send_message(
+            "Ocorreu um erro ao atualizar a mensagem. Por favor, tente novamente.",
+            ephemeral=True)
 
 @bot.tree.command(name="show_config", description="Mostra a configuração atual do bot")
 @commands.has_permissions(administrator=True)
 async def show_config(interaction: discord.Interaction):
-    config = bot.config
-    tracked_roles = []
-    for role_id in config['tracked_roles']:
-        role = interaction.guild.get_role(role_id)
-        if role:
-            tracked_roles.append(role.name)
-    
-    warnings_config = config.get('warnings', {})
-    
-    embed = discord.Embed(
-        title="Configuração do Bot",
-        color=discord.Color.blue())
-    embed.add_field(
-        name="Requisitos de Atividade",
-        value=f"{config['required_minutes']} minutos em {config['required_days']} dias diferentes",
-        inline=True)
-    embed.add_field(
-        name="Período de Monitoramento",
-        value=f"{config['monitoring_period']} dias",
-        inline=True)
-    embed.add_field(
-        name="Expulsão sem Cargo",
-        value=f"{config['kick_after_days']} dias",
-        inline=True)
-    embed.add_field(
-        name="Cargos Monitorados",
-        value="\n".join(tracked_roles) if tracked_roles else "Nenhum",
-        inline=False)
-    embed.add_field(
-        name="Canal de Logs",
-        value=f"<#{config['log_channel']}>",
-        inline=True)
-    embed.add_field(
-        name="Canal de Notificações",
-        value=f"<#{config['notification_channel']}>" if config['notification_channel'] else "Não definido",
-        inline=True)
-    embed.add_field(
-        name="Fuso Horário",
-        value=config['timezone'],
-        inline=True)
-    
-    if warnings_config:
+    try:
+        config = bot.config
+        tracked_roles = []
+        for role_id in config['tracked_roles']:
+            role = interaction.guild.get_role(role_id)
+            if role:
+                tracked_roles.append(role.name)
+        
+        warnings_config = config.get('warnings', {})
+        
+        embed = discord.Embed(
+            title="Configuração do Bot",
+            color=discord.Color.blue())
         embed.add_field(
-            name="Configurações de Avisos",
-            value=f"Primeiro aviso: {warnings_config.get('first_warning', 'N/A')} dias antes\n"
-                  f"Segundo aviso: {warnings_config.get('second_warning', 'N/A')} dia(s) antes",
+            name="Requisitos de Atividade",
+            value=f"{config['required_minutes']} minutos em {config['required_days']} dias diferentes",
+            inline=True)
+        embed.add_field(
+            name="Período de Monitoramento",
+            value=f"{config['monitoring_period']} dias",
+            inline=True)
+        embed.add_field(
+            name="Expulsão sem Cargo",
+            value=f"{config['kick_after_days']} dias",
+            inline=True)
+        embed.add_field(
+            name="Cargos Monitorados",
+            value="\n".join(tracked_roles) if tracked_roles else "Nenhum",
             inline=False)
-    
-    await interaction.response.send_message(embed=embed)
+        embed.add_field(
+            name="Canal de Logs",
+            value=f"<#{config['log_channel']}>",
+            inline=True)
+        embed.add_field(
+            name="Canal de Notificações",
+            value=f"<#{config['notification_channel']}>" if config['notification_channel'] else "Não definido",
+            inline=True)
+        embed.add_field(
+            name="Fuso Horário",
+            value=config['timezone'],
+            inline=True)
+        
+        if warnings_config:
+            embed.add_field(
+                name="Configurações de Avisos",
+                value=f"Primeiro aviso: {warnings_config.get('first_warning', 'N/A')} dias antes\n"
+                      f"Segundo aviso: {warnings_config.get('second_warning', 'N/A')} dia(s) antes",
+                inline=False)
+        
+        await interaction.response.send_message(embed=embed)
+    except Exception as e:
+        logger.error(f"Erro ao mostrar configuração: {e}")
+        await interaction.response.send_message(
+            "Ocorreu um erro ao mostrar a configuração. Por favor, tente novamente.",
+            ephemeral=True)
 
 @bot.tree.command(name="check_user", description="Verifica a atividade de um usuário")
 @commands.has_permissions(administrator=True)
@@ -882,14 +1001,14 @@ async def check_user(interaction: discord.Interaction, member: discord.Member):
         
         await interaction.response.send_message(embed=embed)
     except Exception as e:
-        print(f"Erro ao verificar usuário: {e}")
+        logger.error(f"Erro ao verificar usuário: {e}")
         await interaction.response.send_message(
             "Ocorreu um erro ao verificar o usuário. Por favor, tente novamente mais tarde.",
             ephemeral=True)
         try:
             bot.db.reconnect()
         except Exception as db_error:
-            print(f"Falha ao reconectar ao banco de dados: {db_error}")
+            logger.error(f"Falha ao reconectar ao banco de dados: {db_error}")
 
 @bot.tree.command(name="check_user_history", description="Verifica o histórico completo de um usuário")
 @commands.has_permissions(administrator=True)
@@ -938,14 +1057,14 @@ async def check_user_history(interaction: discord.Interaction, member: discord.M
         
         await interaction.response.send_message(embed=embed)
     except Exception as e:
-        print(f"Erro ao verificar histórico do usuário: {e}")
+        logger.error(f"Erro ao verificar histórico do usuário: {e}")
         await interaction.response.send_message(
             "Ocorreu um erro ao verificar o histórico do usuário. Por favor, tente novamente mais tarde.",
             ephemeral=True)
         try:
             bot.db.reconnect()
         except Exception as db_error:
-            print(f"Falha ao reconectar ao banco de dados: {db_error}")
+            logger.error(f"Falha ao reconectar ao banco de dados: {db_error}")
 
 # Iniciar o bot
 if __name__ == "__main__":
@@ -957,8 +1076,13 @@ if __name__ == "__main__":
     missing_vars = [var for var in required_env_vars if not os.getenv(var)]
     
     if missing_vars:
+        logger.critical(f"Variáveis de ambiente ausentes: {', '.join(missing_vars)}")
         raise ValueError(f"Variáveis de ambiente ausentes: {', '.join(missing_vars)}")
     
     keep_alive()
     
-    bot.run(os.getenv('DISCORD_TOKEN'))
+    try:
+        bot.run(os.getenv('DISCORD_TOKEN'))
+    except Exception as e:
+        logger.critical(f"Erro ao iniciar o bot: {e}")
+        raise
