@@ -201,7 +201,7 @@ class DatabaseBackup:
                                     elif isinstance(value, (int, float)):
                                         values.append(str(value))
                                     else:
-                                        values.append(f"'{str(value).replace("'", "''")}'")
+                                        values.append(f'\'{str(value).replace("\'", "\'\'")}\'')
                                 
                                 f.write(f"({','.join(values)})")
                                 if i < len(rows) - 1:
