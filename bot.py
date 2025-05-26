@@ -9,7 +9,7 @@ import time
 import mysql.connector
 from mysql.connector import Error
 from mysql.connector.errors import OperationalError, InterfaceError
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 from flask import Flask, jsonify, render_template, request
 from threading import Thread
 import logging
@@ -670,18 +670,24 @@ class InactivityBot(commands.Bot):
         except Exception as e:
             logger.error(f"Erro ao salvar configuração: {e}")
 
-    async def log_action(self, action: str, member: discord.Member, details: str = None):
+    async def log_action(self, action: str, member: Optional[discord.Member] = None, details: str = None):
         try:
             channel = self.get_channel(self.config.get('log_channel', 1376013013206827161))
             if channel:
                 embed = discord.Embed(
                     title=f"Ação: {action}",
-                    description=f"Usuário: {member.mention}",
                     color=discord.Color.orange(),
                     timestamp=datetime.now(self.timezone)
                 )
+                
+                if member is not None:
+                    embed.description = f"Usuário: {member.mention}"
+                else:
+                    embed.description = "Ação do sistema"
+                
                 if details:
                     embed.add_field(name="Detalhes", value=details, inline=False)
+                
                 await channel.send(embed=embed)
         except Exception as e:
             logger.error(f"Erro ao registrar ação no log: {e}")
