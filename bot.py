@@ -10,17 +10,23 @@ import mysql.connector
 from mysql.connector import Error
 from mysql.connector.errors import OperationalError, InterfaceError
 from typing import Dict, List, Optional, Tuple
-from flask import Flask, jsonify
+from flask import Flask, jsonify, render_template, request
 from threading import Thread
 import logging
 from logging.handlers import RotatingFileHandler
+from dotenv import load_dotenv
+import glob
+import zipfile
 
 # Configuração do logger
 def setup_logger():
     logger = logging.getLogger('inactivity_bot')
     logger.setLevel(logging.INFO)
     
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - '
+        'Guild:%(guild_id)s - User:%(user_id)s - %(message)s'
+    )
     
     file_handler = RotatingFileHandler(
         'bot.log', 
@@ -36,7 +42,18 @@ def setup_logger():
     
     return logger
 
+class ContextFilter(logging.Filter):
+    def filter(self, record):
+        record.guild_id = getattr(record, 'guild_id', 'N/A')
+        record.user_id = getattr(record, 'user_id', 'N/A')
+        return True
+
 logger = setup_logger()
+logger.addFilter(ContextFilter())
+
+def log_with_context(message, level=logging.INFO, guild_id=None, user_id=None):
+    extra = {'guild_id': guild_id or 'N/A', 'user_id': user_id or 'N/A'}
+    logger.log(level, message, extra=extra)
 
 # Configurações iniciais
 CONFIG_FILE = 'config.json'
@@ -49,6 +66,10 @@ DEFAULT_CONFIG = {
     "log_channel": 1376013013206827161,
     "notification_channel": None,
     "timezone": "America/Sao_Paulo",
+    "whitelist": {
+        "users": [],
+        "roles": []
+    },
     "warnings": {
         "first_warning": 3,
         "second_warning": 1,
@@ -60,12 +81,77 @@ DEFAULT_CONFIG = {
     }
 }
 
-# Configuração do Flask para health checks
+# Configuração do Flask para painel web
 app = Flask(__name__)
 
 @app.route('/')
 def home():
     return jsonify({"status": "ok", "message": "Bot is running"})
+
+@app.route('/dashboard')
+def dashboard():
+    return render_template('dashboard.html', 
+                         bot_name=bot.user.name if bot.user else "Inactivity Bot",
+                         guild_count=len(bot.guilds))
+
+@app.route('/api/guilds')
+def get_guilds():
+    guilds = []
+    for guild in bot.guilds:
+        guilds.append({
+            'id': guild.id,
+            'name': guild.name,
+            'member_count': guild.member_count,
+            'icon': guild.icon.url if guild.icon else None
+        })
+    return jsonify(guilds)
+
+@app.route('/api/guild/<int:guild_id>')
+def get_guild_info(guild_id):
+    guild = bot.get_guild(guild_id)
+    if not guild:
+        return jsonify({'error': 'Guild not found'}), 404
+    
+    tracked_roles = []
+    for role_id in bot.config['tracked_roles']:
+        role = guild.get_role(role_id)
+        if role:
+            tracked_roles.append({
+                'id': role.id,
+                'name': role.name,
+                'color': str(role.color),
+                'member_count': len(role.members)
+            })
+    
+    return jsonify({
+        'id': guild.id,
+        'name': guild.name,
+        'tracked_roles': tracked_roles,
+        'config': {
+            'required_minutes': bot.config['required_minutes'],
+            'required_days': bot.config['required_days'],
+            'monitoring_period': bot.config['monitoring_period'],
+            'kick_after_days': bot.config['kick_after_days']
+        }
+    })
+
+@app.route('/api/update_config', methods=['POST'])
+def update_config():
+    try:
+        data = request.json
+        if 'required_minutes' in data:
+            bot.config['required_minutes'] = int(data['required_minutes'])
+        if 'required_days' in data:
+            bot.config['required_days'] = int(data['required_days'])
+        if 'monitoring_period' in data:
+            bot.config['monitoring_period'] = int(data['monitoring_period'])
+        if 'kick_after_days' in data:
+            bot.config['kick_after_days'] = int(data['kick_after_days'])
+        
+        bot.save_config()
+        return jsonify({'status': 'success'})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 400
 
 def run_flask():
     app.run(host='0.0.0.0', port=8080)
@@ -73,6 +159,75 @@ def run_flask():
 def keep_alive():
     t = Thread(target=run_flask)
     t.start()
+
+class DatabaseBackup:
+    def __init__(self, db):
+        self.db = db
+        self.backup_dir = 'backups'
+        os.makedirs(self.backup_dir, exist_ok=True)
+
+    async def create_backup(self):
+        try:
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            backup_file = os.path.join(self.backup_dir, f'backup_{timestamp}.sql')
+            
+            cursor = None
+            try:
+                cursor = self.db.connection.cursor()
+                
+                # Get all tables
+                cursor.execute("SHOW TABLES")
+                tables = [table[0] for table in cursor.fetchall()]
+                
+                with open(backup_file, 'w') as f:
+                    for table in tables:
+                        # Write table structure
+                        cursor.execute(f"SHOW CREATE TABLE {table}")
+                        create_table = cursor.fetchone()[1]
+                        f.write(f"{create_table};\n\n")
+                        
+                        # Write table data
+                        cursor.execute(f"SELECT * FROM {table}")
+                        rows = cursor.fetchall()
+                        if rows:
+                            columns = [col[0] for col in cursor.description]
+                            f.write(f"INSERT INTO `{table}` (`{'`,`'.join(columns)}`) VALUES\n")
+                            
+                            for i, row in enumerate(rows):
+                                values = []
+                                for value in row:
+                                    if value is None:
+                                        values.append("NULL")
+                                    elif isinstance(value, (int, float)):
+                                        values.append(str(value))
+                                    else:
+                                        values.append(f"'{str(value).replace("'", "''")}'")
+                                
+                                f.write(f"({','.join(values)})")
+                                if i < len(rows) - 1:
+                                    f.write(",\n")
+                                else:
+                                    f.write(";\n\n")
+                
+                # Compress the backup
+                with zipfile.ZipFile(f'{backup_file}.zip', 'w', zipfile.ZIP_DEFLATED) as zipf:
+                    zipf.write(backup_file, os.path.basename(backup_file))
+                
+                os.remove(backup_file)
+                
+                # Clean up old backups (keep last 7)
+                backups = sorted(glob.glob(os.path.join(self.backup_dir, '*.zip')))
+                for old_backup in backups[:-7]:
+                    os.remove(old_backup)
+                
+                logger.info(f"Backup criado com sucesso: {backup_file}.zip")
+                return True
+            finally:
+                if cursor:
+                    cursor.close()
+        except Exception as e:
+            logger.error(f"Erro ao criar backup: {e}")
+            return False
 
 class Database:
     def __init__(self):
@@ -587,14 +742,22 @@ async def on_ready():
     except Exception as e:
         logger.error(f"Erro ao sincronizar comandos slash: {e}")
     
+    # Iniciar todas as tarefas
     inactivity_check.start()
     cleanup_members.start()
     check_warnings.start()
+    database_backup.start()
+    cleanup_old_data.start()
+    
     await bot.notify_roles("🤖 Bot de Inatividade iniciado com sucesso!")
 
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
     try:
+        if member.id in bot.config['whitelist']['users'] or \
+           any(role.id in bot.config['whitelist']['roles'] for role in member.roles):
+            return
+            
         if before.channel is None and after.channel is not None:
             try:
                 await bot.db.log_voice_join(member.id, member.guild.id)
@@ -634,6 +797,10 @@ async def inactivity_check():
     
     for guild in bot.guilds:
         for member in guild.members:
+            if member.id in bot.config['whitelist']['users'] or \
+               any(role.id in bot.config['whitelist']['roles'] for role in member.roles):
+                continue
+                
             if any(role.id in tracked_roles for role in member.roles):
                 try:
                     last_check = await bot.db.get_last_period_check(member.id, guild.id)
@@ -704,6 +871,10 @@ async def check_warnings():
     
     for guild in bot.guilds:
         for member in guild.members:
+            if member.id in bot.config['whitelist']['users'] or \
+               any(role.id in bot.config['whitelist']['roles'] for role in member.roles):
+                continue
+                
             if any(role.id in tracked_roles for role in member.roles):
                 try:
                     last_check = await bot.db.get_last_period_check(member.id, guild.id)
@@ -742,6 +913,9 @@ async def cleanup_members():
     for guild in bot.guilds:
         for member in guild.members:
             try:
+                if member.id in bot.config['whitelist']['users']:
+                    continue
+                    
                 if len(member.roles) == 1:
                     joined_at = member.joined_at.replace(tzinfo=bot.timezone) if member.joined_at else None
                     if joined_at and joined_at < cutoff_date:
@@ -765,6 +939,61 @@ async def cleanup_members():
                 except Exception as db_error:
                     logger.error(f"Falha ao reconectar ao banco de dados: {db_error}")
 
+@tasks.loop(hours=24)
+async def database_backup():
+    await bot.wait_until_ready()
+    if not hasattr(bot, 'db_backup'):
+        bot.db_backup = DatabaseBackup(bot.db)
+    
+    success = await bot.db_backup.create_backup()
+    if success:
+        await bot.log_action("Backup do Banco de Dados", None, "Backup diário realizado com sucesso")
+
+@tasks.loop(hours=24)
+async def cleanup_old_data():
+    await bot.wait_until_ready()
+    
+    try:
+        cutoff_date = datetime.utcnow() - timedelta(days=60)  # 2 meses
+        
+        cursor = None
+        try:
+            cursor = bot.db.connection.cursor()
+            
+            # Limpar sessões de voz antigas
+            cursor.execute("DELETE FROM voice_sessions WHERE leave_time < %s", (cutoff_date,))
+            voice_deleted = cursor.rowcount
+            
+            # Limpar avisos antigos
+            cursor.execute("DELETE FROM user_warnings WHERE warning_date < %s", (cutoff_date,))
+            warnings_deleted = cursor.rowcount
+            
+            # Limpar registros de cargos removidos antigos
+            cursor.execute("DELETE FROM removed_roles WHERE removal_date < %s", (cutoff_date,))
+            roles_deleted = cursor.rowcount
+            
+            # Limpar membros expulsos antigos
+            cursor.execute("DELETE FROM kicked_members WHERE kick_date < %s", (cutoff_date,))
+            kicks_deleted = cursor.rowcount
+            
+            bot.db.connection.commit()
+            
+            log_message = (
+                f"Limpeza de dados antigos concluída: "
+                f"Sessões de voz: {voice_deleted}, "
+                f"Avisos: {warnings_deleted}, "
+                f"Cargos removidos: {roles_deleted}, "
+                f"Expulsões: {kicks_deleted}"
+            )
+            logger.info(log_message)
+            await bot.log_action("Limpeza de Dados", None, log_message)
+        finally:
+            if cursor:
+                cursor.close()
+    except Exception as e:
+        logger.error(f"Erro ao limpar dados antigos: {e}")
+
+# Comandos Slash
 @bot.tree.command(name="set_inactivity", description="Define o número de dias do período de monitoramento")
 @commands.has_permissions(administrator=True)
 async def set_inactivity(interaction: discord.Interaction, days: int):
@@ -893,6 +1122,70 @@ async def set_warning_message(interaction: discord.Interaction, warning_type: st
             "Ocorreu um erro ao atualizar a mensagem. Por favor, tente novamente.",
             ephemeral=True)
 
+@bot.tree.command(name="whitelist_add_user", description="Adiciona um usuário à whitelist")
+@commands.has_permissions(administrator=True)
+async def whitelist_add_user(interaction: discord.Interaction, user: discord.User):
+    try:
+        if user.id not in bot.config['whitelist']['users']:
+            bot.config['whitelist']['users'].append(user.id)
+            bot.save_config()
+            await interaction.response.send_message(f"Usuário {user.mention} adicionado à whitelist.")
+        else:
+            await interaction.response.send_message("Este usuário já está na whitelist.")
+    except Exception as e:
+        logger.error(f"Erro ao adicionar usuário à whitelist: {e}")
+        await interaction.response.send_message(
+            "Ocorreu um erro ao adicionar o usuário. Por favor, tente novamente.",
+            ephemeral=True)
+
+@bot.tree.command(name="whitelist_add_role", description="Adiciona um cargo à whitelist")
+@commands.has_permissions(administrator=True)
+async def whitelist_add_role(interaction: discord.Interaction, role: discord.Role):
+    try:
+        if role.id not in bot.config['whitelist']['roles']:
+            bot.config['whitelist']['roles'].append(role.id)
+            bot.save_config()
+            await interaction.response.send_message(f"Cargo {role.mention} adicionado à whitelist.")
+        else:
+            await interaction.response.send_message("Este cargo já está na whitelist.")
+    except Exception as e:
+        logger.error(f"Erro ao adicionar cargo à whitelist: {e}")
+        await interaction.response.send_message(
+            "Ocorreu um erro ao adicionar o cargo. Por favor, tente novamente.",
+            ephemeral=True)
+
+@bot.tree.command(name="whitelist_remove_user", description="Remove um usuário da whitelist")
+@commands.has_permissions(administrator=True)
+async def whitelist_remove_user(interaction: discord.Interaction, user: discord.User):
+    try:
+        if user.id in bot.config['whitelist']['users']:
+            bot.config['whitelist']['users'].remove(user.id)
+            bot.save_config()
+            await interaction.response.send_message(f"Usuário {user.mention} removido da whitelist.")
+        else:
+            await interaction.response.send_message("Este usuário não estava na whitelist.")
+    except Exception as e:
+        logger.error(f"Erro ao remover usuário da whitelist: {e}")
+        await interaction.response.send_message(
+            "Ocorreu um erro ao remover o usuário. Por favor, tente novamente.",
+            ephemeral=True)
+
+@bot.tree.command(name="whitelist_remove_role", description="Remove um cargo da whitelist")
+@commands.has_permissions(administrator=True)
+async def whitelist_remove_role(interaction: discord.Interaction, role: discord.Role):
+    try:
+        if role.id in bot.config['whitelist']['roles']:
+            bot.config['whitelist']['roles'].remove(role.id)
+            bot.save_config()
+            await interaction.response.send_message(f"Cargo {role.mention} removido da whitelist.")
+        else:
+            await interaction.response.send_message("Este cargo não estava na whitelist.")
+    except Exception as e:
+        logger.error(f"Erro ao remover cargo da whitelist: {e}")
+        await interaction.response.send_message(
+            "Ocorreu um erro ao remover o cargo. Por favor, tente novamente.",
+            ephemeral=True)
+
 @bot.tree.command(name="show_config", description="Mostra a configuração atual do bot")
 @commands.has_permissions(administrator=True)
 async def show_config(interaction: discord.Interaction):
@@ -903,6 +1196,18 @@ async def show_config(interaction: discord.Interaction):
             role = interaction.guild.get_role(role_id)
             if role:
                 tracked_roles.append(role.name)
+        
+        whitelist_users = []
+        for user_id in config['whitelist']['users']:
+            user = interaction.guild.get_member(user_id)
+            if user:
+                whitelist_users.append(user.display_name)
+        
+        whitelist_roles = []
+        for role_id in config['whitelist']['roles']:
+            role = interaction.guild.get_role(role_id)
+            if role:
+                whitelist_roles.append(role.name)
         
         warnings_config = config.get('warnings', {})
         
@@ -925,6 +1230,14 @@ async def show_config(interaction: discord.Interaction):
             name="Cargos Monitorados",
             value="\n".join(tracked_roles) if tracked_roles else "Nenhum",
             inline=False)
+        embed.add_field(
+            name="Whitelist - Usuários",
+            value="\n".join(whitelist_users) if whitelist_users else "Nenhum",
+            inline=True)
+        embed.add_field(
+            name="Whitelist - Cargos",
+            value="\n".join(whitelist_roles) if whitelist_roles else "Nenhum",
+            inline=True)
         embed.add_field(
             name="Canal de Logs",
             value=f"<#{config['log_channel']}>",
@@ -1068,8 +1381,6 @@ async def check_user_history(interaction: discord.Interaction, member: discord.M
 
 # Iniciar o bot
 if __name__ == "__main__":
-    from dotenv import load_dotenv
-    
     load_dotenv()
     
     required_env_vars = ['DISCORD_TOKEN', 'DB_HOST', 'DB_NAME', 'DB_USER', 'DB_PASS']
@@ -1079,7 +1390,11 @@ if __name__ == "__main__":
         logger.critical(f"Variáveis de ambiente ausentes: {', '.join(missing_vars)}")
         raise ValueError(f"Variáveis de ambiente ausentes: {', '.join(missing_vars)}")
     
-    keep_alive()
+    # Configuração para Render
+    if os.getenv('RENDER', 'false').lower() == 'true':
+        logger.info("Executando no Render - Configurações especiais aplicadas")
+        # Garante que o Flask roda em uma thread separada
+        keep_alive()
     
     try:
         bot.run(os.getenv('DISCORD_TOKEN'))
