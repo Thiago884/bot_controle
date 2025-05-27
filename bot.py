@@ -245,7 +245,7 @@ class Database:
                     password=os.getenv('DB_PASS'),
                     port=int(os.getenv('DB_PORT', 3306)),
                     pool_name="bot_pool",
-                    pool_size=10,
+                    pool_size=20,  # Aumentado de 10 para 20
                     pool_reset_session=True,
                     connect_timeout=30,
                     connection_timeout=30
@@ -266,11 +266,14 @@ class Database:
     def ensure_connection(func):
         async def wrapper(self, *args, **kwargs):
             max_retries = 3
+            cursor = None
             for attempt in range(max_retries):
                 try:
                     if not self.connection or not self.connection.is_connected():
                         self.connect()
-                    return await func(self, *args, **kwargs)
+                    cursor = self.connection.cursor(dictionary=True)
+                    result = await func(self, *args, **kwargs, cursor=cursor)
+                    return result
                 except (OperationalError, InterfaceError) as e:
                     logger.error(f"Erro de conexão (tentativa {attempt + 1}/{max_retries}): {e}")
                     if attempt == max_retries - 1:
@@ -280,6 +283,9 @@ class Database:
                 except Exception as e:
                     logger.error(f"Erro inesperado: {e}")
                     raise
+                finally:
+                    if cursor:
+                        cursor.close()
         return wrapper
 
     def reconnect(self):
@@ -377,12 +383,10 @@ class Database:
                 cursor.close()
 
     @ensure_connection
-    async def log_voice_join(self, user_id: int, guild_id: int):
-        cursor = None
+    async def log_voice_join(self, user_id: int, guild_id: int, cursor=None):
         now = datetime.utcnow()
         
         try:
-            cursor = self.connection.cursor()
             cursor.execute('''
             INSERT INTO user_activity 
             (user_id, guild_id, last_voice_join, voice_sessions) 
@@ -398,18 +402,12 @@ class Database:
             if self.connection:
                 self.connection.rollback()
             raise
-        finally:
-            if cursor:
-                cursor.close()
 
     @ensure_connection
-    async def log_voice_leave(self, user_id: int, guild_id: int, duration: int):
-        cursor = None
+    async def log_voice_leave(self, user_id: int, guild_id: int, duration: int, cursor=None):
         now = datetime.utcnow()
         
         try:
-            cursor = self.connection.cursor()
-            
             cursor.execute('''
             UPDATE user_activity 
             SET last_voice_leave = %s,
@@ -430,16 +428,10 @@ class Database:
             if self.connection:
                 self.connection.rollback()
             raise
-        finally:
-            if cursor:
-                cursor.close()
 
     @ensure_connection
-    async def get_user_activity(self, user_id: int, guild_id: int) -> Dict:
-        cursor = None
-        
+    async def get_user_activity(self, user_id: int, guild_id: int, cursor=None) -> Dict:
         try:
-            cursor = self.connection.cursor(dictionary=True)
             cursor.execute('''
             SELECT last_voice_join, last_voice_leave, voice_sessions, total_voice_time 
             FROM user_activity 
@@ -451,16 +443,10 @@ class Database:
         except Error as e:
             logger.error(f"Erro ao obter atividade do usuário: {e}")
             return {}
-        finally:
-            if cursor:
-                cursor.close()
 
     @ensure_connection
-    async def get_voice_sessions(self, user_id: int, guild_id: int, start_date: datetime, end_date: datetime) -> List[Dict]:
-        cursor = None
-        
+    async def get_voice_sessions(self, user_id: int, guild_id: int, start_date: datetime, end_date: datetime, cursor=None) -> List[Dict]:
         try:
-            cursor = self.connection.cursor(dictionary=True)
             cursor.execute('''
             SELECT join_time, leave_time, duration 
             FROM voice_sessions
@@ -473,16 +459,10 @@ class Database:
         except Error as e:
             logger.error(f"Erro ao obter sessões de voz: {e}")
             return []
-        finally:
-            if cursor:
-                cursor.close()
 
     @ensure_connection
-    async def log_period_check(self, user_id: int, guild_id: int, start_date: datetime, end_date: datetime, meets_requirements: bool):
-        cursor = None
-        
+    async def log_period_check(self, user_id: int, guild_id: int, start_date: datetime, end_date: datetime, meets_requirements: bool, cursor=None):
         try:
-            cursor = self.connection.cursor()
             cursor.execute('''
             INSERT INTO checked_periods
             (user_id, guild_id, period_start, period_end, meets_requirements)
@@ -497,16 +477,10 @@ class Database:
             if self.connection:
                 self.connection.rollback()
             raise
-        finally:
-            if cursor:
-                cursor.close()
 
     @ensure_connection
-    async def get_last_period_check(self, user_id: int, guild_id: int) -> Optional[Dict]:
-        cursor = None
-        
+    async def get_last_period_check(self, user_id: int, guild_id: int, cursor=None) -> Optional[Dict]:
         try:
-            cursor = self.connection.cursor(dictionary=True)
             cursor.execute('''
             SELECT period_start, period_end, meets_requirements
             FROM checked_periods
@@ -519,17 +493,12 @@ class Database:
         except Error as e:
             logger.error(f"Erro ao obter última verificação de período: {e}")
             return None
-        finally:
-            if cursor:
-                cursor.close()
 
     @ensure_connection
-    async def log_warning(self, user_id: int, guild_id: int, warning_type: str):
-        cursor = None
+    async def log_warning(self, user_id: int, guild_id: int, warning_type: str, cursor=None):
         now = datetime.utcnow()
         
         try:
-            cursor = self.connection.cursor()
             cursor.execute('''
             INSERT INTO user_warnings 
             (user_id, guild_id, warning_type, warning_date) 
@@ -544,16 +513,10 @@ class Database:
             if self.connection:
                 self.connection.rollback()
             raise
-        finally:
-            if cursor:
-                cursor.close()
 
     @ensure_connection
-    async def get_last_warning(self, user_id: int, guild_id: int) -> Optional[Tuple[str, datetime]]:
-        cursor = None
-        
+    async def get_last_warning(self, user_id: int, guild_id: int, cursor=None) -> Optional[Tuple[str, datetime]]:
         try:
-            cursor = self.connection.cursor(dictionary=True)
             cursor.execute('''
             SELECT warning_type, warning_date 
             FROM user_warnings 
@@ -569,17 +532,12 @@ class Database:
         except Error as e:
             logger.error(f"Erro ao obter último aviso: {e}")
             return None
-        finally:
-            if cursor:
-                cursor.close()
 
     @ensure_connection
-    async def log_removed_roles(self, user_id: int, guild_id: int, role_ids: List[int]):
-        cursor = None
+    async def log_removed_roles(self, user_id: int, guild_id: int, role_ids: List[int], cursor=None):
         now = datetime.utcnow()
         
         try:
-            cursor = self.connection.cursor()
             for role_id in role_ids:
                 cursor.execute('''
                 INSERT INTO removed_roles 
@@ -595,17 +553,12 @@ class Database:
             if self.connection:
                 self.connection.rollback()
             raise
-        finally:
-            if cursor:
-                cursor.close()
 
     @ensure_connection
-    async def log_kicked_member(self, user_id: int, guild_id: int, reason: str):
-        cursor = None
+    async def log_kicked_member(self, user_id: int, guild_id: int, reason: str, cursor=None):
         now = datetime.utcnow()
         
         try:
-            cursor = self.connection.cursor()
             cursor.execute('''
             INSERT INTO kicked_members 
             (user_id, guild_id, kick_date, reason) 
@@ -618,14 +571,11 @@ class Database:
             if self.connection:
                 self.connection.rollback()
             raise
-        finally:
-            if cursor:
-                cursor.close()
 
     @ensure_connection
-    async def log_pool_status(self):
+    async def log_pool_status(self, cursor=None):
         try:
-            logger.info(f"Pool status: {self.connection.pool_size()} connections, {self.connection.pool_name()}")
+            logger.info(f"Pool status: {self.connection.pool_size} connections, {self.connection.pool_name}")
         except Exception as e:
             logger.error(f"Erro ao verificar status do pool: {e}")
 
@@ -638,6 +588,8 @@ class InactivityBot(commands.Bot):
         self.db = None
         self.initialize_db()
         self.active_sessions = {}
+        self.voice_event_queue = asyncio.Queue()
+        self.voice_event_processor_task = None
 
     def initialize_db(self):
         max_retries = 3
@@ -732,6 +684,109 @@ class InactivityBot(commands.Bot):
         except Exception as e:
             logger.error(f"Erro ao enviar aviso para {member}: {e}")
 
+    async def process_voice_events(self):
+        while True:
+            try:
+                event = await self.voice_event_queue.get()
+                event_type, member, before, after = event
+                
+                if member.id in self.config['whitelist']['users'] or \
+                   any(role.id in self.config['whitelist']['roles'] for role in member.roles):
+                    continue
+                    
+                if before.channel is None and after.channel is not None:
+                    try:
+                        await self.db.log_voice_join(member.id, member.guild.id)
+                        self.active_sessions[(member.id, member.guild.id)] = datetime.utcnow()
+                        await self.log_action("Entrou em voz", member, f"Canal: {after.channel.name}")
+                    except mysql.connector.errors.PoolError:
+                        logger.warning("Pool esgotado, criando conexão temporária")
+                        temp_conn = None
+                        try:
+                            temp_conn = mysql.connector.connect(
+                                host=os.getenv('DB_HOST'),
+                                database=os.getenv('DB_NAME'),
+                                user=os.getenv('DB_USER'),
+                                password=os.getenv('DB_PASS'),
+                                port=int(os.getenv('DB_PORT', 3306))
+                            )
+                            cursor = temp_conn.cursor()
+                            cursor.execute('''
+                            INSERT INTO user_activity 
+                            (user_id, guild_id, last_voice_join, voice_sessions) 
+                            VALUES (%s, %s, %s, 1)
+                            ON DUPLICATE KEY UPDATE 
+                                last_voice_join = VALUES(last_voice_join),
+                                voice_sessions = voice_sessions + 1
+                            ''', (member.id, member.guild.id, datetime.utcnow()))
+                            temp_conn.commit()
+                            self.active_sessions[(member.id, member.guild.id)] = datetime.utcnow()
+                            await self.log_action("Entrou em voz", member, f"Canal: {after.channel.name}")
+                        except Exception as e:
+                            logger.error(f"Erro ao registrar entrada em voz (temp connection): {e}")
+                            await self.log_action("Erro DB - Entrada em voz", member, str(e))
+                        finally:
+                            if temp_conn and temp_conn.is_connected():
+                                temp_conn.close()
+                    except Exception as e:
+                        logger.error(f"Erro ao registrar entrada em voz: {e}")
+                        await self.log_action("Erro DB - Entrada em voz", member, str(e))
+                
+                elif before.channel is not None and after.channel is None:
+                    session_start = self.active_sessions.get((member.id, member.guild.id))
+                    if session_start:
+                        duration = (datetime.utcnow() - session_start).total_seconds()
+                        if duration >= self.config['required_minutes'] * 60:
+                            try:
+                                await self.db.log_voice_leave(member.id, member.guild.id, int(duration))
+                            except mysql.connector.errors.PoolError:
+                                logger.warning("Pool esgotado, criando conexão temporária")
+                                temp_conn = None
+                                try:
+                                    temp_conn = mysql.connector.connect(
+                                        host=os.getenv('DB_HOST'),
+                                        database=os.getenv('DB_NAME'),
+                                        user=os.getenv('DB_USER'),
+                                        password=os.getenv('DB_PASS'),
+                                        port=int(os.getenv('DB_PORT', 3306))
+                                    )
+                                    cursor = temp_conn.cursor()
+                                    
+                                    # Atualizar user_activity
+                                    cursor.execute('''
+                                    UPDATE user_activity 
+                                    SET last_voice_leave = %s,
+                                        total_voice_time = total_voice_time + %s
+                                    WHERE user_id = %s AND guild_id = %s
+                                    ''', (datetime.utcnow(), int(duration), member.id, member.guild.id))
+                                    
+                                    # Inserir voice_sessions
+                                    join_time = datetime.utcnow() - timedelta(seconds=duration)
+                                    cursor.execute('''
+                                    INSERT INTO voice_sessions
+                                    (user_id, guild_id, join_time, leave_time, duration)
+                                    VALUES (%s, %s, %s, %s, %s)
+                                    ''', (member.id, member.guild.id, join_time, datetime.utcnow(), int(duration)))
+                                    
+                                    temp_conn.commit()
+                                except Exception as e:
+                                    logger.error(f"Erro ao registrar saída de voz (temp connection): {e}")
+                                    await self.log_action("Erro DB - Saída de voz", member, str(e))
+                                finally:
+                                    if temp_conn and temp_conn.is_connected():
+                                        temp_conn.close()
+                            except Exception as e:
+                                logger.error(f"Erro ao registrar saída de voz: {e}")
+                                await self.log_action("Erro DB - Saída de voz", member, str(e))
+                        del self.active_sessions[(member.id, member.guild.id)]
+                        await self.log_action("Saiu de voz", member, 
+                                           f"Canal: {before.channel.name} | Duração: {int(duration//60)} minutos")
+                
+                self.voice_event_queue.task_done()
+            except Exception as e:
+                logger.error(f"Erro no processador de eventos de voz: {e}")
+                await asyncio.sleep(1)  # Previne loop rápido em caso de erro
+
 intents = discord.Intents.default()
 intents.members = True
 intents.voice_states = True
@@ -755,39 +810,18 @@ async def on_ready():
     database_backup.start()
     cleanup_old_data.start()
     
+    # Iniciar processador de eventos de voz
+    bot.voice_event_processor_task = asyncio.create_task(bot.process_voice_events())
+    
     await bot.notify_roles("🤖 Bot de Inatividade iniciado com sucesso!")
 
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
     try:
-        if member.id in bot.config['whitelist']['users'] or \
-           any(role.id in bot.config['whitelist']['roles'] for role in member.roles):
-            return
-            
-        if before.channel is None and after.channel is not None:
-            try:
-                await bot.db.log_voice_join(member.id, member.guild.id)
-                bot.active_sessions[(member.id, member.guild.id)] = datetime.utcnow()
-                await bot.log_action("Entrou em voz", member, f"Canal: {after.channel.name}")
-            except Exception as e:
-                logger.error(f"Erro ao registrar entrada em voz: {e}")
-                await bot.log_action("Erro DB - Entrada em voz", member, str(e))
-        
-        elif before.channel is not None and after.channel is None:
-            session_start = bot.active_sessions.get((member.id, member.guild.id))
-            if session_start:
-                duration = (datetime.utcnow() - session_start).total_seconds()
-                if duration >= bot.config['required_minutes'] * 60:
-                    try:
-                        await bot.db.log_voice_leave(member.id, member.guild.id, int(duration))
-                    except Exception as e:
-                        logger.error(f"Erro ao registrar saída de voz: {e}")
-                        await bot.log_action("Erro DB - Saída de voz", member, str(e))
-                del bot.active_sessions[(member.id, member.guild.id)]
-                await bot.log_action("Saiu de voz", member, 
-                                   f"Canal: {before.channel.name} | Duração: {int(duration//60)} minutos")
+        # Adiciona o evento à fila para processamento assíncrono
+        await bot.voice_event_queue.put(('voice_state_update', member, before, after))
     except Exception as e:
-        logger.error(f"Erro ao processar atualização de estado de voz: {e}")
+        logger.error(f"Erro ao enfileirar evento de voz: {e}")
 
 @tasks.loop(hours=24)
 async def inactivity_check():
@@ -999,7 +1033,7 @@ async def cleanup_old_data():
     except Exception as e:
         logger.error(f"Erro ao limpar dados antigos: {e}")
 
-# Comandos Slash
+# Comandos Slash (mantidos os mesmos do código original)
 @bot.tree.command(name="set_inactivity", description="Define o número de dias do período de monitoramento")
 @commands.has_permissions(administrator=True)
 async def set_inactivity(interaction: discord.Interaction, days: int):
