@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 import asyncio
 import logging
 from main import bot
+from discord.ext import tasks  # Importação necessária para o decorador @tasks.loop
 
 logger = logging.getLogger('inactivity_bot')
 
