@@ -66,6 +66,7 @@ DEFAULT_CONFIG = {
     "log_channel": 1376013013206827161,
     "notification_channel": None,
     "timezone": "America/Sao_Paulo",
+    "absence_channel": 1187657181194113045,  # ID do canal de ausência
     "whitelist": {
         "users": [],
         "roles": []
@@ -692,9 +693,18 @@ class InactivityBot(commands.Bot):
                 
                 if member.id in self.config['whitelist']['users'] or \
                    any(role.id in self.config['whitelist']['roles'] for role in member.roles):
+                    self.voice_event_queue.task_done()
                     continue
                     
+                absence_channel_id = self.config.get('absence_channel')
+                
+                # Entrou em um canal de voz (não estava em nenhum antes)
                 if before.channel is None and after.channel is not None:
+                    # Se entrou no canal de ausência, não registramos
+                    if after.channel.id == absence_channel_id:
+                        self.voice_event_queue.task_done()
+                        continue
+                        
                     try:
                         await self.db.log_voice_join(member.id, member.guild.id)
                         self.active_sessions[(member.id, member.guild.id)] = datetime.utcnow()
@@ -732,9 +742,16 @@ class InactivityBot(commands.Bot):
                         logger.error(f"Erro ao registrar entrada em voz: {e}")
                         await self.log_action("Erro DB - Entrada em voz", member, str(e))
                 
+                # Saiu de um canal de voz (não entrou em outro)
                 elif before.channel is not None and after.channel is None:
                     session_start = self.active_sessions.get((member.id, member.guild.id))
                     if session_start:
+                        # Se estava no canal de ausência, apenas remove da sessão sem contar o tempo
+                        if before.channel.id == absence_channel_id:
+                            del self.active_sessions[(member.id, member.guild.id)]
+                            self.voice_event_queue.task_done()
+                            continue
+                            
                         duration = (datetime.utcnow() - session_start).total_seconds()
                         if duration >= self.config['required_minutes'] * 60:
                             try:
@@ -781,6 +798,31 @@ class InactivityBot(commands.Bot):
                         del self.active_sessions[(member.id, member.guild.id)]
                         await self.log_action("Saiu de voz", member, 
                                            f"Canal: {before.channel.name} | Duração: {int(duration//60)} minutos")
+                
+                # Movido de um canal para outro
+                elif before.channel is not None and after.channel is not None:
+                    # Saiu do canal normal para o canal de ausência
+                    if after.channel.id == absence_channel_id:
+                        session_start = self.active_sessions.get((member.id, member.guild.id))
+                        if session_start:
+                            duration = (datetime.utcnow() - session_start).total_seconds()
+                            if duration >= self.config['required_minutes'] * 60:
+                                try:
+                                    await self.db.log_voice_leave(member.id, member.guild.id, int(duration))
+                                except Exception as e:
+                                    logger.error(f"Erro ao registrar saída de voz (movido para ausência): {e}")
+                            del self.active_sessions[(member.id, member.guild.id)]
+                            await self.log_action("Movido para ausência", member, 
+                                               f"De: {before.channel.name} | Duração: {int(duration//60)} minutos")
+                    
+                    # Saiu do canal de ausência para um canal normal
+                    elif before.channel.id == absence_channel_id:
+                        try:
+                            await self.db.log_voice_join(member.id, member.guild.id)
+                            self.active_sessions[(member.id, member.guild.id)] = datetime.utcnow()
+                            await self.log_action("Retornou de ausência", member, f"Para: {after.channel.name}")
+                        except Exception as e:
+                            logger.error(f"Erro ao registrar retorno de ausência: {e}")
                 
                 self.voice_event_queue.task_done()
             except Exception as e:
@@ -1033,7 +1075,7 @@ async def cleanup_old_data():
     except Exception as e:
         logger.error(f"Erro ao limpar dados antigos: {e}")
 
-# Comandos Slash (mantidos os mesmos do código original)
+# Comandos Slash
 @bot.tree.command(name="set_inactivity", description="Define o número de dias do período de monitoramento")
 @commands.has_permissions(administrator=True)
 async def set_inactivity(interaction: discord.Interaction, days: int):
@@ -1226,6 +1268,19 @@ async def whitelist_remove_role(interaction: discord.Interaction, role: discord.
             "Ocorreu um erro ao remover o cargo. Por favor, tente novamente.",
             ephemeral=True)
 
+@bot.tree.command(name="set_absence_channel", description="Define o canal de voz de ausência")
+@commands.has_permissions(administrator=True)
+async def set_absence_channel(interaction: discord.Interaction, channel: discord.VoiceChannel):
+    try:
+        bot.config['absence_channel'] = channel.id
+        bot.save_config()
+        await interaction.response.send_message(f"Canal de ausência definido para {channel.mention}")
+    except Exception as e:
+        logger.error(f"Erro ao definir canal de ausência: {e}")
+        await interaction.response.send_message(
+            "Ocorreu um erro ao definir o canal de ausência. Por favor, tente novamente.",
+            ephemeral=True)
+
 @bot.tree.command(name="show_config", description="Mostra a configuração atual do bot")
 @commands.has_permissions(administrator=True)
 async def show_config(interaction: discord.Interaction):
@@ -1265,6 +1320,10 @@ async def show_config(interaction: discord.Interaction):
         embed.add_field(
             name="Expulsão sem Cargo",
             value=f"{config['kick_after_days']} dias",
+            inline=True)
+        embed.add_field(
+            name="Canal de Ausência",
+            value=f"<#{config['absence_channel']}>" if config.get('absence_channel') else "Não definido",
             inline=True)
         embed.add_field(
             name="Cargos Monitorados",
