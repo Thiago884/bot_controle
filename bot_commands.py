@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from io import BytesIO
 import matplotlib
+import asyncio
 
 # Configuração do matplotlib para funcionar no Render
 matplotlib.use('Agg')
@@ -452,6 +453,7 @@ async def check_user(interaction: discord.Interaction, member: discord.Member):
             logger.error(f"Falha ao reconectar ao banco de dados: {db_error}")
 
 @bot.tree.command(name="check_user_history", description="Relatório completo com gráficos e análise de atividade")
+@app_commands.checks.cooldown(1, 30.0, key=lambda i: (i.guild_id, i.user.id))
 @allowed_roles_only()
 async def check_user_history(interaction: discord.Interaction, member: discord.Member):
     try:
@@ -526,9 +528,9 @@ async def check_user_history(interaction: discord.Interaction, member: discord.M
         
         # 3. Gerar gráficos
         # Gráfico de horários
-        plt.figure(figsize=(10, 4))
+        plt.figure(figsize=(8, 3))  # Tamanho menor para otimização
         plt.bar(range(24), hour_counts, color='#5865F2')
-        plt.title('Atividade por Hora do Dia', fontsize=12)
+        plt.title('Atividade por Hora do Dia', fontsize=10)  # Fonte menor
         plt.xlabel('Hora')
         plt.ylabel('Horas em Voz')
         plt.xticks(range(0, 24, 2))
@@ -536,21 +538,21 @@ async def check_user_history(interaction: discord.Interaction, member: discord.M
         plt.tight_layout()
         
         buf_hours = BytesIO()
-        plt.savefig(buf_hours, format='png', dpi=80)
+        plt.savefig(buf_hours, format='png', dpi=60)  # DPI menor para otimização
         buf_hours.seek(0)
         plt.close()
         
         # Gráfico de dias da semana
         weekdays = ['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom']
-        plt.figure(figsize=(10, 4))
+        plt.figure(figsize=(8, 3))  # Tamanho menor para otimização
         plt.bar(weekdays, weekday_counts, color='#57F287')
-        plt.title('Atividade por Dia da Semana', fontsize=12)
+        plt.title('Atividade por Dia da Semana', fontsize=10)  # Fonte menor
         plt.ylabel('Horas em Voz')
         plt.grid(axis='y', linestyle='--', alpha=0.7)
         plt.tight_layout()
         
         buf_weekdays = BytesIO()
-        plt.savefig(buf_weekdays, format='png', dpi=80)
+        plt.savefig(buf_weekdays, format='png', dpi=60)  # DPI menor para otimização
         buf_weekdays.seek(0)
         plt.close()
         
@@ -623,7 +625,7 @@ async def check_user_history(interaction: discord.Interaction, member: discord.M
             )
             embed.add_field(name="⚠️ Avisos Recentes", value=warnings_value, inline=True)
         
-        # 10. Enviar a mensagem com gráficos
+        # 10. Enviar a mensagem com gráficos com sistema de retentativas
         files = [
             discord.File(buf_hours, filename="hours.png"),
             discord.File(buf_weekdays, filename="weekdays.png")
@@ -632,14 +634,66 @@ async def check_user_history(interaction: discord.Interaction, member: discord.M
         embed.set_image(url="attachment://hours.png")
         embed.set_footer(text=f"ID do usuário: {member.id} | Período: 90 dias")
         
-        # Criar um segundo embed para o segundo gráfico
         embed2 = discord.Embed(color=discord.Color.blue())
         embed2.set_image(url="attachment://weekdays.png")
         
-        await interaction.followup.send(embeds=[embed, embed2], files=files)
+        # Implementação de retentativas com backoff exponencial
+        max_retries = 3
+        initial_delay = 1.0  # segundos
+        last_error = None
+        
+        for attempt in range(max_retries):
+            try:
+                await interaction.followup.send(embeds=[embed, embed2], files=files)
+                break  # Se bem-sucedido, saia do loop
+            except discord.HTTPException as e:
+                last_error = e
+                if e.status == 429:  # Rate limited
+                    # Extrair o tempo de espera do cabeçalho ou usar backoff exponencial
+                    retry_after = e.response.headers.get('Retry-After')
+                    if retry_after:
+                        wait_time = float(retry_after)
+                    else:
+                        wait_time = initial_delay * (2 ** attempt)
+                    
+                    logger.warning(f"Rate limited. Tentativa {attempt + 1}/{max_retries}. Aguardando {wait_time} segundos...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    raise  # Re-raise se não for erro 429
+        else:
+            # Todas as tentativas falharam
+            error_msg = "❌ Não foi possível enviar o relatório devido a limitações de taxa. Por favor, tente novamente mais tarde."
+            logger.error(f"Falha após {max_retries} tentativas: {last_error}")
+            try:
+                await interaction.followup.send(error_msg, ephemeral=True)
+            except:
+                pass  # Se até isso falhar, não há muito o que fazer
         
     except Exception as e:
         logger.error(f"Erro ao gerar relatório completo: {e}", exc_info=True)
-        await interaction.followup.send(
-            "❌ Ocorreu um erro ao gerar o relatório completo. Por favor, tente novamente mais tarde.",
+        try:
+            await interaction.followup.send(
+                "❌ Ocorreu um erro ao gerar o relatório completo. Por favor, tente novamente mais tarde.",
+                ephemeral=True)
+        except:
+            pass
+    finally:
+        # Fechar os buffers de arquivo
+        for buf in [buf_hours, buf_weekdays]:
+            if buf:
+                try:
+                    buf.close()
+                except:
+                    pass
+
+@check_user_history.error
+async def check_user_history_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.CommandOnCooldown):
+        await interaction.response.send_message(
+            f"⏳ Este comando está em cooldown. Tente novamente em {error.retry_after:.1f} segundos.",
+            ephemeral=True)
+    elif isinstance(error, Exception):
+        logger.error(f"Erro não tratado em check_user_history: {error}")
+        await interaction.response.send_message(
+            "❌ Ocorreu um erro inesperado. Por favor, tente novamente mais tarde.",
             ephemeral=True)
