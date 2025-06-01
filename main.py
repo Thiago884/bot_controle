@@ -82,10 +82,8 @@ class InactivityBot(commands.Bot):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.config = {}
-        self.load_config()
-        self.timezone = pytz.timezone(self.config.get('timezone', 'America/Sao_Paulo'))
+        self.timezone = pytz.timezone('America/Sao_Paulo')  # Valor padrão inicial
         self.db = None
-        self.initialize_db()
         self.active_sessions = {}
         self.voice_event_queue = asyncio.Queue()
         self.command_queue = asyncio.Queue()
@@ -93,8 +91,35 @@ class InactivityBot(commands.Bot):
         self.command_processor_task = None
         self.rate_limited = False
         self.last_rate_limit = None
-        self.rate_limit_delay = 1.0  # Delay padrão entre requisições em segundos
-        self.max_rate_limit_delay = 5.0  # Delay máximo entre requisições
+        self.rate_limit_delay = 1.0
+        self.max_rate_limit_delay = 5.0
+
+    async def setup_hook(self):
+        """Configuração assíncrona que é executada após o login mas antes de conectar ao websocket"""
+        # Carrega a configuração primeiro
+        self.load_config()
+        
+        # Inicializa o banco de dados após carregar a configuração
+        self.initialize_db()
+        
+        # Sincroniza os comandos slash
+        try:
+            synced = await self.tree.sync()
+            logger.info(f"Comandos slash sincronizados: {len(synced)} comandos")
+        except Exception as e:
+            logger.error(f"Erro ao sincronizar comandos slash: {e}")
+        
+        # Importa e inicia as tarefas
+        from tasks import inactivity_check, cleanup_members, check_warnings, database_backup, cleanup_old_data
+        inactivity_check.start()
+        cleanup_members.start()
+        check_warnings.start()
+        database_backup.start()
+        cleanup_old_data.start()
+        
+        # Inicia os processadores
+        self.voice_event_processor_task = asyncio.create_task(self.process_voice_events())
+        self.command_processor_task = asyncio.create_task(self.process_commands_queue())
 
     def initialize_db(self):
         max_retries = 3
@@ -102,6 +127,7 @@ class InactivityBot(commands.Bot):
             try:
                 from database import Database
                 self.db = Database()
+                logger.info("Banco de dados inicializado com sucesso")
                 break
             except Exception as e:
                 logger.error(f"Tentativa {attempt + 1} de conexão ao banco de dados falhou: {e}")
@@ -111,17 +137,7 @@ class InactivityBot(commands.Bot):
 
     def load_config(self):
         try:
-            # Tenta carregar do banco de dados primeiro
-            if self.db:
-                config = asyncio.get_event_loop().run_until_complete(
-                    self.db.load_config(0)  # Usamos 0 para configuração global
-                )
-                if config:
-                    self.config = config
-                    logger.info("Configuração carregada do banco de dados")
-                    return
-            
-            # Se não encontrar no banco, tenta carregar do arquivo
+            # Tenta carregar do arquivo local primeiro
             if os.path.exists(CONFIG_FILE):
                 with open(CONFIG_FILE, 'r') as f:
                     self.config = json.load(f)
@@ -130,6 +146,9 @@ class InactivityBot(commands.Bot):
                 self.config = DEFAULT_CONFIG
                 logger.info("Usando configuração padrão")
                 self.save_config()
+            
+            # Atualiza o timezone com a configuração carregada
+            self.timezone = pytz.timezone(self.config.get('timezone', 'America/Sao_Paulo'))
             
             # Garante que o canal de notificações padrão está definido
             if 'notification_channel' not in self.config or not self.config['notification_channel']:
@@ -147,11 +166,15 @@ class InactivityBot(commands.Bot):
             with open(CONFIG_FILE, 'w') as f:
                 json.dump(self.config, f, indent=4)
             
-            # Salva no banco de dados também
-            if self.db:
-                asyncio.get_event_loop().run_until_complete(
-                    self.db.save_config(0, self.config)  # Usamos 0 para configuração global
-                )
+            # Tenta salvar no banco de dados se estiver disponível
+            if hasattr(self, 'db') and self.db:
+                try:
+                    asyncio.get_event_loop().run_until_complete(
+                        self.db.save_config(0, self.config)  # Usamos 0 para configuração global
+                    )
+                except Exception as db_error:
+                    logger.error(f"Erro ao salvar configuração no banco de dados: {db_error}")
+            
             logger.info("Configuração salva com sucesso")
         except Exception as e:
             logger.error(f"Erro ao salvar configuração: {e}")
@@ -276,8 +299,7 @@ class InactivityBot(commands.Bot):
                                 database=os.getenv('DB_NAME'),
                                 user=os.getenv('DB_USER'),
                                 password=os.getenv('DB_PASS'),
-                                port=int(os.getenv('DB_PORT', 3306))
-                            )
+                                port=int(os.getenv('DB_PORT', 3306)))
                             cursor = temp_conn.cursor()
                             cursor.execute('''
                             INSERT INTO user_activity 
@@ -323,8 +345,7 @@ class InactivityBot(commands.Bot):
                                         database=os.getenv('DB_NAME'),
                                         user=os.getenv('DB_USER'),
                                         password=os.getenv('DB_PASS'),
-                                        port=int(os.getenv('DB_PORT', 3306))
-                                    )
+                                        port=int(os.getenv('DB_PORT', 3306)))
                                     cursor = temp_conn.cursor()
                                     
                                     # Atualizar user_activity
@@ -486,24 +507,6 @@ bot = InactivityBot(
 @bot.event
 async def on_ready():
     logger.info(f'Bot conectado como {bot.user}')
-    try:
-        synced = await bot.tree.sync()
-        logger.info(f"Comandos slash sincronizados: {len(synced)} comandos")
-    except Exception as e:
-        logger.error(f"Erro ao sincronizar comandos slash: {e}")
-    
-    # Importar e iniciar tarefas
-    from tasks import inactivity_check, cleanup_members, check_warnings, database_backup, cleanup_old_data
-    inactivity_check.start()
-    cleanup_members.start()
-    check_warnings.start()
-    database_backup.start()
-    cleanup_old_data.start()
-    
-    # Iniciar processadores
-    bot.voice_event_processor_task = asyncio.create_task(bot.process_voice_events())
-    bot.command_processor_task = asyncio.create_task(bot.process_commands_queue())
-    
     await bot.notify_roles("🤖 Bot de Inatividade iniciado com sucesso!")
 
 @bot.event
