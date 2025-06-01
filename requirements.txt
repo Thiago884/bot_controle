@@ -7,3 +7,5 @@ flask-sqlalchemy>=2.5.1
 flask-login>=0.5.0
 flask-wtf>=1.0.0
 wtforms>=2.3.3
+matplotlib>=3.5.0
+numpy>=1.21.0

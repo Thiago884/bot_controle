@@ -5,6 +5,13 @@ from typing import Optional, List
 from datetime import datetime, timedelta
 import logging
 from main import bot, allowed_roles_only
+import matplotlib.pyplot as plt
+import numpy as np
+from io import BytesIO
+import matplotlib
+
+# Configuração do matplotlib para funcionar no Render
+matplotlib.use('Agg')
 
 logger = logging.getLogger('inactivity_bot')
 
@@ -444,58 +451,195 @@ async def check_user(interaction: discord.Interaction, member: discord.Member):
         except Exception as db_error:
             logger.error(f"Falha ao reconectar ao banco de dados: {db_error}")
 
-@bot.tree.command(name="check_user_history", description="Verifica o histórico completo de um usuário")
+@bot.tree.command(name="check_user_history", description="Relatório completo com gráficos e análise de atividade")
 @allowed_roles_only()
 async def check_user_history(interaction: discord.Interaction, member: discord.Member):
     try:
+        await interaction.response.defer()  # Importante para processamento demorado
+        
+        # 1. Coletar todos os dados necessários
+        # Dados básicos
         user_data = await bot.db.get_user_activity(member.id, member.guild.id)
-        last_warning = await bot.db.get_last_warning(member.id, member.guild.id)
-        last_check = await bot.db.get_last_period_check(member.id, member.guild.id)
         
-        embed = discord.Embed(
-            title=f"Histórico de {member.display_name}",
-            color=discord.Color.blue())
+        # Sessões de voz (últimos 90 dias)
+        end_date = datetime.now(bot.timezone)
+        start_date = end_date - timedelta(days=90)
+        voice_sessions = await bot.db.get_voice_sessions(member.id, member.guild.id, start_date, end_date)
         
-        if user_data:
-            last_join = user_data.get('last_voice_join')
-            last_leave = user_data.get('last_voice_leave')
-            sessions = user_data.get('voice_sessions', 0)
-            total_time = user_data.get('total_voice_time', 0)
+        # Avisos e cargos removidos
+        cursor = None
+        try:
+            cursor = bot.db.connection.cursor(dictionary=True)
             
-            embed.add_field(
-                name="Atividade de Voz",
-                value=f"Última entrada: {last_join.strftime('%d/%m/%Y %H:%M') if last_join else 'Nunca'}\n"
-                      f"Última saída: {last_leave.strftime('%d/%m/%Y %H:%M') if last_leave else 'N/A'}\n"
-                      f"Sessões: {sessions}\n"
-                      f"Tempo total: {int(total_time//3600)}h {int((total_time%3600)//60)}m",
-                inline=False)
+            # Avisos
+            cursor.execute('''
+            SELECT warning_type, warning_date 
+            FROM user_warnings 
+            WHERE user_id = %s AND guild_id = %s
+            ORDER BY warning_date DESC
+            ''', (member.id, member.guild.id))
+            all_warnings = cursor.fetchall()
+            
+            # Cargos removidos
+            cursor.execute('''
+            SELECT role_id, removal_date 
+            FROM removed_roles 
+            WHERE user_id = %s AND guild_id = %s
+            ORDER BY removal_date DESC
+            ''', (member.id, member.guild.id))
+            removed_roles = cursor.fetchall()
+            
+            # Períodos verificados
+            cursor.execute('''
+            SELECT period_start, period_end, meets_requirements
+            FROM checked_periods
+            WHERE user_id = %s AND guild_id = %s
+            ORDER BY period_start DESC
+            LIMIT 5
+            ''', (member.id, member.guild.id))
+            period_checks = cursor.fetchall()
+            
+        finally:
+            if cursor:
+                cursor.close()
         
+        # 2. Processar os dados para estatísticas
+        # Estatísticas gerais
+        total_sessions = user_data.get('voice_sessions', 0) if user_data else 0
+        total_time = user_data.get('total_voice_time', 0) if user_data else 0
+        avg_session = total_time / total_sessions if total_sessions > 0 else 0
+        
+        # Encontrar sessão mais longa
+        longest_session = max(voice_sessions, key=lambda x: x['duration'], default=None)
+        
+        # Padrões de horário
+        hour_counts = [0] * 24
+        for session in voice_sessions:
+            hour = session['join_time'].hour
+            hour_counts[hour] += session['duration'] / 3600  # em horas
+        
+        # Dias da semana
+        weekday_counts = [0] * 7
+        for session in voice_sessions:
+            weekday = session['join_time'].weekday()
+            weekday_counts[weekday] += session['duration'] / 3600  # em horas
+        
+        # 3. Gerar gráficos
+        # Gráfico de horários
+        plt.figure(figsize=(10, 4))
+        plt.bar(range(24), hour_counts, color='#5865F2')
+        plt.title('Atividade por Hora do Dia', fontsize=12)
+        plt.xlabel('Hora')
+        plt.ylabel('Horas em Voz')
+        plt.xticks(range(0, 24, 2))
+        plt.grid(axis='y', linestyle='--', alpha=0.7)
+        plt.tight_layout()
+        
+        buf_hours = BytesIO()
+        plt.savefig(buf_hours, format='png', dpi=80)
+        buf_hours.seek(0)
+        plt.close()
+        
+        # Gráfico de dias da semana
+        weekdays = ['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom']
+        plt.figure(figsize=(10, 4))
+        plt.bar(weekdays, weekday_counts, color='#57F287')
+        plt.title('Atividade por Dia da Semana', fontsize=12)
+        plt.ylabel('Horas em Voz')
+        plt.grid(axis='y', linestyle='--', alpha=0.7)
+        plt.tight_layout()
+        
+        buf_weekdays = BytesIO()
+        plt.savefig(buf_weekdays, format='png', dpi=80)
+        buf_weekdays.seek(0)
+        plt.close()
+        
+        # 4. Criar o embed principal
+        embed = discord.Embed(
+            title=f"📊 Relatório Completo de {member.display_name}",
+            color=discord.Color.blue(),
+            timestamp=datetime.now(bot.timezone))
+        
+        embed.set_thumbnail(url=member.display_avatar.url)
+        
+        # 5. Seção de Estatísticas Gerais
+        stats_value = (
+            f"🎙️ **Total de Sessões:** {total_sessions}\n"
+            f"⏱️ **Tempo Total:** {int(total_time//3600)}h {int((total_time%3600)//60)}m\n"
+            f"📅 **Média por Sessão:** {int(avg_session//60)}m\n"
+        )
+        
+        if longest_session:
+            stats_value += (
+                f"🏆 **Sessão Mais Longa:** {int(longest_session['duration']//3600)}h "
+                f"{int((longest_session['duration']%3600)//60)}m "
+                f"(em {longest_session['join_time'].strftime('%d/%m/%Y')})\n"
+            )
+        
+        embed.add_field(name="📈 Estatísticas Gerais", value=stats_value, inline=False)
+        
+        # 6. Seção de Status Atual
+        last_check = period_checks[0] if period_checks else None
         if last_check:
             period_start = last_check['period_start'].replace(tzinfo=bot.timezone)
             period_end = last_check['period_end'].replace(tzinfo=bot.timezone)
-            meets_requirements = last_check['meets_requirements']
+            meets_req = last_check['meets_requirements']
             
-            embed.add_field(
-                name="Último Período Verificado",
-                value=f"De {period_start.strftime('%d/%m/%Y')} a {period_end.strftime('%d/%m/%Y')}\n"
-                      f"Status: {'✅ Cumpriu' if meets_requirements else '❌ Não cumpriu'} os requisitos",
-                inline=False)
+            # Calcular dias restantes
+            days_left = (period_end - datetime.now(bot.timezone)).days
+            
+            status_value = (
+                f"📅 **Período:** {period_start.strftime('%d/%m/%Y')} - {period_end.strftime('%d/%m/%Y')}\n"
+                f"⏳ **Dias Restantes:** {days_left}\n"
+                f"✅ **Status:** {'Cumprindo' if meets_req else 'Não cumprindo'}\n"
+                f"🎯 **Requisitos:** {bot.config['required_minutes']}min em {bot.config['required_days']} dias"
+            )
+            
+            embed.add_field(name="🔄 Status Atual", value=status_value, inline=False)
         
-        if last_warning:
-            warning_type, warning_date = last_warning
-            embed.add_field(
-                name="Último Aviso",
-                value=f"Tipo: {warning_type}\n"
-                      f"Data: {warning_date.strftime('%d/%m/%Y %H:%M')}",
-                inline=False)
+        # 7. Seção de Histórico Recente
+        if voice_sessions:
+            recent_sessions = voice_sessions[:5]  # Últimas 5 sessões
+            sessions_value = "\n".join(
+                f"▸ {s['join_time'].strftime('%d/%m %H:%M')} - "
+                f"{int(s['duration']//60)}min"
+                for s in recent_sessions
+            )
+            embed.add_field(name="🕒 Últimas Sessões", value=sessions_value, inline=True)
         
-        await interaction.response.send_message(embed=embed)
+        # 8. Seção de Cargos
+        current_roles = [role for role in member.roles if role.id in bot.config['tracked_roles']]
+        roles_value = "Nenhum cargo monitorado"
+        if current_roles:
+            roles_value = "\n".join(f"▸ {role.mention}" for role in current_roles)
+        
+        embed.add_field(name="🎖️ Cargos Atuais", value=roles_value, inline=True)
+        
+        # 9. Seção de Avisos
+        if all_warnings:
+            warnings_value = "\n".join(
+                f"▸ {w['warning_type']} - {w['warning_date'].strftime('%d/%m/%Y')}"
+                for w in all_warnings[:3]  # Mostrar apenas 3 avisos recentes
+            )
+            embed.add_field(name="⚠️ Avisos Recentes", value=warnings_value, inline=True)
+        
+        # 10. Enviar a mensagem com gráficos
+        files = [
+            discord.File(buf_hours, filename="hours.png"),
+            discord.File(buf_weekdays, filename="weekdays.png")
+        ]
+        
+        embed.set_image(url="attachment://hours.png")
+        embed.set_footer(text=f"ID do usuário: {member.id} | Período: 90 dias")
+        
+        # Criar um segundo embed para o segundo gráfico
+        embed2 = discord.Embed(color=discord.Color.blue())
+        embed2.set_image(url="attachment://weekdays.png")
+        
+        await interaction.followup.send(embeds=[embed, embed2], files=files)
+        
     except Exception as e:
-        logger.error(f"Erro ao verificar histórico do usuário: {e}")
-        await interaction.response.send_message(
-            "Ocorreu um erro ao verificar o histórico do usuário. Por favor, tente novamente mais tarde.",
+        logger.error(f"Erro ao gerar relatório completo: {e}", exc_info=True)
+        await interaction.followup.send(
+            "❌ Ocorreu um erro ao gerar o relatório completo. Por favor, tente novamente mais tarde.",
             ephemeral=True)
-        try:
-            bot.db.reconnect()
-        except Exception as db_error:
-            logger.error(f"Falha ao reconectar ao banco de dados: {db_error}")
