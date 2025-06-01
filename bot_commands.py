@@ -5,14 +5,7 @@ from typing import Optional, List
 from datetime import datetime, timedelta
 import logging
 from main import bot, allowed_roles_only
-import matplotlib.pyplot as plt
-import numpy as np
-from io import BytesIO
-import matplotlib
 import asyncio
-
-# Configuração do matplotlib para funcionar no Render
-matplotlib.use('Agg')
 
 logger = logging.getLogger('inactivity_bot')
 
@@ -21,15 +14,18 @@ logger = logging.getLogger('inactivity_bot')
 @commands.has_permissions(administrator=True)
 async def allow_role(interaction: discord.Interaction, role: discord.Role):
     try:
+        logger.info(f"Comando allow_role acionado por {interaction.user} para o cargo {role.name}")
         if role.id not in bot.config['allowed_roles']:
             bot.config['allowed_roles'].append(role.id)
             bot.save_config()
             await interaction.response.send_message(
                 f"✅ Cargo {role.mention} adicionado à lista de permissões.")
+            logger.info(f"Cargo {role.name} adicionado com sucesso à lista de permissões")
         else:
             await interaction.response.send_message(
                 "ℹ️ Este cargo já está na lista de permissões.",
                 ephemeral=True)
+            logger.info(f"Cargo {role.name} já estava na lista de permissões")
     except Exception as e:
         logger.error(f"Erro ao adicionar cargo permitido: {e}")
         await interaction.response.send_message(
@@ -40,15 +36,18 @@ async def allow_role(interaction: discord.Interaction, role: discord.Role):
 @commands.has_permissions(administrator=True)
 async def disallow_role(interaction: discord.Interaction, role: discord.Role):
     try:
+        logger.info(f"Comando disallow_role acionado por {interaction.user} para o cargo {role.name}")
         if role.id in bot.config['allowed_roles']:
             bot.config['allowed_roles'].remove(role.id)
             bot.save_config()
             await interaction.response.send_message(
                 f"✅ Cargo {role.mention} removido da lista de permissões.")
+            logger.info(f"Cargo {role.name} removido com sucesso da lista de permissões")
         else:
             await interaction.response.send_message(
                 "ℹ️ Este cargo não estava na lista de permissões.",
                 ephemeral=True)
+            logger.info(f"Cargo {role.name} não estava na lista de permissões")
     except Exception as e:
         logger.error(f"Erro ao remover cargo permitido: {e}")
         await interaction.response.send_message(
@@ -58,6 +57,7 @@ async def disallow_role(interaction: discord.Interaction, role: discord.Role):
 @bot.tree.command(name="list_allowed_roles", description="Lista os cargos com permissão para usar comandos")
 async def list_allowed_roles(interaction: discord.Interaction):
     try:
+        logger.info(f"Comando list_allowed_roles acionado por {interaction.user}")
         if not bot.config['allowed_roles']:
             await interaction.response.send_message(
                 "ℹ️ Nenhum cargo foi definido como permitido. Todos os membros podem usar comandos.",
@@ -76,6 +76,7 @@ async def list_allowed_roles(interaction: discord.Interaction):
             color=discord.Color.blue()
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
+        logger.info("Lista de cargos permitidos exibida com sucesso")
     except Exception as e:
         logger.error(f"Erro ao listar cargos permitidos: {e}")
         await interaction.response.send_message(
@@ -88,10 +89,12 @@ async def list_allowed_roles(interaction: discord.Interaction):
 @commands.has_permissions(administrator=True)
 async def set_inactivity(interaction: discord.Interaction, days: int):
     try:
+        logger.info(f"Comando set_inactivity acionado por {interaction.user} com {days} dias")
         bot.config['monitoring_period'] = days
         bot.save_config()
         await interaction.response.send_message(
             f"Configuração atualizada: Período de monitoramento definido para {days} dias.")
+        logger.info(f"Período de monitoramento atualizado para {days} dias")
     except Exception as e:
         logger.error(f"Erro ao definir período de inatividade: {e}")
         await interaction.response.send_message(
@@ -103,12 +106,14 @@ async def set_inactivity(interaction: discord.Interaction, days: int):
 @commands.has_permissions(administrator=True)
 async def set_requirements(interaction: discord.Interaction, minutes: int, days: int):
     try:
+        logger.info(f"Comando set_requirements acionado por {interaction.user} com {minutes} minutos e {days} dias")
         bot.config['required_minutes'] = minutes
         bot.config['required_days'] = days
         bot.save_config()
         await interaction.response.send_message(
             f"Configuração atualizada: Requisitos definidos para {minutes} minutos em {days} dias diferentes "
             f"dentro de {bot.config['monitoring_period']} dias.")
+        logger.info(f"Requisitos atualizados para {minutes} minutos em {days} dias")
     except Exception as e:
         logger.error(f"Erro ao definir requisitos: {e}")
         await interaction.response.send_message(
@@ -120,10 +125,12 @@ async def set_requirements(interaction: discord.Interaction, minutes: int, days:
 @commands.has_permissions(administrator=True)
 async def set_kick_days(interaction: discord.Interaction, days: int):
     try:
+        logger.info(f"Comando set_kick_days acionado por {interaction.user} com {days} dias")
         bot.config['kick_after_days'] = days
         bot.save_config()
         await interaction.response.send_message(
             f"Configuração atualizada: Membros sem cargo serão expulsos após {days} dias.")
+        logger.info(f"Dias para expulsão atualizados para {days} dias")
     except Exception as e:
         logger.error(f"Erro ao definir dias para expulsão: {e}")
         await interaction.response.send_message(
@@ -135,11 +142,13 @@ async def set_kick_days(interaction: discord.Interaction, days: int):
 @commands.has_permissions(administrator=True)
 async def add_tracked_role(interaction: discord.Interaction, role: discord.Role):
     try:
+        logger.info(f"Comando add_tracked_role acionado por {interaction.user} para o cargo {role.name}")
         if role.id not in bot.config['tracked_roles']:
             bot.config['tracked_roles'].append(role.id)
             bot.save_config()
             await interaction.response.send_message(f"Cargo {role.name} adicionado à lista de monitorados.")
             await bot.notify_roles(f"🔔 Cargo `{role.name}` adicionado à lista de monitorados de inatividade.")
+            logger.info(f"Cargo {role.name} adicionado à lista de monitorados")
         else:
             await interaction.response.send_message("Este cargo já está sendo monitorado.")
     except Exception as e:
@@ -153,11 +162,13 @@ async def add_tracked_role(interaction: discord.Interaction, role: discord.Role)
 @commands.has_permissions(administrator=True)
 async def remove_tracked_role(interaction: discord.Interaction, role: discord.Role):
     try:
+        logger.info(f"Comando remove_tracked_role acionado por {interaction.user} para o cargo {role.name}")
         if role.id in bot.config['tracked_roles']:
             bot.config['tracked_roles'].remove(role.id)
             bot.save_config()
             await interaction.response.send_message(f"Cargo {role.name} removido da lista de monitorados.")
             await bot.notify_roles(f"🔕 Cargo `{role.name}` removido da lista de monitorados de inatividade.")
+            logger.info(f"Cargo {role.name} removido da lista de monitorados")
         else:
             await interaction.response.send_message("Este cargo não estava sendo monitorado.")
     except Exception as e:
@@ -171,10 +182,12 @@ async def remove_tracked_role(interaction: discord.Interaction, role: discord.Ro
 @commands.has_permissions(administrator=True)
 async def set_notification_channel(interaction: discord.Interaction, channel: discord.TextChannel):
     try:
+        logger.info(f"Comando set_notification_channel acionado por {interaction.user} para o canal {channel.name}")
         bot.config['notification_channel'] = channel.id
         bot.save_config()
         await interaction.response.send_message(f"Canal de notificações definido para {channel.mention}")
         await channel.send("✅ Este canal foi definido como o canal de notificações de cargos!")
+        logger.info(f"Canal de notificações definido para {channel.name}")
     except Exception as e:
         logger.error(f"Erro ao definir canal de notificações: {e}")
         await interaction.response.send_message(
@@ -186,6 +199,7 @@ async def set_notification_channel(interaction: discord.Interaction, channel: di
 @commands.has_permissions(administrator=True)
 async def set_warning_days(interaction: discord.Interaction, first: int, second: int):
     try:
+        logger.info(f"Comando set_warning_days acionado por {interaction.user} com {first} e {second} dias")
         if first <= second:
             return await interaction.response.send_message(
                 "O primeiro aviso deve ser enviado antes do segundo aviso.")
@@ -195,6 +209,7 @@ async def set_warning_days(interaction: discord.Interaction, first: int, second:
         bot.save_config()
         await interaction.response.send_message(
             f"Avisos configurados: primeiro aviso {first} dias antes, segundo aviso {second} dia(s) antes.")
+        logger.info(f"Dias de aviso atualizados para {first} e {second} dias")
     except Exception as e:
         logger.error(f"Erro ao configurar dias de aviso: {e}")
         await interaction.response.send_message(
@@ -206,6 +221,7 @@ async def set_warning_days(interaction: discord.Interaction, first: int, second:
 @commands.has_permissions(administrator=True)
 async def set_warning_message(interaction: discord.Interaction, warning_type: str, message: str):
     try:
+        logger.info(f"Comando set_warning_message acionado por {interaction.user} para o tipo {warning_type}")
         if warning_type not in ['first', 'second', 'final']:
             return await interaction.response.send_message(
                 "Tipo de aviso inválido. Use 'first', 'second' ou 'final'.")
@@ -213,6 +229,7 @@ async def set_warning_message(interaction: discord.Interaction, warning_type: st
         bot.config['warnings']['messages'][warning_type] = message
         bot.save_config()
         await interaction.response.send_message(f"Mensagem de {warning_type} atualizada com sucesso.")
+        logger.info(f"Mensagem de aviso {warning_type} atualizada")
     except Exception as e:
         logger.error(f"Erro ao definir mensagem de aviso: {e}")
         await interaction.response.send_message(
@@ -224,10 +241,12 @@ async def set_warning_message(interaction: discord.Interaction, warning_type: st
 @commands.has_permissions(administrator=True)
 async def whitelist_add_user(interaction: discord.Interaction, user: discord.User):
     try:
+        logger.info(f"Comando whitelist_add_user acionado por {interaction.user} para o usuário {user.name}")
         if user.id not in bot.config['whitelist']['users']:
             bot.config['whitelist']['users'].append(user.id)
             bot.save_config()
             await interaction.response.send_message(f"Usuário {user.mention} adicionado à whitelist.")
+            logger.info(f"Usuário {user.name} adicionado à whitelist")
         else:
             await interaction.response.send_message("Este usuário já está na whitelist.")
     except Exception as e:
@@ -241,10 +260,12 @@ async def whitelist_add_user(interaction: discord.Interaction, user: discord.Use
 @commands.has_permissions(administrator=True)
 async def whitelist_add_role(interaction: discord.Interaction, role: discord.Role):
     try:
+        logger.info(f"Comando whitelist_add_role acionado por {interaction.user} para o cargo {role.name}")
         if role.id not in bot.config['whitelist']['roles']:
             bot.config['whitelist']['roles'].append(role.id)
             bot.save_config()
             await interaction.response.send_message(f"Cargo {role.mention} adicionado à whitelist.")
+            logger.info(f"Cargo {role.name} adicionado à whitelist")
         else:
             await interaction.response.send_message("Este cargo já está na whitelist.")
     except Exception as e:
@@ -258,10 +279,12 @@ async def whitelist_add_role(interaction: discord.Interaction, role: discord.Rol
 @commands.has_permissions(administrator=True)
 async def whitelist_remove_user(interaction: discord.Interaction, user: discord.User):
     try:
+        logger.info(f"Comando whitelist_remove_user acionado por {interaction.user} para o usuário {user.name}")
         if user.id in bot.config['whitelist']['users']:
             bot.config['whitelist']['users'].remove(user.id)
             bot.save_config()
             await interaction.response.send_message(f"Usuário {user.mention} removido da whitelist.")
+            logger.info(f"Usuário {user.name} removido da whitelist")
         else:
             await interaction.response.send_message("Este usuário não estava na whitelist.")
     except Exception as e:
@@ -275,10 +298,12 @@ async def whitelist_remove_user(interaction: discord.Interaction, user: discord.
 @commands.has_permissions(administrator=True)
 async def whitelist_remove_role(interaction: discord.Interaction, role: discord.Role):
     try:
+        logger.info(f"Comando whitelist_remove_role acionado por {interaction.user} para o cargo {role.name}")
         if role.id in bot.config['whitelist']['roles']:
             bot.config['whitelist']['roles'].remove(role.id)
             bot.save_config()
             await interaction.response.send_message(f"Cargo {role.mention} removido da whitelist.")
+            logger.info(f"Cargo {role.name} removido da whitelist")
         else:
             await interaction.response.send_message("Este cargo não estava na whitelist.")
     except Exception as e:
@@ -292,9 +317,11 @@ async def whitelist_remove_role(interaction: discord.Interaction, role: discord.
 @commands.has_permissions(administrator=True)
 async def set_absence_channel(interaction: discord.Interaction, channel: discord.VoiceChannel):
     try:
+        logger.info(f"Comando set_absence_channel acionado por {interaction.user} para o canal {channel.name}")
         bot.config['absence_channel'] = channel.id
         bot.save_config()
         await interaction.response.send_message(f"Canal de ausência definido para {channel.mention}")
+        logger.info(f"Canal de ausência definido para {channel.name}")
     except Exception as e:
         logger.error(f"Erro ao definir canal de ausência: {e}")
         await interaction.response.send_message(
@@ -305,6 +332,7 @@ async def set_absence_channel(interaction: discord.Interaction, channel: discord
 @allowed_roles_only()
 async def show_config(interaction: discord.Interaction):
     try:
+        logger.info(f"Comando show_config acionado por {interaction.user}")
         config = bot.config
         tracked_roles = []
         for role_id in config['tracked_roles']:
@@ -388,6 +416,7 @@ async def show_config(interaction: discord.Interaction):
                 inline=False)
         
         await interaction.response.send_message(embed=embed)
+        logger.info("Configuração exibida com sucesso")
     except Exception as e:
         logger.error(f"Erro ao mostrar configuração: {e}")
         await interaction.response.send_message(
@@ -398,6 +427,7 @@ async def show_config(interaction: discord.Interaction):
 @allowed_roles_only()
 async def check_user(interaction: discord.Interaction, member: discord.Member):
     try:
+        logger.info(f"Comando check_user acionado por {interaction.user} para o membro {member.name}")
         user_data = await bot.db.get_user_activity(member.id, member.guild.id)
         last_join = user_data.get('last_voice_join')
         sessions = user_data.get('voice_sessions', 0)
@@ -442,6 +472,7 @@ async def check_user(interaction: discord.Interaction, member: discord.Member):
             embed.add_field(name="Status", value=status, inline=False)
         
         await interaction.response.send_message(embed=embed)
+        logger.info(f"Informações de atividade de {member.name} exibidas com sucesso")
     except Exception as e:
         logger.error(f"Erro ao verificar usuário: {e}")
         await interaction.response.send_message(
@@ -449,26 +480,29 @@ async def check_user(interaction: discord.Interaction, member: discord.Member):
             ephemeral=True)
         try:
             bot.db.reconnect()
+            logger.info("Tentativa de reconexão ao banco de dados realizada")
         except Exception as db_error:
             logger.error(f"Falha ao reconectar ao banco de dados: {db_error}")
 
-@bot.tree.command(name="check_user_history", description="Relatório completo com gráficos e análise de atividade")
+@bot.tree.command(name="check_user_history", description="Relatório completo de atividade do usuário")
 @app_commands.checks.cooldown(1, 30.0, key=lambda i: (i.guild_id, i.user.id))
 @allowed_roles_only()
 async def check_user_history(interaction: discord.Interaction, member: discord.Member):
     try:
-        await interaction.response.defer()  # Importante para processamento demorado
-        
+        logger.info(f"Iniciando check_user_history para {member.name} solicitado por {interaction.user}")
+        await interaction.response.defer()
+        logger.info("Resposta diferida com sucesso")
+
         # 1. Coletar todos os dados necessários
-        # Dados básicos
+        logger.info("Coletando dados básicos do usuário...")
         user_data = await bot.db.get_user_activity(member.id, member.guild.id)
         
-        # Sessões de voz (últimos 90 dias)
+        logger.info("Coletando sessões de voz (últimos 90 dias)...")
         end_date = datetime.now(bot.timezone)
         start_date = end_date - timedelta(days=90)
         voice_sessions = await bot.db.get_voice_sessions(member.id, member.guild.id, start_date, end_date)
         
-        # Avisos e cargos removidos
+        logger.info("Coletando avisos, cargos removidos e verificações de período...")
         cursor = None
         try:
             cursor = bot.db.connection.cursor(dictionary=True)
@@ -505,7 +539,7 @@ async def check_user_history(interaction: discord.Interaction, member: discord.M
             if cursor:
                 cursor.close()
         
-        # 2. Processar os dados para estatísticas
+        logger.info("Processando estatísticas...")
         # Estatísticas gerais
         total_sessions = user_data.get('voice_sessions', 0) if user_data else 0
         total_time = user_data.get('total_voice_time', 0) if user_data else 0
@@ -514,49 +548,31 @@ async def check_user_history(interaction: discord.Interaction, member: discord.M
         # Encontrar sessão mais longa
         longest_session = max(voice_sessions, key=lambda x: x['duration'], default=None)
         
-        # Padrões de horário
+        # Padrões de horário (agora como texto)
         hour_counts = [0] * 24
         for session in voice_sessions:
             hour = session['join_time'].hour
             hour_counts[hour] += session['duration'] / 3600  # em horas
         
+        hour_stats = "\n".join(
+            f"{h:02d}h-{(h+1)%24:02d}h: {int(count)}h {int((count%1)*60)}m" 
+            for h, count in enumerate(hour_counts) if count > 0
+        )
+        
         # Dias da semana
+        weekday_names = ['Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado', 'Domingo']
         weekday_counts = [0] * 7
         for session in voice_sessions:
             weekday = session['join_time'].weekday()
             weekday_counts[weekday] += session['duration'] / 3600  # em horas
         
-        # 3. Gerar gráficos
-        # Gráfico de horários
-        plt.figure(figsize=(8, 3))  # Tamanho menor para otimização
-        plt.bar(range(24), hour_counts, color='#5865F2')
-        plt.title('Atividade por Hora do Dia', fontsize=10)  # Fonte menor
-        plt.xlabel('Hora')
-        plt.ylabel('Horas em Voz')
-        plt.xticks(range(0, 24, 2))
-        plt.grid(axis='y', linestyle='--', alpha=0.7)
-        plt.tight_layout()
-        
-        buf_hours = BytesIO()
-        plt.savefig(buf_hours, format='png', dpi=60)  # DPI menor para otimização
-        buf_hours.seek(0)
-        plt.close()
-        
-        # Gráfico de dias da semana
-        weekdays = ['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom']
-        plt.figure(figsize=(8, 3))  # Tamanho menor para otimização
-        plt.bar(weekdays, weekday_counts, color='#57F287')
-        plt.title('Atividade por Dia da Semana', fontsize=10)  # Fonte menor
-        plt.ylabel('Horas em Voz')
-        plt.grid(axis='y', linestyle='--', alpha=0.7)
-        plt.tight_layout()
-        
-        buf_weekdays = BytesIO()
-        plt.savefig(buf_weekdays, format='png', dpi=60)  # DPI menor para otimização
-        buf_weekdays.seek(0)
-        plt.close()
+        weekday_stats = "\n".join(
+            f"{weekday_names[i]}: {int(count)}h {int((count%1)*60)}m" 
+            for i, count in enumerate(weekday_counts) if count > 0
+        )
         
         # 4. Criar o embed principal
+        logger.info("Criando embed de relatório...")
         embed = discord.Embed(
             title=f"📊 Relatório Completo de {member.display_name}",
             color=discord.Color.blue(),
@@ -575,7 +591,7 @@ async def check_user_history(interaction: discord.Interaction, member: discord.M
             stats_value += (
                 f"🏆 **Sessão Mais Longa:** {int(longest_session['duration']//3600)}h "
                 f"{int((longest_session['duration']%3600)//60)}m "
-                f"(em {longest_session['join_time'].strftime('%d/%m/%Y')})\n"
+                f"(em {longest_session['join_time'].strftime('%d/%m/%Y')}\n"
             )
         
         embed.add_field(name="📈 Estatísticas Gerais", value=stats_value, inline=False)
@@ -609,7 +625,17 @@ async def check_user_history(interaction: discord.Interaction, member: discord.M
             )
             embed.add_field(name="🕒 Últimas Sessões", value=sessions_value, inline=True)
         
-        # 8. Seção de Cargos
+        # 8. Seção de Padrões de Atividade
+        activity_patterns = ""
+        if hour_stats:
+            activity_patterns += f"**Horários mais ativos:**\n{hour_stats}\n\n"
+        if weekday_stats:
+            activity_patterns += f"**Dias mais ativos:**\n{weekday_stats}"
+        
+        if activity_patterns:
+            embed.add_field(name="⏰ Padrões de Atividade", value=activity_patterns, inline=True)
+        
+        # 9. Seção de Cargos
         current_roles = [role for role in member.roles if role.id in bot.config['tracked_roles']]
         roles_value = "Nenhum cargo monitorado"
         if current_roles:
@@ -617,7 +643,7 @@ async def check_user_history(interaction: discord.Interaction, member: discord.M
         
         embed.add_field(name="🎖️ Cargos Atuais", value=roles_value, inline=True)
         
-        # 9. Seção de Avisos
+        # 10. Seção de Avisos
         if all_warnings:
             warnings_value = "\n".join(
                 f"▸ {w['warning_type']} - {w['warning_date'].strftime('%d/%m/%Y')}"
@@ -625,49 +651,11 @@ async def check_user_history(interaction: discord.Interaction, member: discord.M
             )
             embed.add_field(name="⚠️ Avisos Recentes", value=warnings_value, inline=True)
         
-        # 10. Enviar a mensagem com gráficos com sistema de retentativas
-        files = [
-            discord.File(buf_hours, filename="hours.png"),
-            discord.File(buf_weekdays, filename="weekdays.png")
-        ]
-        
-        embed.set_image(url="attachment://hours.png")
         embed.set_footer(text=f"ID do usuário: {member.id} | Período: 90 dias")
         
-        embed2 = discord.Embed(color=discord.Color.blue())
-        embed2.set_image(url="attachment://weekdays.png")
-        
-        # Implementação de retentativas com backoff exponencial
-        max_retries = 3
-        initial_delay = 1.0  # segundos
-        last_error = None
-        
-        for attempt in range(max_retries):
-            try:
-                await interaction.followup.send(embeds=[embed, embed2], files=files)
-                break  # Se bem-sucedido, saia do loop
-            except discord.HTTPException as e:
-                last_error = e
-                if e.status == 429:  # Rate limited
-                    # Extrair o tempo de espera do cabeçalho ou usar backoff exponencial
-                    retry_after = e.response.headers.get('Retry-After')
-                    if retry_after:
-                        wait_time = float(retry_after)
-                    else:
-                        wait_time = initial_delay * (2 ** attempt)
-                    
-                    logger.warning(f"Rate limited. Tentativa {attempt + 1}/{max_retries}. Aguardando {wait_time} segundos...")
-                    await asyncio.sleep(wait_time)
-                else:
-                    raise  # Re-raise se não for erro 429
-        else:
-            # Todas as tentativas falharam
-            error_msg = "❌ Não foi possível enviar o relatório devido a limitações de taxa. Por favor, tente novamente mais tarde."
-            logger.error(f"Falha após {max_retries} tentativas: {last_error}")
-            try:
-                await interaction.followup.send(error_msg, ephemeral=True)
-            except:
-                pass  # Se até isso falhar, não há muito o que fazer
+        logger.info("Enviando relatório...")
+        await interaction.followup.send(embed=embed)
+        logger.info("Relatório enviado com sucesso")
         
     except Exception as e:
         logger.error(f"Erro ao gerar relatório completo: {e}", exc_info=True)
@@ -675,20 +663,13 @@ async def check_user_history(interaction: discord.Interaction, member: discord.M
             await interaction.followup.send(
                 "❌ Ocorreu um erro ao gerar o relatório completo. Por favor, tente novamente mais tarde.",
                 ephemeral=True)
-        except:
-            pass
-    finally:
-        # Fechar os buffers de arquivo
-        for buf in [buf_hours, buf_weekdays]:
-            if buf:
-                try:
-                    buf.close()
-                except:
-                    pass
+        except Exception as followup_error:
+            logger.error(f"Erro ao enviar mensagem de erro: {followup_error}")
 
 @check_user_history.error
 async def check_user_history_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.CommandOnCooldown):
+        logger.warning(f"Comando check_user_history em cooldown para {interaction.user}: {error}")
         await interaction.response.send_message(
             f"⏳ Este comando está em cooldown. Tente novamente em {error.retry_after:.1f} segundos.",
             ephemeral=True)
