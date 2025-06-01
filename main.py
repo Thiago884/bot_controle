@@ -59,7 +59,7 @@ DEFAULT_CONFIG = {
     "kick_after_days": 30,
     "tracked_roles": [],
     "log_channel": 1376013013206827161,
-    "notification_channel": None,
+    "notification_channel": 1224897652060196996,  # ID fixo para o canal de notificações
     "timezone": "America/Sao_Paulo",
     "absence_channel": 1187657181194113045,
     "allowed_roles": [],  # IDs dos cargos que podem usar os comandos
@@ -88,7 +88,11 @@ class InactivityBot(commands.Bot):
         self.initialize_db()
         self.active_sessions = {}
         self.voice_event_queue = asyncio.Queue()
+        self.command_queue = asyncio.Queue()
         self.voice_event_processor_task = None
+        self.command_processor_task = None
+        self.rate_limited = False
+        self.last_rate_limit = None
 
     def initialize_db(self):
         max_retries = 3
@@ -105,20 +109,48 @@ class InactivityBot(commands.Bot):
 
     def load_config(self):
         try:
+            # Tenta carregar do banco de dados primeiro
+            if self.db:
+                config = asyncio.get_event_loop().run_until_complete(
+                    self.db.load_config(0)  # Usamos 0 para configuração global
+                )
+                if config:
+                    self.config = config
+                    logger.info("Configuração carregada do banco de dados")
+                    return
+            
+            # Se não encontrar no banco, tenta carregar do arquivo
             if os.path.exists(CONFIG_FILE):
                 with open(CONFIG_FILE, 'r') as f:
                     self.config = json.load(f)
+                logger.info("Configuração carregada do arquivo local")
             else:
                 self.config = DEFAULT_CONFIG
+                logger.info("Usando configuração padrão")
                 self.save_config()
+            
+            # Garante que o canal de notificações padrão está definido
+            if 'notification_channel' not in self.config or not self.config['notification_channel']:
+                self.config['notification_channel'] = 1224897652060196996
+                self.save_config()
+                
         except Exception as e:
             logger.error(f"Erro ao carregar configuração: {e}")
             self.config = DEFAULT_CONFIG
+            self.save_config()
 
     def save_config(self):
         try:
+            # Salva no arquivo local
             with open(CONFIG_FILE, 'w') as f:
                 json.dump(self.config, f, indent=4)
+            
+            # Salva no banco de dados também
+            if self.db:
+                asyncio.get_event_loop().run_until_complete(
+                    self.db.save_config(0, self.config)  # Usamos 0 para configuração global
+                )
+            logger.info("Configuração salva com sucesso")
         except Exception as e:
             logger.error(f"Erro ao salvar configuração: {e}")
 
@@ -130,8 +162,7 @@ class InactivityBot(commands.Bot):
                     title=f"Ação: {action}",
                     color=discord.Color.orange(),
                     timestamp=datetime.now(self.timezone)
-                )
-                
+                )                
                 if member is not None:
                     embed.description = f"Usuário: {member.mention}"
                 else:
@@ -328,6 +359,42 @@ class InactivityBot(commands.Bot):
                 logger.error(f"Erro no processador de eventos de voz: {e}")
                 await asyncio.sleep(1)  # Previne loop rápido em caso de erro
 
+    async def process_commands_queue(self):
+        while True:
+            try:
+                interaction, command, args, kwargs = await self.command_queue.get()
+                
+                if self.rate_limited:
+                    now = datetime.now()
+                    if self.last_rate_limit and (now - self.last_rate_limit).seconds < 60:
+                        await interaction.followup.send(
+                            "⚠️ O bot está sendo limitado pelo Discord. Por favor, tente novamente mais tarde.",
+                            ephemeral=True)
+                        self.command_queue.task_done()
+                        continue
+                    else:
+                        self.rate_limited = False
+                
+                try:
+                    await command(interaction, *args, **kwargs)
+                except discord.errors.HTTPException as e:
+                    if e.status == 429:  # Rate limited
+                        self.rate_limited = True
+                        self.last_rate_limit = datetime.now()
+                        retry_after = e.response.headers.get('Retry-After', 60)
+                        logger.error(f"Rate limit atingido. Tentar novamente após {retry_after} segundos")
+                        await asyncio.sleep(float(retry_after))
+                        self.rate_limited = False
+                        # Reenfileira o comando
+                        await self.command_queue.put((interaction, command, args, kwargs))
+                    else:
+                        raise
+                
+                self.command_queue.task_done()
+            except Exception as e:
+                logger.error(f"Erro no processador de comandos: {e}")
+                await asyncio.sleep(1)
+
 # Decorador para verificar cargos permitidos
 def allowed_roles_only():
     async def predicate(interaction: discord.Interaction):
@@ -355,7 +422,15 @@ intents.members = True
 intents.voice_states = True
 intents.message_content = True
 
-bot = InactivityBot(command_prefix='!', intents=intents)
+bot = InactivityBot(
+    command_prefix='!', 
+    intents=intents,
+    max_messages=None,  # Reduzir cache de mensagens
+    chunk_guilds_at_startup=False,  # Não carregar todos os membros no startup
+    member_cache_flags=discord.MemberCacheFlags.none(),  # Minimizar cache de membros
+    enable_debug_events=False,
+    heartbeat_timeout=60.0
+)
 
 @bot.event
 async def on_ready():
@@ -374,8 +449,9 @@ async def on_ready():
     database_backup.start()
     cleanup_old_data.start()
     
-    # Iniciar processador de eventos de voz
+    # Iniciar processadores
     bot.voice_event_processor_task = asyncio.create_task(bot.process_voice_events())
+    bot.command_processor_task = asyncio.create_task(bot.process_commands_queue())
     
     await bot.notify_roles("🤖 Bot de Inatividade iniciado com sucesso!")
 

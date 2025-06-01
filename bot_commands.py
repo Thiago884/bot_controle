@@ -484,15 +484,10 @@ async def check_user(interaction: discord.Interaction, member: discord.Member):
         except Exception as db_error:
             logger.error(f"Falha ao reconectar ao banco de dados: {db_error}")
 
-@bot.tree.command(name="check_user_history", description="Relatório completo de atividade do usuário")
-@app_commands.checks.cooldown(1, 30.0, key=lambda i: (i.guild_id, i.user.id))
-@allowed_roles_only()
-async def check_user_history(interaction: discord.Interaction, member: discord.Member):
+async def _execute_check_user_history(interaction: discord.Interaction, member: discord.Member):
     try:
         logger.info(f"Iniciando check_user_history para {member.name} solicitado por {interaction.user}")
-        await interaction.response.defer()
-        logger.info("Resposta diferida com sucesso")
-
+        
         # 1. Coletar todos os dados necessários
         logger.info("Coletando dados básicos do usuário...")
         user_data = await bot.db.get_user_activity(member.id, member.guild.id)
@@ -666,15 +661,54 @@ async def check_user_history(interaction: discord.Interaction, member: discord.M
         except Exception as followup_error:
             logger.error(f"Erro ao enviar mensagem de erro: {followup_error}")
 
+@bot.tree.command(name="check_user_history", description="Relatório completo de atividade do usuário")
+@app_commands.checks.cooldown(1, 60.0, key=lambda i: (i.guild_id, i.user.id))  # Aumentado para 60 segundos
+@allowed_roles_only()
+async def check_user_history(interaction: discord.Interaction, member: discord.Member):
+    try:
+        await interaction.response.defer(ephemeral=True)
+        # Adiciona o comando à fila para processamento
+        await bot.command_queue.put((
+            interaction,
+            _execute_check_user_history,
+            [member],
+            {}
+        ))
+    except Exception as e:
+        logger.error(f"Erro ao enfileirar check_user_history: {e}")
+        try:
+            await interaction.followup.send(
+                "❌ Ocorreu um erro ao processar sua requisição.",
+                ephemeral=True)
+        except Exception as e:
+            logger.error(f"Erro ao enviar mensagem de erro: {e}")
+
 @check_user_history.error
 async def check_user_history_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.CommandOnCooldown):
         logger.warning(f"Comando check_user_history em cooldown para {interaction.user}: {error}")
-        await interaction.response.send_message(
-            f"⏳ Este comando está em cooldown. Tente novamente em {error.retry_after:.1f} segundos.",
-            ephemeral=True)
+        try:
+            await interaction.response.send_message(
+                f"⏳ Este comando está em cooldown. Tente novamente em {error.retry_after:.1f} segundos.",
+                ephemeral=True)
+        except discord.errors.HTTPException as http_error:
+            logger.error(f"Erro ao enviar mensagem de cooldown: {http_error}")
+    
+    elif isinstance(error, discord.errors.HTTPException) and error.status == 429:
+        retry_after = error.response.headers.get('Retry-After', 60)
+        logger.error(f"Rate limit atingido no comando check_user_history. Tentar novamente após {retry_after} segundos")
+        try:
+            await interaction.followup.send(
+                f"⚠️ O bot está sendo limitado pelo Discord. Por favor, tente novamente em {retry_after} segundos.",
+                ephemeral=True)
+        except Exception as e:
+            logger.error(f"Erro ao enviar mensagem de rate limit: {e}")
+    
     elif isinstance(error, Exception):
-        logger.error(f"Erro não tratado em check_user_history: {error}")
-        await interaction.response.send_message(
-            "❌ Ocorreu um erro inesperado. Por favor, tente novamente mais tarde.",
-            ephemeral=True)
+        logger.error(f"Erro não tratado em check_user_history: {error}", exc_info=True)
+        try:
+            await interaction.followup.send(
+                "❌ Ocorreu um erro inesperado. Por favor, tente novamente mais tarde.",
+                ephemeral=True)
+        except Exception as e:
+            logger.error(f"Erro ao enviar mensagem de erro: {e}")

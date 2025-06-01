@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 import logging
 import glob
 import zipfile
+import json
 
 logger = logging.getLogger('inactivity_bot')
 
@@ -224,6 +225,15 @@ class Database:
                 INDEX idx_user_guild_period (user_id, guild_id, period_start, period_end)
             )''')
             
+            # Nova tabela para armazenar configurações
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS bot_config (
+                guild_id BIGINT PRIMARY KEY,
+                config_json TEXT,
+                last_updated DATETIME,
+                INDEX idx_last_updated (last_updated)
+            )''')
+            
             self.connection.commit()
             logger.info("Tabelas criadas/verificadas com sucesso")
         except Error as e:
@@ -233,6 +243,44 @@ class Database:
             if cursor:
                 cursor.close()
 
+    @ensure_connection
+    async def save_config(self, guild_id: int, config: dict, cursor=None):
+        try:
+            cursor.execute('''
+            INSERT INTO bot_config (guild_id, config_json, last_updated)
+            VALUES (%s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                config_json = VALUES(config_json),
+                last_updated = VALUES(last_updated)
+            ''', (guild_id, json.dumps(config), datetime.utcnow()))
+            
+            self.connection.commit()
+            logger.info(f"Configuração salva no banco de dados para a guild {guild_id}")
+            return True
+        except Error as e:
+            logger.error(f"Erro ao salvar configuração: {e}")
+            if self.connection:
+                self.connection.rollback()
+            return False
+
+    @ensure_connection
+    async def load_config(self, guild_id: int, cursor=None) -> Optional[dict]:
+        try:
+            cursor.execute('''
+            SELECT config_json FROM bot_config
+            WHERE guild_id = %s
+            ''', (guild_id,))
+            
+            result = cursor.fetchone()
+            if result:
+                logger.info(f"Configuração carregada do banco de dados para a guild {guild_id}")
+                return json.loads(result['config_json'])
+            return None
+        except Error as e:
+            logger.error(f"Erro ao carregar configuração: {e}")
+            return None
+
+    # Todos os métodos originais mantidos abaixo...
     @ensure_connection
     async def log_voice_join(self, user_id: int, guild_id: int, cursor=None):
         now = datetime.utcnow()
