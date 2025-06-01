@@ -59,10 +59,10 @@ DEFAULT_CONFIG = {
     "kick_after_days": 30,
     "tracked_roles": [],
     "log_channel": 1376013013206827161,
-    "notification_channel": 1224897652060196996,  # ID fixo para o canal de notificações
+    "notification_channel": 1224897652060196996,
     "timezone": "America/Sao_Paulo",
     "absence_channel": 1187657181194113045,
-    "allowed_roles": [],  # IDs dos cargos que podem usar os comandos
+    "allowed_roles": [],
     "whitelist": {
         "users": [],
         "roles": []
@@ -93,6 +93,8 @@ class InactivityBot(commands.Bot):
         self.command_processor_task = None
         self.rate_limited = False
         self.last_rate_limit = None
+        self.rate_limit_delay = 1.0  # Delay padrão entre requisições em segundos
+        self.max_rate_limit_delay = 5.0  # Delay máximo entre requisições
 
     def initialize_db(self):
         max_retries = 3
@@ -171,7 +173,16 @@ class InactivityBot(commands.Bot):
                 if details:
                     embed.add_field(name="Detalhes", value=details, inline=False)
                 
-                await channel.send(embed=embed)
+                try:
+                    await channel.send(embed=embed)
+                except discord.errors.HTTPException as e:
+                    if e.status == 429:  # Rate limited
+                        retry_after = e.response.headers.get('Retry-After', 60)
+                        logger.warning(f"Rate limit ao enviar log. Tentando novamente em {retry_after} segundos")
+                        await asyncio.sleep(float(retry_after))
+                        await channel.send(embed=embed)
+                    else:
+                        raise
         except Exception as e:
             logger.error(f"Erro ao registrar ação no log: {e}")
 
@@ -179,7 +190,16 @@ class InactivityBot(commands.Bot):
         try:
             channel = self.get_channel(self.config.get('notification_channel'))
             if channel:
-                await channel.send(message)
+                try:
+                    await channel.send(message)
+                except discord.errors.HTTPException as e:
+                    if e.status == 429:  # Rate limited
+                        retry_after = e.response.headers.get('Retry-After', 60)
+                        logger.warning(f"Rate limit ao enviar notificação. Tentando novamente em {retry_after} segundos")
+                        await asyncio.sleep(float(retry_after))
+                        await channel.send(message)
+                    else:
+                        raise
         except Exception as e:
             logger.error(f"Erro ao enviar notificação de cargos: {e}")
 
@@ -188,6 +208,14 @@ class InactivityBot(commands.Bot):
             await member.send(message)
         except discord.Forbidden:
             await self.log_action("DM Falhou", member, "Não foi possível enviar mensagem direta para o usuário.")
+        except discord.errors.HTTPException as e:
+            if e.status == 429:  # Rate limited
+                retry_after = e.response.headers.get('Retry-After', 60)
+                logger.warning(f"Rate limit ao enviar DM. Tentando novamente em {retry_after} segundos")
+                await asyncio.sleep(float(retry_after))
+                await member.send(message)
+            else:
+                raise
         except Exception as e:
             logger.error(f"Erro ao enviar DM para {member}: {e}")
 
@@ -367,13 +395,19 @@ class InactivityBot(commands.Bot):
                 if self.rate_limited:
                     now = datetime.now()
                     if self.last_rate_limit and (now - self.last_rate_limit).seconds < 60:
-                        await interaction.followup.send(
-                            "⚠️ O bot está sendo limitado pelo Discord. Por favor, tente novamente mais tarde.",
-                            ephemeral=True)
+                        try:
+                            await interaction.followup.send(
+                                "⚠️ O bot está sendo limitado pelo Discord. Por favor, tente novamente mais tarde.",
+                                ephemeral=True)
+                        except Exception as e:
+                            logger.error(f"Erro ao enviar mensagem de rate limit: {e}")
                         self.command_queue.task_done()
                         continue
                     else:
                         self.rate_limited = False
+                
+                # Adiciona delay antes de processar cada comando
+                await asyncio.sleep(self.rate_limit_delay)
                 
                 try:
                     await command(interaction, *args, **kwargs)
@@ -383,12 +417,29 @@ class InactivityBot(commands.Bot):
                         self.last_rate_limit = datetime.now()
                         retry_after = e.response.headers.get('Retry-After', 60)
                         logger.error(f"Rate limit atingido. Tentar novamente após {retry_after} segundos")
+                        
+                        # Aumenta o delay para evitar novos rate limits (backoff exponencial)
+                        self.rate_limit_delay = min(self.rate_limit_delay * 2, self.max_rate_limit_delay)
+                        
                         await asyncio.sleep(float(retry_after))
                         self.rate_limited = False
-                        # Reenfileira o comando
+                        
+                        # Reenfileira o comando com um delay maior
+                        await asyncio.sleep(self.rate_limit_delay)
                         await self.command_queue.put((interaction, command, args, kwargs))
                     else:
                         raise
+                except Exception as e:
+                    logger.error(f"Erro ao executar comando: {e}")
+                    try:
+                        await interaction.followup.send(
+                            "❌ Ocorreu um erro ao processar o comando.",
+                            ephemeral=True)
+                    except Exception as e:
+                        logger.error(f"Erro ao enviar mensagem de erro: {e}")
+                else:
+                    # Se não houve erro, reduz gradualmente o delay (backoff decrescente)
+                    self.rate_limit_delay = max(self.rate_limit_delay * 0.9, 0.5)  # Mínimo de 0.5 segundos
                 
                 self.command_queue.task_done()
             except Exception as e:

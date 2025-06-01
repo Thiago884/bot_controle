@@ -488,14 +488,23 @@ async def _execute_check_user_history(interaction: discord.Interaction, member: 
     try:
         logger.info(f"Iniciando check_user_history para {member.name} solicitado por {interaction.user}")
         
+        # Adiciona um pequeno delay antes de cada operação que pode causar rate limit
+        await asyncio.sleep(1)
+        
         # 1. Coletar todos os dados necessários
         logger.info("Coletando dados básicos do usuário...")
         user_data = await bot.db.get_user_activity(member.id, member.guild.id)
+        
+        # Adiciona delay entre consultas
+        await asyncio.sleep(0.5)
         
         logger.info("Coletando sessões de voz (últimos 90 dias)...")
         end_date = datetime.now(bot.timezone)
         start_date = end_date - timedelta(days=90)
         voice_sessions = await bot.db.get_voice_sessions(member.id, member.guild.id, start_date, end_date)
+        
+        # Adiciona delay entre consultas
+        await asyncio.sleep(0.5)
         
         logger.info("Coletando avisos, cargos removidos e verificações de período...")
         cursor = None
@@ -511,6 +520,8 @@ async def _execute_check_user_history(interaction: discord.Interaction, member: 
             ''', (member.id, member.guild.id))
             all_warnings = cursor.fetchall()
             
+            await asyncio.sleep(0.5)
+            
             # Cargos removidos
             cursor.execute('''
             SELECT role_id, removal_date 
@@ -519,6 +530,8 @@ async def _execute_check_user_history(interaction: discord.Interaction, member: 
             ORDER BY removal_date DESC
             ''', (member.id, member.guild.id))
             removed_roles = cursor.fetchall()
+            
+            await asyncio.sleep(0.5)
             
             # Períodos verificados
             cursor.execute('''
@@ -649,8 +662,17 @@ async def _execute_check_user_history(interaction: discord.Interaction, member: 
         embed.set_footer(text=f"ID do usuário: {member.id} | Período: 90 dias")
         
         logger.info("Enviando relatório...")
-        await interaction.followup.send(embed=embed)
-        logger.info("Relatório enviado com sucesso")
+        try:
+            await interaction.followup.send(embed=embed)
+            logger.info("Relatório enviado com sucesso")
+        except discord.errors.HTTPException as e:
+            if e.status == 429:  # Rate limited
+                retry_after = e.response.headers.get('Retry-After', 60)
+                logger.error(f"Rate limit ao enviar embed. Tentando novamente em {retry_after} segundos")
+                await asyncio.sleep(float(retry_after))
+                await interaction.followup.send(embed=embed)  # Tentar novamente
+            else:
+                raise
         
     except Exception as e:
         logger.error(f"Erro ao gerar relatório completo: {e}", exc_info=True)
@@ -662,11 +684,14 @@ async def _execute_check_user_history(interaction: discord.Interaction, member: 
             logger.error(f"Erro ao enviar mensagem de erro: {followup_error}")
 
 @bot.tree.command(name="check_user_history", description="Relatório completo de atividade do usuário")
-@app_commands.checks.cooldown(1, 60.0, key=lambda i: (i.guild_id, i.user.id))  # Aumentado para 60 segundos
+@app_commands.checks.cooldown(1, 120.0, key=lambda i: (i.guild_id, i.user.id))  # Aumentado para 120 segundos
 @allowed_roles_only()
 async def check_user_history(interaction: discord.Interaction, member: discord.Member):
     try:
         await interaction.response.defer(ephemeral=True)
+        # Adiciona um pequeno delay antes de processar para evitar rate limits
+        await asyncio.sleep(1)
+        
         # Adiciona o comando à fila para processamento
         await bot.command_queue.put((
             interaction,
@@ -698,6 +723,7 @@ async def check_user_history_error(interaction: discord.Interaction, error: app_
         retry_after = error.response.headers.get('Retry-After', 60)
         logger.error(f"Rate limit atingido no comando check_user_history. Tentar novamente após {retry_after} segundos")
         try:
+            await asyncio.sleep(float(retry_after))
             await interaction.followup.send(
                 f"⚠️ O bot está sendo limitado pelo Discord. Por favor, tente novamente em {retry_after} segundos.",
                 ephemeral=True)
