@@ -663,6 +663,7 @@ async def _execute_check_user_history(interaction: discord.Interaction, member: 
         
         logger.info("Enviando relatório...")
         try:
+            # Tenta enviar o embed
             await interaction.followup.send(embed=embed)
             logger.info("Relatório enviado com sucesso")
         except discord.errors.HTTPException as e:
@@ -670,16 +671,21 @@ async def _execute_check_user_history(interaction: discord.Interaction, member: 
                 retry_after = e.response.headers.get('Retry-After', 60)
                 logger.error(f"Rate limit ao enviar embed. Tentando novamente em {retry_after} segundos")
                 await asyncio.sleep(float(retry_after))
-                await interaction.followup.send(embed=embed)  # Tentar novamente
+                try:
+                    await interaction.followup.send(embed=embed)  # Tentar novamente
+                except Exception as e:
+                    logger.error(f"Erro ao tentar enviar embed novamente: {e}")
+                    await interaction.edit_original_response(content="❌ Ocorreu um erro ao enviar o relatório completo.")
+            elif e.status == 401:  # Invalid Webhook Token
+                logger.error("Token de webhook inválido, tentando enviar mensagem simples")
+                await interaction.edit_original_response(content="📊 Relatório disponível, mas não foi possível enviar o formato completo.")
             else:
                 raise
         
     except Exception as e:
         logger.error(f"Erro ao gerar relatório completo: {e}", exc_info=True)
         try:
-            await interaction.followup.send(
-                "❌ Ocorreu um erro ao gerar o relatório completo. Por favor, tente novamente mais tarde.",
-                ephemeral=True)
+            await interaction.edit_original_response(content="❌ Ocorreu um erro ao gerar o relatório completo.")
         except Exception as followup_error:
             logger.error(f"Erro ao enviar mensagem de erro: {followup_error}")
 
@@ -688,7 +694,7 @@ async def _execute_check_user_history(interaction: discord.Interaction, member: 
 @allowed_roles_only()
 async def check_user_history(interaction: discord.Interaction, member: discord.Member):
     try:
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)  # Adicionado thinking=True
         # Adiciona um pequeno delay antes de processar para evitar rate limits
         await asyncio.sleep(1)
         
@@ -702,11 +708,17 @@ async def check_user_history(interaction: discord.Interaction, member: discord.M
     except Exception as e:
         logger.error(f"Erro ao enfileirar check_user_history: {e}")
         try:
+            # Tenta enviar a mensagem de erro diretamente ao invés de usar followup
             await interaction.followup.send(
                 "❌ Ocorreu um erro ao processar sua requisição.",
                 ephemeral=True)
         except Exception as e:
             logger.error(f"Erro ao enviar mensagem de erro: {e}")
+            # Se falhar novamente, tenta editar a resposta original
+            try:
+                await interaction.edit_original_response(content="❌ Ocorreu um erro ao processar sua requisição.")
+            except Exception as e:
+                logger.error(f"Erro ao editar resposta original: {e}")
 
 @check_user_history.error
 async def check_user_history_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
