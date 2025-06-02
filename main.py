@@ -145,7 +145,8 @@ class InactivityBot(commands.Bot):
             else:
                 self.config = DEFAULT_CONFIG
                 logger.info("Usando configuração padrão")
-                self.save_config()
+                with open(CONFIG_FILE, 'w') as f:
+                    json.dump(self.config, f, indent=4)
             
             # Atualiza o timezone com a configuração carregada
             self.timezone = pytz.timezone(self.config.get('timezone', 'America/Sao_Paulo'))
@@ -153,14 +154,16 @@ class InactivityBot(commands.Bot):
             # Garante que o canal de notificações padrão está definido
             if 'notification_channel' not in self.config or not self.config['notification_channel']:
                 self.config['notification_channel'] = 1224897652060196996
-                self.save_config()
+                with open(CONFIG_FILE, 'w') as f:
+                    json.dump(self.config, f, indent=4)
                 
         except Exception as e:
             logger.error(f"Erro ao carregar configuração: {e}")
             self.config = DEFAULT_CONFIG
-            self.save_config()
+            with open(CONFIG_FILE, 'w') as f:
+                json.dump(self.config, f, indent=4)
 
-    def save_config(self):
+    async def save_config(self):
         try:
             # Salva no arquivo local
             with open(CONFIG_FILE, 'w') as f:
@@ -169,13 +172,10 @@ class InactivityBot(commands.Bot):
             # Tenta salvar no banco de dados se estiver disponível
             if hasattr(self, 'db') and self.db:
                 try:
-                    asyncio.get_event_loop().run_until_complete(
-                        self.db.save_config(0, self.config)  # Usamos 0 para configuração global
-                    )
+                    await self.db.save_config(0, self.config)  # Usamos 0 para configuração global
                     logger.info("Configuração salva no banco de dados com sucesso")
                 except Exception as db_error:
                     logger.error(f"Erro ao salvar configuração no banco de dados: {db_error}")
-                    raise
         except Exception as e:
             logger.error(f"Erro ao salvar configuração: {e}")
             raise

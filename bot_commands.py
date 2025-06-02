@@ -18,7 +18,7 @@ async def allow_role(interaction: discord.Interaction, role: discord.Role):
         
         if role.id not in bot.config['allowed_roles']:
             bot.config['allowed_roles'].append(role.id)
-            bot.save_config()
+            await bot.save_config()
             
             embed = discord.Embed(
                 title="✅ Cargo Permitido Adicionado",
@@ -57,7 +57,7 @@ async def disallow_role(interaction: discord.Interaction, role: discord.Role):
         
         if role.id in bot.config['allowed_roles']:
             bot.config['allowed_roles'].remove(role.id)
-            bot.save_config()
+            await bot.save_config()
             
             embed = discord.Embed(
                 title="✅ Cargo Permitido Removido",
@@ -142,7 +142,7 @@ async def set_inactivity(interaction: discord.Interaction, days: int):
             return
             
         bot.config['monitoring_period'] = days
-        bot.save_config()
+        await bot.save_config()
         
         embed = discord.Embed(
             title="✅ Configuração Atualizada",
@@ -184,7 +184,7 @@ async def set_requirements(interaction: discord.Interaction, minutes: int, days:
             
         bot.config['required_minutes'] = minutes
         bot.config['required_days'] = days
-        bot.save_config()
+        await bot.save_config()
         
         embed = discord.Embed(
             title="✅ Configuração Atualizada",
@@ -228,7 +228,7 @@ async def set_kick_days(interaction: discord.Interaction, days: int):
             return
             
         bot.config['kick_after_days'] = days
-        bot.save_config()
+        await bot.save_config()
         
         embed = discord.Embed(
             title="✅ Configuração Atualizada",
@@ -261,7 +261,7 @@ async def add_tracked_role(interaction: discord.Interaction, role: discord.Role)
         
         if role.id not in bot.config['tracked_roles']:
             bot.config['tracked_roles'].append(role.id)
-            bot.save_config()
+            await bot.save_config()
             
             embed = discord.Embed(
                 title="✅ Cargo Monitorado Adicionado",
@@ -306,7 +306,7 @@ async def remove_tracked_role(interaction: discord.Interaction, role: discord.Ro
         
         if role.id in bot.config['tracked_roles']:
             bot.config['tracked_roles'].remove(role.id)
-            bot.save_config()
+            await bot.save_config()
             
             embed = discord.Embed(
                 title="✅ Cargo Monitorado Removido",
@@ -350,7 +350,7 @@ async def set_notification_channel(interaction: discord.Interaction, channel: di
         logger.info(f"Comando set_notification_channel acionado por {interaction.user} para o canal {channel.name}")
         
         bot.config['notification_channel'] = channel.id
-        bot.save_config()
+        await bot.save_config()
         
         embed = discord.Embed(
             title="✅ Canal de Notificações Definido",
@@ -394,7 +394,7 @@ async def set_warning_days(interaction: discord.Interaction, first: int, second:
         
         bot.config['warnings']['first_warning'] = first
         bot.config['warnings']['second_warning'] = second
-        bot.save_config()
+        await bot.save_config()
         
         embed = discord.Embed(
             title="✅ Configuração de Avisos Atualizada",
@@ -439,7 +439,7 @@ async def set_warning_message(interaction: discord.Interaction, warning_type: st
             return
         
         bot.config['warnings']['messages'][warning_type] = message
-        bot.save_config()
+        await bot.save_config()
         
         embed = discord.Embed(
             title="✅ Mensagem de Aviso Atualizada",
@@ -472,7 +472,7 @@ async def whitelist_add_user(interaction: discord.Interaction, user: discord.Use
         
         if user.id not in bot.config['whitelist']['users']:
             bot.config['whitelist']['users'].append(user.id)
-            bot.save_config()
+            await bot.save_config()
             
             embed = discord.Embed(
                 title="✅ Usuário Whitelistado",
@@ -512,7 +512,7 @@ async def whitelist_add_role(interaction: discord.Interaction, role: discord.Rol
         
         if role.id not in bot.config['whitelist']['roles']:
             bot.config['whitelist']['roles'].append(role.id)
-            bot.save_config()
+            await bot.save_config()
             
             embed = discord.Embed(
                 title="✅ Cargo Whitelistado",
@@ -552,7 +552,7 @@ async def whitelist_remove_user(interaction: discord.Interaction, user: discord.
         
         if user.id in bot.config['whitelist']['users']:
             bot.config['whitelist']['users'].remove(user.id)
-            bot.save_config()
+            await bot.save_config()
             
             embed = discord.Embed(
                 title="✅ Usuário Removido da Whitelist",
@@ -592,7 +592,7 @@ async def whitelist_remove_role(interaction: discord.Interaction, role: discord.
         
         if role.id in bot.config['whitelist']['roles']:
             bot.config['whitelist']['roles'].remove(role.id)
-            bot.save_config()
+            await bot.save_config()
             
             embed = discord.Embed(
                 title="✅ Cargo Removido da Whitelist",
@@ -631,7 +631,7 @@ async def set_absence_channel(interaction: discord.Interaction, channel: discord
         logger.info(f"Comando set_absence_channel acionado por {interaction.user} para o canal {channel.name}")
         
         bot.config['absence_channel'] = channel.id
-        bot.save_config()
+        await bot.save_config()
         
         embed = discord.Embed(
             title="✅ Canal de Ausência Definido",
