@@ -172,12 +172,13 @@ class InactivityBot(commands.Bot):
                     asyncio.get_event_loop().run_until_complete(
                         self.db.save_config(0, self.config)  # Usamos 0 para configuração global
                     )
+                    logger.info("Configuração salva no banco de dados com sucesso")
                 except Exception as db_error:
                     logger.error(f"Erro ao salvar configuração no banco de dados: {db_error}")
-            
-            logger.info("Configuração salva com sucesso")
+                    raise
         except Exception as e:
             logger.error(f"Erro ao salvar configuração: {e}")
+            raise
 
     async def log_action(self, action: str, member: Optional[discord.Member] = None, details: str = None):
         try:
@@ -209,22 +210,27 @@ class InactivityBot(commands.Bot):
         except Exception as e:
             logger.error(f"Erro ao registrar ação no log: {e}")
 
-    async def notify_roles(self, message: str):
+    async def notify_roles(self, message: str, is_warning: bool = False):
         try:
-            channel = self.get_channel(self.config.get('notification_channel'))
-            if channel:
-                try:
-                    await channel.send(message)
-                except discord.errors.HTTPException as e:
-                    if e.status == 429:  # Rate limited
-                        retry_after = e.response.headers.get('Retry-After', 60)
-                        logger.warning(f"Rate limit ao enviar notificação. Tentando novamente em {retry_after} segundos")
-                        await asyncio.sleep(float(retry_after))
+            if is_warning:
+                # Para avisos de risco, usa o canal de notificações
+                channel = self.get_channel(self.config.get('notification_channel'))
+                if channel:
+                    try:
                         await channel.send(message)
-                    else:
-                        raise
+                    except discord.errors.HTTPException as e:
+                        if e.status == 429:  # Rate limited
+                            retry_after = e.response.headers.get('Retry-After', 60)
+                            logger.warning(f"Rate limit ao enviar notificação. Tentando novamente em {retry_after} segundos")
+                            await asyncio.sleep(float(retry_after))
+                            await channel.send(message)
+                        else:
+                            raise
+            else:
+                # Para outras notificações, usa o canal de logs
+                await self.log_action("Notificação", None, message)
         except Exception as e:
-            logger.error(f"Erro ao enviar notificação de cargos: {e}")
+            logger.error(f"Erro ao enviar notificação: {e}")
 
     async def send_dm(self, member: discord.Member, message: str):
         try:
@@ -418,8 +424,7 @@ class InactivityBot(commands.Bot):
                     if self.last_rate_limit and (now - self.last_rate_limit).seconds < 60:
                         try:
                             await interaction.followup.send(
-                                "⚠️ O bot está sendo limitado pelo Discord. Por favor, tente novamente mais tarde.",
-                                ephemeral=True)
+                                "⚠️ O bot está sendo limitado pelo Discord. Por favor, tente novamente mais tarde.")
                         except Exception as e:
                             logger.error(f"Erro ao enviar mensagem de rate limit: {e}")
                         self.command_queue.task_done()
@@ -454,8 +459,7 @@ class InactivityBot(commands.Bot):
                     logger.error(f"Erro ao executar comando: {e}")
                     try:
                         await interaction.followup.send(
-                            "❌ Ocorreu um erro ao processar o comando.",
-                            ephemeral=True)
+                            "❌ Ocorreu um erro ao processar o comando.")
                     except Exception as e:
                         logger.error(f"Erro ao enviar mensagem de erro: {e}")
                 else:
@@ -507,7 +511,7 @@ bot = InactivityBot(
 @bot.event
 async def on_ready():
     logger.info(f'Bot conectado como {bot.user}')
-    await bot.notify_roles("🤖 Bot de Inatividade iniciado com sucesso!")
+    await bot.log_action("Inicialização", None, "🤖 Bot de Controle de Atividades iniciado com sucesso!")
 
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
