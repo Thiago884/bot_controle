@@ -7,6 +7,7 @@ import discord
 import matplotlib.pyplot as plt
 import numpy as np
 from io import BytesIO
+from typing import Optional
 
 logger = logging.getLogger('inactivity_bot')
 

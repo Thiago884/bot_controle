@@ -230,7 +230,7 @@ class InactivityBot(commands.Bot):
                     title=f"Ação: {action}",
                     color=discord.Color.orange(),
                     timestamp=datetime.now(self.timezone)
-                )                
+                )
                 if member is not None:
                     embed.description = f"Usuário: {member.mention}"
                 else:
@@ -528,4 +528,9 @@ if __name__ == "__main__":
     finally:
         # Garante que o pool de conexões é fechado corretamente
         if hasattr(bot, 'db') and bot.db:
-            asyncio.run(bot.db.close())
+            try:
+                loop = asyncio.get_event_loop()
+                if not loop.is_closed():
+                     bot.db.close()
+            except Exception as e:
+                logger.error(f"Erro ao fechar pool de conexões: {e}")
