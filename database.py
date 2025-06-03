@@ -29,15 +29,15 @@ class DatabaseBackup:
                     await cursor.execute("SHOW TABLES")
                     tables = [table[0] for table in await cursor.fetchall()]
                     
-                    with open(backup_file, 'w') as f:
+                    with open(backup_file, 'w', encoding='utf-8') as f:
                         for table in tables:
                             # Write table structure
-                            await cursor.execute(f"SHOW CREATE TABLE {table}")
+                            await cursor.execute(f"SHOW CREATE TABLE `{table}`")
                             create_table = (await cursor.fetchone())[1]
                             f.write(f"{create_table};\n\n")
                             
                             # Write table data
-                            await cursor.execute(f"SELECT * FROM {table}")
+                            await cursor.execute(f"SELECT * FROM `{table}`")
                             rows = await cursor.fetchall()
                             if rows:
                                 columns = [col[0] for col in cursor.description]
@@ -73,7 +73,7 @@ class DatabaseBackup:
             logger.info(f"Backup criado com sucesso: {backup_file}.zip")
             return True
         except Exception as e:
-            logger.error(f"Erro ao criar backup: {e}")
+            logger.error(f"Erro ao criar backup: {str(e)}")
             return False
 
 class Database:
@@ -96,12 +96,12 @@ class Database:
                     user=os.getenv('DB_USER'),
                     password=os.getenv('DB_PASS'),
                     db=os.getenv('DB_NAME'),
-                    minsize=5,       # Número mínimo de conexões no pool
-                    maxsize=30,       # Número máximo de conexões no pool
+                    minsize=5,
+                    maxsize=30,
                     connect_timeout=30,
                     autocommit=True,
                     cursorclass=DictCursor,
-                    pool_recycle=3600,  # Recicla conexões após 1 hora
+                    pool_recycle=3600,
                 )
                 
                 # Testar conexão
@@ -162,7 +162,7 @@ class Database:
                             INDEX idx_guild_user (guild_id, user_id),
                             INDEX idx_last_join (last_voice_join),
                             INDEX idx_last_leave (last_voice_leave)
-                        )''')
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci''')
                         
                         await cursor.execute('''
                         CREATE TABLE IF NOT EXISTS voice_sessions (
@@ -176,7 +176,7 @@ class Database:
                             INDEX idx_join_time (join_time),
                             INDEX idx_leave_time (leave_time),
                             INDEX idx_user_guild_time (user_id, guild_id, join_time, leave_time)
-                        )''')
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci''')
                         
                         await cursor.execute('''
                         CREATE TABLE IF NOT EXISTS user_warnings (
@@ -187,7 +187,7 @@ class Database:
                             PRIMARY KEY (user_id, guild_id, warning_type),
                             INDEX idx_warning_date (warning_date),
                             INDEX idx_user_guild_warning (user_id, guild_id, warning_type, warning_date)
-                        )''')
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci''')
                         
                         await cursor.execute('''
                         CREATE TABLE IF NOT EXISTS removed_roles (
@@ -197,7 +197,7 @@ class Database:
                             removal_date DATETIME,
                             PRIMARY KEY (user_id, guild_id, role_id),
                             INDEX idx_removal_date (removal_date)
-                        )''')
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci''')
                         
                         await cursor.execute('''
                         CREATE TABLE IF NOT EXISTS kicked_members (
@@ -208,7 +208,7 @@ class Database:
                             reason TEXT,
                             INDEX idx_user_guild (user_id, guild_id),
                             INDEX idx_kick_date (kick_date)
-                        )''')
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci''')
                         
                         await cursor.execute('''
                         CREATE TABLE IF NOT EXISTS checked_periods (
@@ -221,7 +221,7 @@ class Database:
                             INDEX idx_period_end (period_end),
                             INDEX idx_requirements (meets_requirements),
                             INDEX idx_user_guild_period (user_id, guild_id, period_start, period_end)
-                        )''')
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci''')
                         
                         await cursor.execute('''
                         CREATE TABLE IF NOT EXISTS bot_config (
@@ -229,7 +229,7 @@ class Database:
                             config_json TEXT,
                             last_updated DATETIME,
                             INDEX idx_last_updated (last_updated)
-                        )''')
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci''')
                         
                         await conn.commit()
                         logger.info("Tabelas criadas/verificadas com sucesso")
@@ -240,10 +240,10 @@ class Database:
     async def execute_query(self, query: str, params: tuple = None):
         async with self.semaphore:
             try:
-                async with self.pool.acquire() as conn:
-                    async with conn.cursor() as cursor:
-                        await cursor.execute(query, params or ())
-                        return cursor
+                conn = await self.pool.acquire()
+                cursor = await conn.cursor()
+                await cursor.execute(query, params or ())
+                return cursor, conn
             except aiomysql.OperationalError as e:
                 logger.error(f"Erro operacional no banco de dados: {e}")
                 await self.check_pool_status()
@@ -254,31 +254,35 @@ class Database:
 
     async def save_config(self, guild_id: int, config: dict):
         try:
-            async with self.execute_query('''
+            cursor, conn = await self.execute_query('''
                 INSERT INTO bot_config (guild_id, config_json, last_updated)
                 VALUES (%s, %s, %s)
                 ON DUPLICATE KEY UPDATE
                     config_json = VALUES(config_json),
                     last_updated = VALUES(last_updated)
-            ''', (guild_id, json.dumps(config), datetime.utcnow())) as cursor:
-                await cursor.connection.commit()
-                logger.info(f"Configuração salva no banco de dados para a guild {guild_id}")
-                return True
+            ''', (guild_id, json.dumps(config), datetime.utcnow()))
+            await conn.commit()
+            await cursor.close()
+            self.pool.release(conn)
+            logger.info(f"Configuração salva no banco de dados para a guild {guild_id}")
+            return True
         except Exception as e:
             logger.error(f"Erro ao salvar configuração: {e}")
             return False
 
     async def load_config(self, guild_id: int) -> Optional[dict]:
         try:
-            async with self.execute_query('''
+            cursor, conn = await self.execute_query('''
                 SELECT config_json FROM bot_config
                 WHERE guild_id = %s
-            ''', (guild_id,)) as cursor:
-                result = await cursor.fetchone()
-                if result:
-                    logger.info(f"Configuração carregada do banco de dados para a guild {guild_id}")
-                    return json.loads(result['config_json'])
-                return None
+            ''', (guild_id,))
+            result = await cursor.fetchone()
+            await cursor.close()
+            self.pool.release(conn)
+            if result:
+                logger.info(f"Configuração carregada do banco de dados para a guild {guild_id}")
+                return json.loads(result['config_json'])
+            return None
         except Exception as e:
             logger.error(f"Erro ao carregar configuração: {e}")
             return None
@@ -286,15 +290,17 @@ class Database:
     async def log_voice_join(self, user_id: int, guild_id: int):
         now = datetime.utcnow()
         try:
-            async with self.execute_query('''
+            cursor, conn = await self.execute_query('''
                 INSERT INTO user_activity 
                 (user_id, guild_id, last_voice_join, voice_sessions) 
                 VALUES (%s, %s, %s, 1)
                 ON DUPLICATE KEY UPDATE 
                     last_voice_join = VALUES(last_voice_join),
                     voice_sessions = voice_sessions + 1
-            ''', (user_id, guild_id, now)) as cursor:
-                await cursor.connection.commit()
+            ''', (user_id, guild_id, now))
+            await conn.commit()
+            await cursor.close()
+            self.pool.release(conn)
         except Exception as e:
             logger.error(f"Erro ao registrar entrada em voz: {e}")
             raise
@@ -325,13 +331,15 @@ class Database:
 
     async def get_user_activity(self, user_id: int, guild_id: int) -> Dict:
         try:
-            async with self.execute_query('''
+            cursor, conn = await self.execute_query('''
                 SELECT last_voice_join, last_voice_leave, voice_sessions, total_voice_time 
                 FROM user_activity 
                 WHERE user_id = %s AND guild_id = %s
-            ''', (user_id, guild_id)) as cursor:
-                result = await cursor.fetchone()
-                return result if result else {}
+            ''', (user_id, guild_id))
+            result = await cursor.fetchone()
+            await cursor.close()
+            self.pool.release(conn)
+            return result if result else {}
         except Exception as e:
             logger.error(f"Erro ao obter atividade do usuário: {e}")
             return {}
@@ -339,14 +347,17 @@ class Database:
     async def get_voice_sessions(self, user_id: int, guild_id: int, 
                                start_date: datetime, end_date: datetime) -> List[Dict]:
         try:
-            async with self.execute_query('''
+            cursor, conn = await self.execute_query('''
                 SELECT join_time, leave_time, duration 
                 FROM voice_sessions
                 WHERE user_id = %s AND guild_id = %s
                 AND join_time >= %s AND leave_time <= %s
                 ORDER BY join_time
-            ''', (user_id, guild_id, start_date, end_date)) as cursor:
-                return await cursor.fetchall()
+            ''', (user_id, guild_id, start_date, end_date))
+            result = await cursor.fetchall()
+            await cursor.close()
+            self.pool.release(conn)
+            return result
         except Exception as e:
             logger.error(f"Erro ao obter sessões de voz: {e}")
             return []
@@ -355,28 +366,33 @@ class Database:
                              start_date: datetime, end_date: datetime, 
                              meets_requirements: bool):
         try:
-            async with self.execute_query('''
+            cursor, conn = await self.execute_query('''
                 INSERT INTO checked_periods
                 (user_id, guild_id, period_start, period_end, meets_requirements)
                 VALUES (%s, %s, %s, %s, %s)
                 ON DUPLICATE KEY UPDATE
                     meets_requirements = VALUES(meets_requirements)
-            ''', (user_id, guild_id, start_date, end_date, meets_requirements)) as cursor:
-                await cursor.connection.commit()
+            ''', (user_id, guild_id, start_date, end_date, meets_requirements))
+            await conn.commit()
+            await cursor.close()
+            self.pool.release(conn)
         except Exception as e:
             logger.error(f"Erro ao registrar verificação de período: {e}")
             raise
 
     async def get_last_period_check(self, user_id: int, guild_id: int) -> Optional[Dict]:
         try:
-            async with self.execute_query('''
+            cursor, conn = await self.execute_query('''
                 SELECT period_start, period_end, meets_requirements
                 FROM checked_periods
                 WHERE user_id = %s AND guild_id = %s
                 ORDER BY period_start DESC
                 LIMIT 1
-            ''', (user_id, guild_id)) as cursor:
-                return await cursor.fetchone()
+            ''', (user_id, guild_id))
+            result = await cursor.fetchone()
+            await cursor.close()
+            self.pool.release(conn)
+            return result
         except Exception as e:
             logger.error(f"Erro ao obter última verificação de período: {e}")
             return None
@@ -384,31 +400,35 @@ class Database:
     async def log_warning(self, user_id: int, guild_id: int, warning_type: str):
         now = datetime.utcnow()
         try:
-            async with self.execute_query('''
+            cursor, conn = await self.execute_query('''
                 INSERT INTO user_warnings 
                 (user_id, guild_id, warning_type, warning_date) 
                 VALUES (%s, %s, %s, %s)
                 ON DUPLICATE KEY UPDATE 
                     warning_date = VALUES(warning_date)
-            ''', (user_id, guild_id, warning_type, now)) as cursor:
-                await cursor.connection.commit()
+            ''', (user_id, guild_id, warning_type, now))
+            await conn.commit()
+            await cursor.close()
+            self.pool.release(conn)
         except Exception as e:
             logger.error(f"Erro ao registrar aviso: {e}")
             raise
 
     async def get_last_warning(self, user_id: int, guild_id: int) -> Optional[Tuple[str, datetime]]:
         try:
-            async with self.execute_query('''
+            cursor, conn = await self.execute_query('''
                 SELECT warning_type, warning_date 
                 FROM user_warnings 
                 WHERE user_id = %s AND guild_id = %s
                 ORDER BY warning_date DESC
                 LIMIT 1
-            ''', (user_id, guild_id)) as cursor:
-                result = await cursor.fetchone()
-                if result:
-                    return result['warning_type'], result['warning_date']
-                return None
+            ''', (user_id, guild_id))
+            result = await cursor.fetchone()
+            await cursor.close()
+            self.pool.release(conn)
+            if result:
+                return result['warning_type'], result['warning_date']
+            return None
         except Exception as e:
             logger.error(f"Erro ao obter último aviso: {e}")
             return None
@@ -434,12 +454,14 @@ class Database:
     async def log_kicked_member(self, user_id: int, guild_id: int, reason: str):
         now = datetime.utcnow()
         try:
-            async with self.execute_query('''
+            cursor, conn = await self.execute_query('''
                 INSERT INTO kicked_members 
                 (user_id, guild_id, kick_date, reason) 
                 VALUES (%s, %s, %s, %s)
-            ''', (user_id, guild_id, now, reason)) as cursor:
-                await cursor.connection.commit()
+            ''', (user_id, guild_id, now, reason))
+            await conn.commit()
+            await cursor.close()
+            self.pool.release(conn)
         except Exception as e:
             logger.error(f"Erro ao registrar membro expulso: {e}")
             raise
