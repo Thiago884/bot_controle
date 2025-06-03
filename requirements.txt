@@ -9,3 +9,5 @@ flask-wtf>=1.0.0
 wtforms>=2.3.3
 matplotlib>=3.5.0
 numpy>=1.21.0
+aiomysql>=0.1.1
+matplotlib>=3.5.0

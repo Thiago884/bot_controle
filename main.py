@@ -10,8 +10,8 @@ import asyncio
 import time
 from datetime import datetime, timedelta
 from typing import Optional
-import mysql.connector
 from discord.ext import tasks
+import aiomysql
 
 # Configuração do logger
 def setup_logger():
@@ -93,6 +93,8 @@ class InactivityBot(commands.Bot):
         self.last_rate_limit = None
         self.rate_limit_delay = 1.0
         self.max_rate_limit_delay = 5.0
+        self.db_backup = None
+        self.pool_monitor_task = None
 
     async def setup_hook(self):
         """Configuração assíncrona que é executada após o login mas antes de conectar ao websocket"""
@@ -100,7 +102,11 @@ class InactivityBot(commands.Bot):
         self.load_config()
         
         # Inicializa o banco de dados após carregar a configuração
-        self.initialize_db()
+        await self.initialize_db()
+        
+        # Inicializa o backup do banco de dados
+        from database import DatabaseBackup
+        self.db_backup = DatabaseBackup(self.db)
         
         # Sincroniza os comandos slash
         try:
@@ -110,30 +116,39 @@ class InactivityBot(commands.Bot):
             logger.error(f"Erro ao sincronizar comandos slash: {e}")
         
         # Importa e inicia as tarefas
-        from tasks import inactivity_check, cleanup_members, check_warnings, database_backup, cleanup_old_data
+        from tasks import inactivity_check, cleanup_members, check_warnings, cleanup_old_data
         inactivity_check.start()
         cleanup_members.start()
         check_warnings.start()
-        database_backup.start()
         cleanup_old_data.start()
+        
+        # Inicia a tarefa de backup do banco de dados
+        self.start_backup_task()
         
         # Inicia os processadores
         self.voice_event_processor_task = asyncio.create_task(self.process_voice_events())
         self.command_processor_task = asyncio.create_task(self.process_commands_queue())
+        
+        # Inicia o monitoramento do pool
+        self.pool_monitor_task = asyncio.create_task(self.monitor_db_pool())
 
-    def initialize_db(self):
-        max_retries = 3
+    async def initialize_db(self):
+        max_retries = 5
+        initial_delay = 2
         for attempt in range(max_retries):
             try:
                 from database import Database
                 self.db = Database()
+                await self.db.initialize()
                 logger.info("Banco de dados inicializado com sucesso")
                 break
             except Exception as e:
                 logger.error(f"Tentativa {attempt + 1} de conexão ao banco de dados falhou: {e}")
                 if attempt == max_retries - 1:
                     raise
-                time.sleep(5)
+                sleep_time = initial_delay * (2 ** attempt)
+                logger.info(f"Tentando novamente em {sleep_time} segundos...")
+                await asyncio.sleep(sleep_time)
 
     def load_config(self):
         try:
@@ -179,6 +194,33 @@ class InactivityBot(commands.Bot):
         except Exception as e:
             logger.error(f"Erro ao salvar configuração: {e}")
             raise
+
+    def start_backup_task(self):
+        @tasks.loop(hours=24)
+        async def database_backup():
+            await self.wait_until_ready()
+            if hasattr(self, 'db_backup'):
+                success = await self.db_backup.create_backup()
+                if success:
+                    await self.log_action("Backup do Banco de Dados", None, "Backup diário realizado com sucesso")
+        
+        database_backup.start()
+
+    async def monitor_db_pool(self):
+        while True:
+            try:
+                if hasattr(self, 'db') and self.db:
+                    connected, running = await self.db.check_pool_status()
+                    if connected is not None:
+                        log_with_context(
+                            f"Status do pool de conexões: {connected} conectadas, {running} rodando",
+                            logging.INFO
+                        )
+                
+                await asyncio.sleep(3600)  # Verifica a cada hora
+            except Exception as e:
+                log_with_context(f"Erro no monitoramento do pool: {e}", logging.ERROR)
+                await asyncio.sleep(60)  # Espera 1 minuto antes de tentar novamente em caso de erro
 
     async def log_action(self, action: str, member: Optional[discord.Member] = None, details: str = None):
         try:
@@ -296,34 +338,6 @@ class InactivityBot(commands.Bot):
                         await self.db.log_voice_join(member.id, member.guild.id)
                         self.active_sessions[(member.id, member.guild.id)] = datetime.utcnow()
                         await self.log_action("Entrou em voz", member, f"Canal: {after.channel.name}")
-                    except mysql.connector.errors.PoolError:
-                        logger.warning("Pool esgotado, criando conexão temporária")
-                        temp_conn = None
-                        try:
-                            temp_conn = mysql.connector.connect(
-                                host=os.getenv('DB_HOST'),
-                                database=os.getenv('DB_NAME'),
-                                user=os.getenv('DB_USER'),
-                                password=os.getenv('DB_PASS'),
-                                port=int(os.getenv('DB_PORT', 3306)))
-                            cursor = temp_conn.cursor()
-                            cursor.execute('''
-                            INSERT INTO user_activity 
-                            (user_id, guild_id, last_voice_join, voice_sessions) 
-                            VALUES (%s, %s, %s, 1)
-                            ON DUPLICATE KEY UPDATE 
-                                last_voice_join = VALUES(last_voice_join),
-                                voice_sessions = voice_sessions + 1
-                            ''', (member.id, member.guild.id, datetime.utcnow()))
-                            temp_conn.commit()
-                            self.active_sessions[(member.id, member.guild.id)] = datetime.utcnow()
-                            await self.log_action("Entrou em voz", member, f"Canal: {after.channel.name}")
-                        except Exception as e:
-                            logger.error(f"Erro ao registrar entrada em voz (temp connection): {e}")
-                            await self.log_action("Erro DB - Entrada em voz", member, str(e))
-                        finally:
-                            if temp_conn and temp_conn.is_connected():
-                                temp_conn.close()
                     except Exception as e:
                         logger.error(f"Erro ao registrar entrada em voz: {e}")
                         await self.log_action("Erro DB - Entrada em voz", member, str(e))
@@ -342,41 +356,6 @@ class InactivityBot(commands.Bot):
                         if duration >= self.config['required_minutes'] * 60:
                             try:
                                 await self.db.log_voice_leave(member.id, member.guild.id, int(duration))
-                            except mysql.connector.errors.PoolError:
-                                logger.warning("Pool esgotado, criando conexão temporária")
-                                temp_conn = None
-                                try:
-                                    temp_conn = mysql.connector.connect(
-                                        host=os.getenv('DB_HOST'),
-                                        database=os.getenv('DB_NAME'),
-                                        user=os.getenv('DB_USER'),
-                                        password=os.getenv('DB_PASS'),
-                                        port=int(os.getenv('DB_PORT', 3306)))
-                                    cursor = temp_conn.cursor()
-                                    
-                                    # Atualizar user_activity
-                                    cursor.execute('''
-                                    UPDATE user_activity 
-                                    SET last_voice_leave = %s,
-                                        total_voice_time = total_voice_time + %s
-                                    WHERE user_id = %s AND guild_id = %s
-                                    ''', (datetime.utcnow(), int(duration), member.id, member.guild.id))
-                                    
-                                    # Inserir voice_sessions
-                                    join_time = datetime.utcnow() - timedelta(seconds=duration)
-                                    cursor.execute('''
-                                    INSERT INTO voice_sessions
-                                    (user_id, guild_id, join_time, leave_time, duration)
-                                    VALUES (%s, %s, %s, %s, %s)
-                                    ''', (member.id, member.guild.id, join_time, datetime.utcnow(), int(duration)))
-                                    
-                                    temp_conn.commit()
-                                except Exception as e:
-                                    logger.error(f"Erro ao registrar saída de voz (temp connection): {e}")
-                                    await self.log_action("Erro DB - Saída de voz", member, str(e))
-                                finally:
-                                    if temp_conn and temp_conn.is_connected():
-                                        temp_conn.close()
                             except Exception as e:
                                 logger.error(f"Erro ao registrar saída de voz: {e}")
                                 await self.log_action("Erro DB - Saída de voz", member, str(e))
@@ -546,3 +525,7 @@ if __name__ == "__main__":
     except Exception as e:
         logger.critical(f"Erro ao iniciar o bot: {e}")
         raise
+    finally:
+        # Garante que o pool de conexões é fechado corretamente
+        if hasattr(bot, 'db') and bot.db:
+            asyncio.run(bot.db.close())

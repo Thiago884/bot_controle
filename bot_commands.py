@@ -6,6 +6,9 @@ from datetime import datetime, timedelta
 import logging
 from main import bot, allowed_roles_only
 import asyncio
+import matplotlib.pyplot as plt
+import numpy as np
+from io import BytesIO
 
 logger = logging.getLogger('inactivity_bot')
 
@@ -825,10 +828,61 @@ async def check_user(interaction: discord.Interaction, member: discord.Member):
         await interaction.response.send_message(embed=embed)
         
         try:
-            bot.db.reconnect()
-            logger.info("Tentativa de reconexão ao banco de dados realizada")
+            await bot.db.check_pool_status()
+            logger.info("Verificação de pool de conexões realizada após erro")
         except Exception as db_error:
-            logger.error(f"Falha ao reconectar ao banco de dados: {db_error}")
+            logger.error(f"Falha ao verificar pool de conexões: {db_error}")
+
+async def generate_activity_graph(member: discord.Member, sessions: List[dict]) -> Optional[BytesIO]:
+    """Gera um gráfico de atividade do usuário e retorna como BytesIO"""
+    if not sessions:
+        return None
+
+    try:
+        # Preparar dados para o gráfico
+        dates = []
+        durations = []
+        for session in sessions:
+            dates.append(session['join_time'].date())
+            durations.append(session['duration'] / 3600)  # Converter para horas
+
+        # Criar figura
+        plt.figure(figsize=(10, 5))
+        
+        # Gráfico de barras para duração por dia
+        unique_dates = list(sorted(set(dates)))
+        daily_duration = [0] * len(unique_dates)
+        date_to_index = {date: idx for idx, date in enumerate(unique_dates)}
+        
+        for date, duration in zip(dates, durations):
+            daily_duration[date_to_index[date]] += duration
+
+        bars = plt.bar(unique_dates, daily_duration, color='skyblue')
+        
+        # Adicionar valores nas barras
+        for bar in bars:
+            height = bar.get_height()
+            if height > 0:
+                plt.text(bar.get_x() + bar.get_width()/2., height,
+                        f'{height:.1f}h',
+                        ha='center', va='bottom')
+
+        plt.title(f'Atividade de Voz - {member.display_name}')
+        plt.xlabel('Data')
+        plt.ylabel('Horas em Voz')
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+
+        # Salvar em buffer
+        buffer = BytesIO()
+        plt.savefig(buffer, format='png', dpi=100)
+        buffer.seek(0)
+        plt.close()
+        
+        return buffer
+    except Exception as e:
+        logger.error(f"Erro ao gerar gráfico de atividade: {e}")
+        return None
 
 async def _execute_check_user_history(interaction: discord.Interaction, member: discord.Member):
     try:
@@ -853,45 +907,39 @@ async def _execute_check_user_history(interaction: discord.Interaction, member: 
         await asyncio.sleep(0.5)
         
         logger.info("Coletando avisos, cargos removidos e verificações de período...")
-        cursor = None
-        try:
-            cursor = bot.db.connection.cursor(dictionary=True)
-            
-            # Avisos
-            cursor.execute('''
-            SELECT warning_type, warning_date 
-            FROM user_warnings 
-            WHERE user_id = %s AND guild_id = %s
-            ORDER BY warning_date DESC
-            ''', (member.id, member.guild.id))
-            all_warnings = cursor.fetchall()
-            
-            await asyncio.sleep(0.5)
-            
-            # Cargos removidos
-            cursor.execute('''
-            SELECT role_id, removal_date 
-            FROM removed_roles 
-            WHERE user_id = %s AND guild_id = %s
-            ORDER BY removal_date DESC
-            ''', (member.id, member.guild.id))
-            removed_roles = cursor.fetchall()
-            
-            await asyncio.sleep(0.5)
-            
-            # Períodos verificados
-            cursor.execute('''
-            SELECT period_start, period_end, meets_requirements
-            FROM checked_periods
-            WHERE user_id = %s AND guild_id = %s
-            ORDER BY period_start DESC
-            LIMIT 5
-            ''', (member.id, member.guild.id))
-            period_checks = cursor.fetchall()
-            
-        finally:
-            if cursor:
-                cursor.close()
+        async with bot.db.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                # Avisos
+                await cursor.execute('''
+                SELECT warning_type, warning_date 
+                FROM user_warnings 
+                WHERE user_id = %s AND guild_id = %s
+                ORDER BY warning_date DESC
+                ''', (member.id, member.guild.id))
+                all_warnings = await cursor.fetchall()
+                
+                await asyncio.sleep(0.5)
+                
+                # Cargos removidos
+                await cursor.execute('''
+                SELECT role_id, removal_date 
+                FROM removed_roles 
+                WHERE user_id = %s AND guild_id = %s
+                ORDER BY removal_date DESC
+                ''', (member.id, member.guild.id))
+                removed_roles = await cursor.fetchall()
+                
+                await asyncio.sleep(0.5)
+                
+                # Períodos verificados
+                await cursor.execute('''
+                SELECT period_start, period_end, meets_requirements
+                FROM checked_periods
+                WHERE user_id = %s AND guild_id = %s
+                ORDER BY period_start DESC
+                LIMIT 5
+                ''', (member.id, member.guild.id))
+                period_checks = await cursor.fetchall()
         
         logger.info("Processando estatísticas...")
         # Estatísticas gerais
@@ -1007,10 +1055,18 @@ async def _execute_check_user_history(interaction: discord.Interaction, member: 
         
         embed.set_footer(text=f"ID do usuário: {member.id} | Período: 90 dias")
         
+        # 11. Gerar e enviar gráfico de atividade
+        graph_buffer = await generate_activity_graph(member, voice_sessions)
+        
         logger.info("Enviando relatório...")
         try:
-            # Tenta enviar o embed
-            await interaction.followup.send(embed=embed)
+            if graph_buffer:
+                graph_file = discord.File(graph_buffer, filename='atividade.png')
+                embed.set_image(url="attachment://atividade.png")
+                await interaction.followup.send(embed=embed, file=graph_file)
+            else:
+                await interaction.followup.send(embed=embed)
+            
             logger.info("Relatório enviado com sucesso")
         except discord.errors.HTTPException as e:
             if e.status == 429:  # Rate limited
@@ -1018,7 +1074,12 @@ async def _execute_check_user_history(interaction: discord.Interaction, member: 
                 logger.error(f"Rate limit ao enviar embed. Tentando novamente em {retry_after} segundos")
                 await asyncio.sleep(float(retry_after))
                 try:
-                    await interaction.followup.send(embed=embed)  # Tentar novamente
+                    if graph_buffer:
+                        graph_file = discord.File(graph_buffer, filename='atividade.png')
+                        embed.set_image(url="attachment://atividade.png")
+                        await interaction.followup.send(embed=embed, file=graph_file)
+                    else:
+                        await interaction.followup.send(embed=embed)
                 except Exception as e:
                     logger.error(f"Erro ao tentar enviar embed novamente: {e}")
                     await interaction.edit_original_response(content="❌ Ocorreu um erro ao enviar o relatório completo.")
@@ -1090,3 +1151,51 @@ async def check_user_history_error(interaction: discord.Interaction, error: app_
                 "❌ Ocorreu um erro inesperado. Por favor, tente novamente mais tarde.")
         except Exception as e:
             logger.error(f"Erro ao enviar mensagem de erro: {e}")
+
+@bot.tree.command(name="force_check", description="Força uma verificação imediata de inatividade para um usuário")
+@allowed_roles_only()
+@commands.has_permissions(administrator=True)
+async def force_check(interaction: discord.Interaction, member: discord.Member):
+    try:
+        await interaction.response.defer(thinking=True)
+        
+        from tasks import inactivity_check
+        await inactivity_check._callback(member=member)
+        
+        await interaction.followup.send(
+            f"✅ Verificação forçada concluída para {member.mention}")
+        await bot.log_action(
+            "Verificação Forçada",
+            interaction.user,
+            f"Verificação manual executada para {member.mention}"
+        )
+    except Exception as e:
+        logger.error(f"Erro ao forçar verificação: {e}")
+        await interaction.followup.send(
+            "❌ Ocorreu um erro ao forçar a verificação. Por favor, tente novamente.")
+
+@bot.tree.command(name="cleanup_data", description="Limpa dados antigos do banco de dados")
+@allowed_roles_only()
+@commands.has_permissions(administrator=True)
+async def cleanup_data(interaction: discord.Interaction, days: int = 60):
+    try:
+        if days < 7:
+            await interaction.response.send_message(
+                "⚠️ O período mínimo para limpeza é de 7 dias.",
+                ephemeral=True)
+            return
+            
+        await interaction.response.defer(thinking=True)
+        
+        result = await bot.db.cleanup_old_data(days)
+        await interaction.followup.send(
+            f"✅ Limpeza de dados concluída: {result}")
+        await bot.log_action(
+            "Limpeza de Dados Manual",
+            interaction.user,
+            f"Dados antigos removidos (mais de {days} dias)"
+        )
+    except Exception as e:
+        logger.error(f"Erro ao limpar dados antigos: {e}")
+        await interaction.followup.send(
+            "❌ Ocorreu um erro ao limpar os dados. Por favor, tente novamente.")
