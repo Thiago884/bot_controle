@@ -18,63 +18,63 @@ class DatabaseBackup:
         self.backup_dir = 'backups'
         os.makedirs(self.backup_dir, exist_ok=True)
 
-    async def create_backup(self):
-        try:
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            backup_file = os.path.join(self.backup_dir, f'backup_{timestamp}.sql')
-            
-            async with self.db.pool.acquire() as conn:
-                async with conn.cursor() as cursor:
-                    # Get all tables
-                    await cursor.execute("SHOW TABLES")
-                    tables = [table[0] for table in await cursor.fetchall()]
-                    
-                    with open(backup_file, 'w', encoding='utf-8') as f:
-                        for table in tables:
-                            # Write table structure
-                            await cursor.execute(f"SHOW CREATE TABLE `{table}`")
-                            create_table = (await cursor.fetchone())[1]
-                            f.write(f"{create_table};\n\n")
+async def create_backup(self):
+    try:
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        backup_file = os.path.join(self.backup_dir, f'backup_{timestamp}.sql')
+        
+        async with self.db.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                # Get all tables
+                await cursor.execute("SHOW TABLES")
+                tables = [table[0] for table in await cursor.fetchall()]
+                
+                with open(backup_file, 'w', encoding='utf-8') as f:
+                    for table in tables:
+                        # Write table structure
+                        await cursor.execute(f"SHOW CREATE TABLE `{table}`")
+                        create_table = (await cursor.fetchone())[1]
+                        f.write(f"{create_table};\n\n")
+                        
+                        # Write table data
+                        await cursor.execute(f"SELECT * FROM `{table}`")
+                        rows = await cursor.fetchall()
+                        if rows:
+                            columns = [col[0] for col in cursor.description]
+                            f.write(f"INSERT INTO `{table}` (`{'`,`'.join(columns)}`) VALUES\n")
                             
-                            # Write table data
-                            await cursor.execute(f"SELECT * FROM `{table}`")
-                            rows = await cursor.fetchall()
-                            if rows:
-                                columns = [col[0] for col in cursor.description]
-                                f.write(f"INSERT INTO `{table}` (`{'`,`'.join(columns)}`) VALUES\n")
-                                
-                                for i, row in enumerate(rows):
-                                    values = []
-                                    for value in row:
-                                        if value is None:
-                                            values.append("NULL")
-                                        elif isinstance(value, (int, float)):
-                                            values.append(str(value))
-                                        else:
-                                            values.append("'" + str(value).replace("'", "''") + "'")
-                                    
-                                    f.write(f"({','.join(values)})")
-                                    if i < len(rows) - 1:
-                                        f.write(",\n")
+                            for i, row in enumerate(rows):
+                                values = []
+                                for value in row:
+                                    if value is None:
+                                        values.append("NULL")
+                                    elif isinstance(value, (int, float)):
+                                        values.append(str(value))
                                     else:
-                                        f.write(";\n\n")
-            
-            # Compress the backup
-            with zipfile.ZipFile(f'{backup_file}.zip', 'w', zipfile.ZIP_DEFLATED) as zipf:
-                zipf.write(backup_file, os.path.basename(backup_file))
-            
-            os.remove(backup_file)
-            
-            # Clean up old backups (keep last 7)
-            backups = sorted(glob.glob(os.path.join(self.backup_dir, '*.zip')))
-            for old_backup in backups[:-7]:
-                os.remove(old_backup)
-            
-            logger.info(f"Backup criado com sucesso: {backup_file}.zip")
-            return True
-        except Exception as e:
-            logger.error(f"Erro ao criar backup: {str(e)}")
-            return False
+                                        values.append("'" + str(value).replace("'", "''") + "'")
+                                
+                                f.write(f"({','.join(values)})")
+                                if i < len(rows) - 1:
+                                    f.write(",\n")
+                                else:
+                                    f.write(";\n\n")
+        
+        # Compress the backup
+        with zipfile.ZipFile(f'{backup_file}.zip', 'w', zipfile.ZIP_DEFLATED) as zipf:
+            zipf.write(backup_file, os.path.basename(backup_file))
+        
+        os.remove(backup_file)
+        
+        # Clean up old backups (keep last 7)
+        backups = sorted(glob.glob(os.path.join(self.backup_dir, '*.zip')))
+        for old_backup in backups[:-7]:
+            os.remove(old_backup)
+        
+        logger.info(f"Backup criado com sucesso: {backup_file}.zip")
+        return True
+    except Exception as e:
+        logger.error(f"Erro ao criar backup: {e}", exc_info=True)
+        return False
 
 class Database:
     def __init__(self):
