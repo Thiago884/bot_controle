@@ -16,16 +16,30 @@ class DatabaseBackup:
     def __init__(self, db):
         self.db = db
         self.backup_dir = 'backups'
-        os.makedirs(self.backup_dir, exist_ok=True)
+        try:
+            os.makedirs(self.backup_dir, exist_ok=True)
+            # Testar se o diretório é gravável
+            test_file = os.path.join(self.backup_dir, 'test.txt')
+            with open(test_file, 'w') as f:
+                f.write('test')
+            os.remove(test_file)
+            self.backup_enabled = True
+        except Exception as e:
+            logger.warning(f"Backups locais desabilitados - não foi possível acessar o diretório de backups: {e}")
+            self.backup_enabled = False
 
     async def create_backup(self):
+        if not self.backup_enabled:
+            logger.info("Backups locais estão desabilitados - pulando criação de backup")
+            return False
+            
         try:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             backup_file = os.path.join(self.backup_dir, f'backup_{timestamp}.sql')
             
             async with self.db.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
-                    # Get all tables - modificado para trabalhar com DictCursor
+                    # Get all tables
                     await cursor.execute("SHOW TABLES")
                     tables = [table['Tables_in_' + os.getenv('DB_NAME')] for table in await cursor.fetchall()]
                     
@@ -68,7 +82,10 @@ class DatabaseBackup:
             # Clean up old backups (keep last 7)
             backups = sorted(glob.glob(os.path.join(self.backup_dir, '*.zip')))
             for old_backup in backups[:-7]:
-                os.remove(old_backup)
+                try:
+                    os.remove(old_backup)
+                except Exception as e:
+                    logger.warning(f"Erro ao remover backup antigo {old_backup}: {e}")
             
             logger.info(f"Backup criado com sucesso: {backup_file}.zip")
             return True
