@@ -36,6 +36,7 @@ class DatabaseBackup:
         try:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             backup_file = os.path.join(self.backup_dir, f'backup_{timestamp}.sql')
+            zip_file = f'{backup_file}.zip'
             
             async with self.db.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
@@ -73,11 +74,15 @@ class DatabaseBackup:
                                     else:
                                         f.write(";\n\n")
             
-            # Compress the backup
-            with zipfile.ZipFile(f'{backup_file}.zip', 'w', zipfile.ZIP_DEFLATED) as zipf:
+            # Create zip file directly without removing SQL file first
+            with zipfile.ZipFile(zip_file, 'w', zipfile.ZIP_DEFLATED) as zipf:
                 zipf.write(backup_file, os.path.basename(backup_file))
             
-            os.remove(backup_file)
+            # Now remove the SQL file after successful zip creation
+            try:
+                os.remove(backup_file)
+            except Exception as e:
+                logger.warning(f"Erro ao remover arquivo SQL temporário: {e}")
             
             # Clean up old backups (keep last 7)
             backups = sorted(glob.glob(os.path.join(self.backup_dir, '*.zip')))
@@ -87,7 +92,7 @@ class DatabaseBackup:
                 except Exception as e:
                     logger.warning(f"Erro ao remover backup antigo {old_backup}: {e}")
             
-            logger.info(f"Backup criado com sucesso: {backup_file}.zip")
+            logger.info(f"Backup criado com sucesso: {zip_file}")
             return True
         except Exception as e:
             logger.error(f"Erro ao criar backup: {e}", exc_info=True)
@@ -127,9 +132,10 @@ class Database:
                         await cursor.execute("SELECT 1")
                         await cursor.fetchone()
                 
-                await self.create_tables()
-                self._is_initialized = True
-                logger.info("Banco de dados inicializado com sucesso")
+                if not self._is_initialized:  # Evitar criar tabelas múltiplas vezes
+                    await self.create_tables()
+                    self._is_initialized = True
+                    logger.info("Banco de dados inicializado com sucesso")
                 return
                 
             except Exception as e:
@@ -167,6 +173,7 @@ class Database:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
                     try:
+                        # Usar IF NOT EXISTS para evitar warnings
                         await cursor.execute('''
                         CREATE TABLE IF NOT EXISTS user_activity (
                             user_id BIGINT,

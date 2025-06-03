@@ -4,61 +4,15 @@ import logging
 from main import bot
 from discord.ext import tasks
 import discord
-import matplotlib.pyplot as plt
-import numpy as np
 from io import BytesIO
 from typing import Optional
+from utils import generate_activity_graph
 
 logger = logging.getLogger('inactivity_bot')
 
-async def generate_activity_report(member: discord.Member, sessions: list) -> Optional[discord.File]:
-    """Gera um relatório gráfico de atividade e retorna como discord.File"""
-    if not sessions:
-        return None
-
-    try:
-        # Preparar dados para o gráfico
-        dates = [s['join_time'].date() for s in sessions]
-        durations = [s['duration'] / 60 for s in sessions]  # Converter para minutos
-
-        # Agrupar por data
-        unique_dates = sorted(list(set(dates)))
-        date_to_duration = {date: 0 for date in unique_dates}
-        
-        for date, duration in zip(dates, durations):
-            date_to_duration[date] += duration
-
-        # Configurar o gráfico
-        plt.figure(figsize=(10, 5))
-        bars = plt.bar(unique_dates, [date_to_duration[d] for d in unique_dates], color='skyblue')
-        
-        # Adicionar valores nas barras
-        for bar in bars:
-            height = bar.get_height()
-            if height > 0:
-                plt.text(bar.get_x() + bar.get_width()/2., height,
-                        f'{int(height)}m',
-                        ha='center', va='bottom')
-
-        plt.title(f'Atividade de Voz - {member.display_name}\nPeríodo: {unique_dates[0]} a {unique_dates[-1]}')
-        plt.xlabel('Data')
-        plt.ylabel('Minutos em Voz')
-        plt.xticks(rotation=45)
-        plt.tight_layout()
-
-        # Salvar em buffer
-        buffer = BytesIO()
-        plt.savefig(buffer, format='png', dpi=100)
-        buffer.seek(0)
-        plt.close()
-        
-        return discord.File(buffer, filename='atividade.png')
-    except Exception as e:
-        logger.error(f"Erro ao gerar relatório gráfico: {e}")
-        return None
-
 @tasks.loop(hours=24)
 async def inactivity_check():
+    """Verifica a inatividade dos membros e remove cargos se necessário"""
     await bot.wait_until_ready()
     
     required_minutes = bot.config['required_minutes']
@@ -159,18 +113,15 @@ async def inactivity_check():
                             await bot.log_action("Erro ao Remover Cargo", member, "Permissões insuficientes")
                         except Exception as e:
                             logger.error(f"Erro ao remover cargos de {member}: {e}")
-                
+            
             except Exception as e:
                 logger.error(f"Erro ao verificar inatividade para {member}: {e}")
-                try:
-                    await bot.db.check_pool_status()
-                except Exception as db_error:
-                    logger.error(f"Falha ao verificar pool de conexões: {db_error}")
     
     logger.info(f"Verificação de inatividade concluída. Membros processados: {processed_members}, Cargos removidos: {members_with_roles_removed}")
 
 @tasks.loop(hours=24)
 async def check_warnings():
+    """Verifica e envia avisos de inatividade para membros"""
     await bot.wait_until_ready()
     
     required_minutes = bot.config['required_minutes']
@@ -225,15 +176,12 @@ async def check_warnings():
                     
             except Exception as e:
                 logger.error(f"Erro ao verificar avisos para {member}: {e}")
-                try:
-                    await bot.db.check_pool_status()
-                except Exception as db_error:
-                    logger.error(f"Falha ao verificar pool de conexões: {db_error}")
     
     logger.info(f"Verificação de avisos concluída. Avisos enviados: Primeiro={warnings_sent['first']}, Segundo={warnings_sent['second']}")
 
 @tasks.loop(hours=24)
 async def cleanup_members():
+    """Remove membros inativos que estão sem cargos há muito tempo"""
     await bot.wait_until_ready()
     
     kick_after_days = bot.config['kick_after_days']
@@ -275,15 +223,12 @@ async def cleanup_members():
                             logger.error(f"Erro ao expulsar membro {member}: {e}")
             except Exception as e:
                 logger.error(f"Erro ao verificar membro para expulsão {member}: {e}")
-                try:
-                    await bot.db.check_pool_status()
-                except Exception as db_error:
-                    logger.error(f"Falha ao verificar pool de conexões: {db_error}")
     
     logger.info(f"Limpeza de membros concluída. Membros expulsos: {members_kicked}")
 
 @tasks.loop(hours=24)
 async def database_backup():
+    """Executa backup diário do banco de dados"""
     await bot.wait_until_ready()
     if not hasattr(bot, 'db_backup'):
         from database import DatabaseBackup
@@ -302,6 +247,7 @@ async def database_backup():
 
 @tasks.loop(hours=24)
 async def cleanup_old_data():
+    """Limpa dados antigos do banco de dados"""
     await bot.wait_until_ready()
     
     try:
@@ -340,27 +286,16 @@ async def cleanup_old_data():
         logger.error(f"Erro ao limpar dados antigos: {e}")
         await bot.log_action("Erro na Limpeza de Dados", None, f"Falha ao limpar dados antigos: {str(e)}")
 
-@tasks.loop(minutes=30)
-async def monitor_db_pool():
-    """Monitora o status do pool de conexões do banco de dados"""
-    await bot.wait_until_ready()
-    
-    if not hasattr(bot, 'db') or not bot.db:
-        return
-    
+async def generate_activity_report(member: discord.Member, sessions: list) -> Optional[discord.File]:
+    """Gera um relatório gráfico de atividade e retorna como discord.File"""
+    if not sessions:
+        return None
+
     try:
-        connected, running = await bot.db.check_pool_status()
-        if connected is not None:
-            logger.info(f"Status do pool de conexões: {connected} conectadas, {running} rodando")
-            
-            # Ajuste dinâmico do pool baseado na carga
-            if connected > 25:  # Se estiver usando mais de 25 conexões
-                logger.warning("Pool de conexões com alta utilização - considerando aumento")
-            elif connected < 5:  # Se estiver usando menos de 5 conexões
-                logger.info("Pool de conexões com baixa utilização")
-                
+        return await generate_activity_graph(member, sessions)
     except Exception as e:
-        logger.error(f"Erro ao monitorar pool de conexões: {e}")
+        logger.error(f"Erro ao gerar relatório gráfico: {e}")
+        return None
 
 async def _execute_force_check(member: discord.Member):
     """Executa uma verificação forçada de inatividade para um membro específico"""
@@ -412,6 +347,5 @@ def setup_tasks():
     cleanup_members.start()
     database_backup.start()
     cleanup_old_data.start()
-    monitor_db_pool.start()
     
     logger.info("Todas as tarefas agendadas foram iniciadas")

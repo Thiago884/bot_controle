@@ -6,9 +6,8 @@ from datetime import datetime, timedelta
 import logging
 from main import bot, allowed_roles_only
 import asyncio
-import matplotlib.pyplot as plt
-import numpy as np
 from io import BytesIO
+from utils import generate_activity_graph
 
 logger = logging.getLogger('inactivity_bot')
 
@@ -16,6 +15,7 @@ logger = logging.getLogger('inactivity_bot')
 @bot.tree.command(name="allow_role", description="Adiciona um cargo à lista de cargos permitidos")
 @commands.has_permissions(administrator=True)
 async def allow_role(interaction: discord.Interaction, role: discord.Role):
+    """Adiciona um cargo à lista de cargos permitidos para usar comandos do bot"""
     try:
         logger.info(f"Comando allow_role acionado por {interaction.user} para o cargo {role.name}")
         
@@ -55,6 +55,7 @@ async def allow_role(interaction: discord.Interaction, role: discord.Role):
 @bot.tree.command(name="disallow_role", description="Remove um cargo da lista de cargos permitidos")
 @commands.has_permissions(administrator=True)
 async def disallow_role(interaction: discord.Interaction, role: discord.Role):
+    """Remove um cargo da lista de cargos permitidos para usar comandos do bot"""
     try:
         logger.info(f"Comando disallow_role acionado por {interaction.user} para o cargo {role.name}")
         
@@ -93,6 +94,7 @@ async def disallow_role(interaction: discord.Interaction, role: discord.Role):
 
 @bot.tree.command(name="list_allowed_roles", description="Lista os cargos com permissão para usar comandos")
 async def list_allowed_roles(interaction: discord.Interaction):
+    """Lista todos os cargos que têm permissão para usar comandos do bot"""
     try:
         logger.info(f"Comando list_allowed_roles acionado por {interaction.user}")
         
@@ -132,6 +134,7 @@ async def list_allowed_roles(interaction: discord.Interaction):
 @allowed_roles_only()
 @commands.has_permissions(administrator=True)
 async def set_inactivity(interaction: discord.Interaction, days: int):
+    """Define o período de monitoramento de inatividade em dias"""
     try:
         logger.info(f"Comando set_inactivity acionado por {interaction.user} com {days} dias")
         
@@ -173,6 +176,7 @@ async def set_inactivity(interaction: discord.Interaction, days: int):
 @allowed_roles_only()
 @commands.has_permissions(administrator=True)
 async def set_requirements(interaction: discord.Interaction, minutes: int, days: int):
+    """Define os requisitos mínimos de atividade em minutos e dias"""
     try:
         logger.info(f"Comando set_requirements acionado por {interaction.user} com {minutes} minutos e {days} dias")
         
@@ -218,6 +222,7 @@ async def set_requirements(interaction: discord.Interaction, minutes: int, days:
 @allowed_roles_only()
 @commands.has_permissions(administrator=True)
 async def set_kick_days(interaction: discord.Interaction, days: int):
+    """Define após quantos dias sem cargos um membro será expulso do servidor"""
     try:
         logger.info(f"Comando set_kick_days acionado por {interaction.user} com {days} dias")
         
@@ -259,6 +264,7 @@ async def set_kick_days(interaction: discord.Interaction, days: int):
 @allowed_roles_only()
 @commands.has_permissions(administrator=True)
 async def add_tracked_role(interaction: discord.Interaction, role: discord.Role):
+    """Adiciona um cargo à lista de cargos monitorados para inatividade"""
     try:
         logger.info(f"Comando add_tracked_role acionado por {interaction.user} para o cargo {role.name}")
         
@@ -304,6 +310,7 @@ async def add_tracked_role(interaction: discord.Interaction, role: discord.Role)
 @allowed_roles_only()
 @commands.has_permissions(administrator=True)
 async def remove_tracked_role(interaction: discord.Interaction, role: discord.Role):
+    """Remove um cargo da lista de cargos monitorados para inatividade"""
     try:
         logger.info(f"Comando remove_tracked_role acionado por {interaction.user} para o cargo {role.name}")
         
@@ -349,6 +356,7 @@ async def remove_tracked_role(interaction: discord.Interaction, role: discord.Ro
 @allowed_roles_only()
 @commands.has_permissions(administrator=True)
 async def set_notification_channel(interaction: discord.Interaction, channel: discord.TextChannel):
+    """Define o canal onde serão enviadas as notificações de cargos"""
     try:
         logger.info(f"Comando set_notification_channel acionado por {interaction.user} para o canal {channel.name}")
         
@@ -383,6 +391,7 @@ async def set_notification_channel(interaction: discord.Interaction, channel: di
 @allowed_roles_only()
 @commands.has_permissions(administrator=True)
 async def set_warning_days(interaction: discord.Interaction, first: int, second: int):
+    """Define os dias de antecedência para os avisos de inatividade"""
     try:
         logger.info(f"Comando set_warning_days acionado por {interaction.user} com {first} e {second} dias")
         
@@ -429,6 +438,7 @@ async def set_warning_days(interaction: discord.Interaction, first: int, second:
 @allowed_roles_only()
 @commands.has_permissions(administrator=True)
 async def set_warning_message(interaction: discord.Interaction, warning_type: str, message: str):
+    """Define a mensagem personalizada para um tipo específico de aviso"""
     try:
         logger.info(f"Comando set_warning_message acionado por {interaction.user} para o tipo {warning_type}")
         
@@ -470,6 +480,7 @@ async def set_warning_message(interaction: discord.Interaction, warning_type: st
 @allowed_roles_only()
 @commands.has_permissions(administrator=True)
 async def whitelist_add_user(interaction: discord.Interaction, user: discord.User):
+    """Adiciona um usuário à whitelist (não será verificado por inatividade)"""
     try:
         logger.info(f"Comando whitelist_add_user acionado por {interaction.user} para o usuário {user.name}")
         
@@ -510,6 +521,7 @@ async def whitelist_add_user(interaction: discord.Interaction, user: discord.Use
 @allowed_roles_only()
 @commands.has_permissions(administrator=True)
 async def whitelist_add_role(interaction: discord.Interaction, role: discord.Role):
+    """Adiciona um cargo à whitelist (membros com este cargo não serão verificados)"""
     try:
         logger.info(f"Comando whitelist_add_role acionado por {interaction.user} para o cargo {role.name}")
         
@@ -550,6 +562,7 @@ async def whitelist_add_role(interaction: discord.Interaction, role: discord.Rol
 @allowed_roles_only()
 @commands.has_permissions(administrator=True)
 async def whitelist_remove_user(interaction: discord.Interaction, user: discord.User):
+    """Remove um usuário da whitelist (voltará a ser verificado por inatividade)"""
     try:
         logger.info(f"Comando whitelist_remove_user acionado por {interaction.user} para o usuário {user.name}")
         
@@ -590,6 +603,7 @@ async def whitelist_remove_user(interaction: discord.Interaction, user: discord.
 @allowed_roles_only()
 @commands.has_permissions(administrator=True)
 async def whitelist_remove_role(interaction: discord.Interaction, role: discord.Role):
+    """Remove um cargo da whitelist (membros com este cargo voltarão a ser verificados)"""
     try:
         logger.info(f"Comando whitelist_remove_role acionado por {interaction.user} para o cargo {role.name}")
         
@@ -630,6 +644,7 @@ async def whitelist_remove_role(interaction: discord.Interaction, role: discord.
 @allowed_roles_only()
 @commands.has_permissions(administrator=True)
 async def set_absence_channel(interaction: discord.Interaction, channel: discord.VoiceChannel):
+    """Define o canal de voz que será considerado como ausência (não contabiliza tempo)"""
     try:
         logger.info(f"Comando set_absence_channel acionado por {interaction.user} para o canal {channel.name}")
         
@@ -661,6 +676,7 @@ async def set_absence_channel(interaction: discord.Interaction, channel: discord
 @bot.tree.command(name="show_config", description="Mostra a configuração atual do bot")
 @allowed_roles_only()
 async def show_config(interaction: discord.Interaction):
+    """Mostra todas as configurações atuais do bot"""
     try:
         logger.info(f"Comando show_config acionado por {interaction.user}")
         
@@ -763,6 +779,7 @@ async def show_config(interaction: discord.Interaction):
 @bot.tree.command(name="check_user", description="Verifica a atividade de um usuário")
 @allowed_roles_only()
 async def check_user(interaction: discord.Interaction, member: discord.Member):
+    """Verifica as estatísticas de atividade de um usuário específico"""
     try:
         logger.info(f"Comando check_user acionado por {interaction.user} para o membro {member.name}")
         
@@ -778,8 +795,21 @@ async def check_user(interaction: discord.Interaction, member: discord.Member):
             color=discord.Color.green(),
             timestamp=datetime.now(bot.timezone)
         )
-        
+
         embed.set_thumbnail(url=member.display_avatar.url)
+
+        embed.add_field(name="Último Join na Call", value=last_join or "N/A", inline=False)
+        embed.add_field(name="Sessões em Call", value=str(sessions), inline=True)
+        embed.add_field(name="Tempo Total em Call", value=f"{total_time} minutos", inline=True)
+        embed.add_field(name="Último Aviso", value=last_warning or "Nenhum", inline=False)
+        embed.add_field(name="Última Verificação", value=last_check or "Nenhuma", inline=False)
+
+        await interaction.response.send_message(embed=embed)
+
+    except Exception as e:
+        logger.error(f"Erro ao executar check_user: {e}")
+        await interaction.response.send_message("❌ Ocorreu um erro ao verificar a atividade do usuário.", ephemeral=True)
+
         
         # Estatísticas básicas
         embed.add_field(
@@ -833,58 +863,8 @@ async def check_user(interaction: discord.Interaction, member: discord.Member):
         except Exception as db_error:
             logger.error(f"Falha ao verificar pool de conexões: {db_error}")
 
-async def generate_activity_graph(member: discord.Member, sessions: List[dict]) -> Optional[BytesIO]:
-    """Gera um gráfico de atividade do usuário e retorna como BytesIO"""
-    if not sessions:
-        return None
-
-    try:
-        # Preparar dados para o gráfico
-        dates = []
-        durations = []
-        for session in sessions:
-            dates.append(session['join_time'].date())
-            durations.append(session['duration'] / 3600)  # Converter para horas
-
-        # Criar figura
-        plt.figure(figsize=(10, 5))
-        
-        # Gráfico de barras para duração por dia
-        unique_dates = list(sorted(set(dates)))
-        daily_duration = [0] * len(unique_dates)
-        date_to_index = {date: idx for idx, date in enumerate(unique_dates)}
-        
-        for date, duration in zip(dates, durations):
-            daily_duration[date_to_index[date]] += duration
-
-        bars = plt.bar(unique_dates, daily_duration, color='skyblue')
-        
-        # Adicionar valores nas barras
-        for bar in bars:
-            height = bar.get_height()
-            if height > 0:
-                plt.text(bar.get_x() + bar.get_width()/2., height,
-                        f'{height:.1f}h',
-                        ha='center', va='bottom')
-
-        plt.title(f'Atividade de Voz - {member.display_name}')
-        plt.xlabel('Data')
-        plt.ylabel('Horas em Voz')
-        plt.xticks(rotation=45)
-        plt.tight_layout()
-
-        # Salvar em buffer
-        buffer = BytesIO()
-        plt.savefig(buffer, format='png', dpi=100)
-        buffer.seek(0)
-        plt.close()
-        
-        return buffer
-    except Exception as e:
-        logger.error(f"Erro ao gerar gráfico de atividade: {e}")
-        return None
-
 async def _execute_check_user_history(interaction: discord.Interaction, member: discord.Member):
+    """Executa a verificação completa do histórico de um usuário"""
     try:
         logger.info(f"Iniciando check_user_history para {member.name} solicitado por {interaction.user}")
         
@@ -1100,6 +1080,7 @@ async def _execute_check_user_history(interaction: discord.Interaction, member: 
 @app_commands.checks.cooldown(1, 120.0, key=lambda i: (i.guild_id, i.user.id))  # Aumentado para 120 segundos
 @allowed_roles_only()
 async def check_user_history(interaction: discord.Interaction, member: discord.Member):
+    """Gera um relatório completo da atividade de um usuário"""
     try:
         await interaction.response.defer(thinking=True)
         # Adiciona um pequeno delay antes de processar para evitar rate limits
@@ -1126,6 +1107,7 @@ async def check_user_history(interaction: discord.Interaction, member: discord.M
 
 @check_user_history.error
 async def check_user_history_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    """Trata erros específicos do comando check_user_history"""
     if isinstance(error, app_commands.CommandOnCooldown):
         logger.warning(f"Comando check_user_history em cooldown para {interaction.user}: {error}")
         try:
@@ -1156,6 +1138,7 @@ async def check_user_history_error(interaction: discord.Interaction, error: app_
 @allowed_roles_only()
 @commands.has_permissions(administrator=True)
 async def force_check(interaction: discord.Interaction, member: discord.Member):
+    """Força uma verificação imediata de inatividade para um usuário específico"""
     try:
         await interaction.response.defer(thinking=True)
         
@@ -1178,6 +1161,7 @@ async def force_check(interaction: discord.Interaction, member: discord.Member):
 @allowed_roles_only()
 @commands.has_permissions(administrator=True)
 async def cleanup_data(interaction: discord.Interaction, days: int = 60):
+    """Limpa dados antigos do banco de dados (padrão: 60 dias)"""
     try:
         if days < 7:
             await interaction.response.send_message(

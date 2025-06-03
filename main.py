@@ -16,6 +16,9 @@ import aiomysql
 # Configuração do logger
 def setup_logger():
     logger = logging.getLogger('inactivity_bot')
+    if logger.handlers:  # Se já tem handlers, não adicione novos
+        return logger
+        
     logger.setLevel(logging.INFO)
     
     formatter = logging.Formatter(
@@ -95,39 +98,40 @@ class InactivityBot(commands.Bot):
         self.max_rate_limit_delay = 5.0
         self.db_backup = None
         self.pool_monitor_task = None
+        self._setup_complete = False
 
     async def setup_hook(self):
         """Configuração assíncrona que é executada após o login mas antes de conectar ao websocket"""
-        # Carrega a configuração primeiro
-        self.load_config()
-        
-        # Inicializa o banco de dados após carregar a configuração
-        await self.initialize_db()
-        
-        # Inicializa o backup do banco de dados
-        from database import DatabaseBackup
-        self.db_backup = DatabaseBackup(self.db)
-        
-        # Sincroniza os comandos slash
-        try:
-            synced = await self.tree.sync()
-            logger.info(f"Comandos slash sincronizados: {len(synced)} comandos")
-        except Exception as e:
-            logger.error(f"Erro ao sincronizar comandos slash: {e}")
-        
-        # Importa e inicia as tarefas
-        from tasks import setup_tasks
-        setup_tasks()
-        
-        # Inicia a tarefa de backup do banco de dados
-        self.start_backup_task()
-        
-        # Inicia os processadores
-        self.voice_event_processor_task = asyncio.create_task(self.process_voice_events())
-        self.command_processor_task = asyncio.create_task(self.process_commands_queue())
-        
-        # Inicia o monitoramento do pool
-        self.pool_monitor_task = asyncio.create_task(self.monitor_db_pool())
+        if not self._setup_complete:
+            self._setup_complete = True
+            
+            # Carrega a configuração primeiro
+            self.load_config()
+            
+            # Inicializa o banco de dados após carregar a configuração
+            await self.initialize_db()
+            
+            # Inicializa o backup do banco de dados
+            from database import DatabaseBackup
+            self.db_backup = DatabaseBackup(self.db)
+            
+            # Sincroniza os comandos slash
+            try:
+                synced = await self.tree.sync()
+                logger.info(f"Comandos slash sincronizados: {len(synced)} comandos")
+            except Exception as e:
+                logger.error(f"Erro ao sincronizar comandos slash: {e}")
+            
+            # Importa e inicia as tarefas
+            from tasks import setup_tasks
+            setup_tasks()
+            
+            # Inicia os processadores
+            self.voice_event_processor_task = asyncio.create_task(self.process_voice_events())
+            self.command_processor_task = asyncio.create_task(self.process_commands_queue())
+            
+            # Inicia o monitoramento do pool (apenas aqui, removido de tasks.py)
+            self.pool_monitor_task = asyncio.create_task(self.monitor_db_pool())
 
     async def initialize_db(self):
         max_retries = 5
@@ -146,6 +150,29 @@ class InactivityBot(commands.Bot):
                 sleep_time = initial_delay * (2 ** attempt)
                 logger.info(f"Tentando novamente em {sleep_time} segundos...")
                 await asyncio.sleep(sleep_time)
+
+    async def monitor_db_pool(self):
+        """Monitora o status do pool de conexões do banco de dados"""
+        while True:
+            try:
+                if hasattr(self, 'db') and self.db:
+                    connected, running = await self.db.check_pool_status()
+                    if connected is not None:
+                        log_with_context(
+                            f"Status do pool de conexões: {connected} conectadas, {running} rodando",
+                            logging.INFO
+                        )
+                        
+                        # Ajuste dinâmico do pool baseado na carga
+                        if connected > 25:  # Se estiver usando mais de 25 conexões
+                            logger.warning("Pool de conexões com alta utilização - considerando aumento")
+                        elif connected < 5:  # Se estiver usando menos de 5 conexões
+                            logger.info("Pool de conexões com baixa utilização")
+                
+                await asyncio.sleep(1800)  # Verifica a cada 30 minutos
+            except Exception as e:
+                log_with_context(f"Erro no monitoramento do pool: {e}", logging.ERROR)
+                await asyncio.sleep(60)  # Espera 1 minuto antes de tentar novamente em caso de erro
 
     def load_config(self):
         try:
@@ -203,23 +230,7 @@ class InactivityBot(commands.Bot):
         
         database_backup.start()
 
-    async def monitor_db_pool(self):
-        while True:
-            try:
-                if hasattr(self, 'db') and self.db:
-                    connected, running = await self.db.check_pool_status()
-                    if connected is not None:
-                        log_with_context(
-                            f"Status do pool de conexões: {connected} conectadas, {running} rodando",
-                            logging.INFO
-                        )
-                
-                await asyncio.sleep(3600)  # Verifica a cada hora
-            except Exception as e:
-                log_with_context(f"Erro no monitoramento do pool: {e}", logging.ERROR)
-                await asyncio.sleep(60)  # Espera 1 minuto antes de tentar novamente em caso de erro
-
-    async def log_action(self, action: str, member: Optional[discord.Member] = None, details: str = None):
+    async def log_action(self, action: str, member: Optional[discord.Member] = None, details: str = None, file: discord.File = None):
         try:
             channel = self.get_channel(self.config.get('log_channel', 1376013013206827161))
             if channel:
@@ -237,13 +248,19 @@ class InactivityBot(commands.Bot):
                     embed.add_field(name="Detalhes", value=details, inline=False)
                 
                 try:
-                    await channel.send(embed=embed)
+                    if file:
+                        await channel.send(embed=embed, file=file)
+                    else:
+                        await channel.send(embed=embed)
                 except discord.errors.HTTPException as e:
                     if e.status == 429:  # Rate limited
                         retry_after = e.response.headers.get('Retry-After', 60)
                         logger.warning(f"Rate limit ao enviar log. Tentando novamente em {retry_after} segundos")
                         await asyncio.sleep(float(retry_after))
-                        await channel.send(embed=embed)
+                        if file:
+                            await channel.send(embed=embed, file=file)
+                        else:
+                            await channel.send(embed=embed)
                     else:
                         raise
         except Exception as e:
