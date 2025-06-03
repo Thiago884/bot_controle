@@ -116,11 +116,8 @@ class InactivityBot(commands.Bot):
             logger.error(f"Erro ao sincronizar comandos slash: {e}")
         
         # Importa e inicia as tarefas
-        from tasks import inactivity_check, cleanup_members, check_warnings, cleanup_old_data
-        inactivity_check.start()
-        cleanup_members.start()
-        check_warnings.start()
-        cleanup_old_data.start()
+        from tasks import setup_tasks
+        setup_tasks()
         
         # Inicia a tarefa de backup do banco de dados
         self.start_backup_task()

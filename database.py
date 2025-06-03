@@ -25,15 +25,15 @@ class DatabaseBackup:
             
             async with self.db.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
-                    # Get all tables
+                    # Get all tables - modificado para trabalhar com DictCursor
                     await cursor.execute("SHOW TABLES")
-                    tables = [table[0] for table in await cursor.fetchall()]
+                    tables = [table['Tables_in_' + os.getenv('DB_NAME')] for table in await cursor.fetchall()]
                     
                     with open(backup_file, 'w', encoding='utf-8') as f:
                         for table in tables:
                             # Write table structure
                             await cursor.execute(f"SHOW CREATE TABLE `{table}`")
-                            create_table = (await cursor.fetchone())[1]
+                            create_table = (await cursor.fetchone())['Create Table']
                             f.write(f"{create_table};\n\n")
                             
                             # Write table data
@@ -45,7 +45,7 @@ class DatabaseBackup:
                                 
                                 for i, row in enumerate(rows):
                                     values = []
-                                    for value in row:
+                                    for value in row.values():
                                         if value is None:
                                             values.append("NULL")
                                         elif isinstance(value, (int, float)):
