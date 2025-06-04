@@ -130,7 +130,7 @@ class InactivityBot(commands.Bot):
             self.voice_event_processor_task = asyncio.create_task(self.process_voice_events())
             self.command_processor_task = asyncio.create_task(self.process_commands_queue())
             
-            # Inicia o monitoramento do pool (apenas aqui, removido de tasks.py)
+            # Inicia o monitoramento do pool
             self.pool_monitor_task = asyncio.create_task(self.monitor_db_pool())
 
     async def initialize_db(self):
@@ -158,10 +158,10 @@ class InactivityBot(commands.Bot):
                 if hasattr(self, 'db') and self.db:
                     connected, running = await self.db.check_pool_status()
                     if connected is not None:
-                        log_with_context(
-                            f"Status do pool de conexões: {connected} conectadas, {running} rodando",
-                            logging.INFO
+                        log_message = (
+                            f"Status do pool de conexões: {connected} conectadas, {running} rodando"
                         )
+                        logger.info(log_message)
                         
                         # Ajuste dinâmico do pool baseado na carga
                         if connected > 25:  # Se estiver usando mais de 25 conexões
