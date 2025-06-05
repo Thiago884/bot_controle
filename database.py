@@ -187,19 +187,28 @@ class Database:
 
     async def check_pool_status(self):
         if self.pool:
+            conn = None # Inicializa conn para garantir que esteja definido
             try:
-                async with self.pool.acquire() as conn:
-                    async with conn.cursor() as cursor:
-                        await cursor.execute("SHOW STATUS LIKE 'Threads_connected'")
-                        threads = (await cursor.fetchone())['Value']
-                        await cursor.execute("SHOW STATUS LIKE 'Threads_running'")
-                        running = (await cursor.fetchone())['Value']
-                        self.pool.release(conn) # Garante que a conexão é liberada
-                        return int(threads), int(running)
+                conn = await self.pool.acquire()
+                async with conn.cursor() as cursor:
+                    # Obter Threads_connected
+                    await cursor.execute("SHOW STATUS LIKE 'Threads_connected'")
+                    result_connected = await cursor.fetchone()
+                    threads_connected = int(result_connected['Value']) if result_connected and 'Value' in result_connected else 0
+
+                    # Obter Threads_running
+                    await cursor.execute("SHOW STATUS LIKE 'Threads_running'")
+                    result_running = await cursor.fetchone()
+                    threads_running = int(result_running['Value']) if result_running and 'Value' in result_running else 0
+                    
+                    return threads_connected, threads_running
             except Exception as e:
-                logger.error(f"Erro ao verificar status do pool: {e}")
+                logger.error(f"Erro ao verificar status do pool: {e}", exc_info=True) # Adiciona exc_info para mais detalhes
                 return None, None
-        return None, None # Adicionado para caso self.pool não exista
+            finally: # Garante que a conexão é liberada
+                if conn:
+                    self.pool.release(conn)
+        return None, None
 
     async def create_tables(self):
         async with self.semaphore:
