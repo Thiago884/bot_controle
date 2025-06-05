@@ -7,8 +7,8 @@ import logging
 
 logger = logging.getLogger('inactivity_bot')
 
-async def generate_activity_graph(member: discord.Member, sessions: List[Dict]) -> Optional[discord.File]:
-    """Gera um gráfico de atividade do usuário e retorna como discord.File"""
+async def generate_activity_graph(member: discord.Member, sessions: List[Dict]) -> Optional[BytesIO]:
+    """Gera um gráfico de atividade do usuário e retorna como BytesIO"""
     if not sessions:
         return None
 
@@ -51,7 +51,18 @@ async def generate_activity_graph(member: discord.Member, sessions: List[Dict]) 
         buffer.seek(0)
         plt.close()
         
-        return discord.File(buffer, filename='atividade.png')
+        return buffer
     except Exception as e:
         logger.error(f"Erro ao gerar gráfico de atividade: {e}")
+        return None
+
+async def generate_activity_report(member: discord.Member, sessions: list) -> Optional[discord.File]:
+    """Gera um relatório gráfico de atividade e retorna como discord.File"""
+    try:
+        buffer = await generate_activity_graph(member, sessions)
+        if buffer:
+            return discord.File(buffer, filename='atividade.png')
+        return None
+    except Exception as e:
+        logger.error(f"Erro ao gerar relatório gráfico: {e}")
         return None

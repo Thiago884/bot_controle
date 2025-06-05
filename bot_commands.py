@@ -810,59 +810,6 @@ async def check_user(interaction: discord.Interaction, member: discord.Member):
         logger.error(f"Erro ao executar check_user: {e}")
         await interaction.response.send_message("❌ Ocorreu um erro ao verificar a atividade do usuário.", ephemeral=True)
 
-        
-        # Estatísticas básicas
-        embed.add_field(
-            name="📈 Estatísticas",
-            value=(
-                f"**Última entrada:** {last_join.strftime('%d/%m/%Y %H:%M') if last_join else 'Nunca'}\n"
-                f"**Sessões totais:** {sessions}\n"
-                f"**Tempo total:** {int(total_time//3600)}h {int((total_time%3600)//60)}m"
-            ),
-            inline=True
-        )
-        
-        # Status atual
-        if last_check:
-            period_end = last_check['period_end'].replace(tzinfo=bot.timezone)
-            days_remaining = (period_end - datetime.now(bot.timezone)).days
-            meets_req = last_check['meets_requirements']
-            
-            status_value = (
-                f"**Período atual:** {days_remaining} dias restantes\n"
-                f"**Status:** {'✅ Cumprindo' if meets_req else '❌ Não cumprindo'}\n"
-                f"**Requisitos:** {bot.config['required_minutes']}min em {bot.config['required_days']} dias"
-            )
-            embed.add_field(name="🔄 Status", value=status_value, inline=True)
-        
-        # Último aviso
-        if last_warning:
-            warning_type, warning_date = last_warning
-            embed.add_field(
-                name="⚠️ Último Aviso",
-                value=f"{warning_type} em {warning_date.strftime('%d/%m/%Y %H:%M')}",
-                inline=False
-            )
-        
-        embed.set_footer(text=f"ID do usuário: {member.id}")
-        
-        await interaction.response.send_message(embed=embed)
-        logger.info(f"Informações de atividade de {member.name} exibidas com sucesso")
-    except Exception as e:
-        logger.error(f"Erro ao verificar usuário: {e}")
-        embed = discord.Embed(
-            title="❌ Erro",
-            description="Ocorreu um erro ao verificar o usuário. Por favor, tente novamente mais tarde.",
-            color=discord.Color.red()
-        )
-        await interaction.response.send_message(embed=embed)
-        
-        try:
-            await bot.db.check_pool_status()
-            logger.info("Verificação de pool de conexões realizada após erro")
-        except Exception as db_error:
-            logger.error(f"Falha ao verificar pool de conexões: {db_error}")
-
 async def _execute_check_user_history(interaction: discord.Interaction, member: discord.Member):
     """Executa a verificação completa do histórico de um usuário"""
     try:
