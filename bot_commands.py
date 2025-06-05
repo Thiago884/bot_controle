@@ -1089,15 +1089,24 @@ async def force_check(interaction: discord.Interaction, member: discord.Member):
     try:
         await interaction.response.defer(thinking=True)
         
-        from tasks import inactivity_check
-        await inactivity_check._callback(member=member)
+        from tasks import _execute_force_check
+        result = await _execute_force_check(member)
         
-        await interaction.followup.send(
-            f"✅ Verificação forçada concluída para {member.mention}")
+        if result['meets_requirements']:
+            message = f"✅ {member.mention} está cumprindo os requisitos de atividade."
+        else:
+            message = (
+                f"⚠️ {member.mention} não está cumprindo os requisitos de atividade.\n"
+                f"Dias válidos: {result['valid_days']}/{result['required_days']}\n"
+                f"Sessões no período: {result['sessions_count']}"
+            )
+        
+        await interaction.followup.send(message)
         await bot.log_action(
             "Verificação Forçada",
             interaction.user,
-            f"Verificação manual executada para {member.mention}"
+            f"Verificação manual executada para {member.mention}\n"
+            f"Resultado: {'Cumpre' if result['meets_requirements'] else 'Não cumpre'} requisitos"
         )
     except Exception as e:
         logger.error(f"Erro ao forçar verificação: {e}")
