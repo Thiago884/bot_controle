@@ -101,7 +101,7 @@ class DatabaseBackup:
 class Database:
     def __init__(self):
         self.pool = None
-        self.semaphore = asyncio.Semaphore(20)  # Limite de operações concorrentes
+        self.semaphore = asyncio.Semaphore(10)  # Reduzido de 20 para 10
         self._is_initialized = False
         self.heartbeat_task = None
 
@@ -119,12 +119,12 @@ class Database:
                     user=os.getenv('DB_USER'),
                     password=os.getenv('DB_PASS'),
                     db=os.getenv('DB_NAME'),
-                    minsize=5,
-                    maxsize=30,
+                    minsize=1,  # Reduzido de 5
+                    maxsize=5,  # Reduzido de 30 para 5 (adequado para plano HostGator)
                     connect_timeout=30,
                     autocommit=True,
                     cursorclass=DictCursor,
-                    pool_recycle=3600,  # Reduzido para 1 hora para forçar reciclagem mais frequente
+                    pool_recycle=300,  # Reduzido para 5 minutos
                 )
                 
                 # Testar conexão
@@ -140,8 +140,7 @@ class Database:
                     logger.info("Banco de dados inicializado com sucesso")
                 
                 # Iniciar task de heartbeat
-                # Aumentar a frequência do heartbeat
-                self.heartbeat_task = asyncio.create_task(self._db_heartbeat(interval=180)) # A cada 3 minutos
+                self.heartbeat_task = asyncio.create_task(self._db_heartbeat(interval=600)) # Aumentado para 10 minutos
                 logger.info("Task de heartbeat do banco de dados iniciada")
                 
                 return
@@ -155,7 +154,7 @@ class Database:
                 else:
                     raise
 
-    async def _db_heartbeat(self, interval: int = 300):
+    async def _db_heartbeat(self, interval: int = 600):
         """Envia um ping periódico para manter a conexão ativa"""
         while True:
             try:
@@ -169,7 +168,7 @@ class Database:
                 break
             except Exception as e:
                 logger.error(f"Erro no heartbeat do banco de dados: {e}")
-                await asyncio.sleep(60)  # Espera 1 minuto antes de tentar novamente
+                await asyncio.sleep(300)  # Espera 5 minutos antes de tentar novamente
 
     async def close(self):
         if self.heartbeat_task:
@@ -187,7 +186,7 @@ class Database:
 
     async def check_pool_status(self):
         if self.pool:
-            conn = None # Inicializa conn para garantir que esteja definido
+            conn = None
             try:
                 conn = await self.pool.acquire()
                 async with conn.cursor() as cursor:
@@ -203,16 +202,16 @@ class Database:
                     
                     return threads_connected, threads_running
             except Exception as e:
-                logger.error(f"Erro ao verificar status do pool: {e}", exc_info=True) # Adiciona exc_info para mais detalhes
+                logger.error(f"Erro ao verificar status do pool: {e}", exc_info=True)
                 return None, None
-            finally: # Garante que a conexão é liberada
+            finally:
                 if conn:
                     self.pool.release(conn)
         return None, None
 
     async def create_tables(self):
         async with self.semaphore:
-            conn = None # Inicializa conn para garantir que esteja definido
+            conn = None
             try:
                 conn = await self.pool.acquire()
                 async with conn.cursor() as cursor:
@@ -315,7 +314,7 @@ class Database:
     async def execute_query(self, query: str, params: tuple = None):
         async with self.semaphore:
             max_retries = 3
-            conn = None # Inicializa conn para garantir que esteja definido
+            conn = None
             try:
                 for attempt in range(max_retries):
                     try:
@@ -324,20 +323,22 @@ class Database:
                         await cursor.execute(query, params or ())
                         return cursor, conn
                     except (aiomysql.OperationalError, aiomysql.InterfaceError) as e:
-                        logger.error(f"Erro de conexão no banco de dados (tentativa {attempt + 1}/{max_retries}): {e}")
-                        if conn: # Garante que a conexão é liberada em caso de erro antes da retentativa
-                            self.pool.release(conn)
-                            conn = None # Zera a conexão para a próxima tentativa
-                        if attempt < max_retries - 1:
-                            await asyncio.sleep(2 ** attempt)  # Backoff exponencial
+                        if "max_user_connections" in str(e):
+                            logger.error(f"Limite de conexões excedido (tentativa {attempt + 1}/{max_retries})")
+                            await asyncio.sleep(10 * (attempt + 1))  # Backoff exponencial
                             continue
-                        raise # Se todas as retentativas falharem, levanta o erro
-                return None, None # Fallback para caso todas as retentativas falhem, embora o raise deva cobrir
+                        logger.error(f"Erro de conexão (tentativa {attempt + 1}/{max_retries}): {e}")
+                        if conn:
+                            self.pool.release(conn)
+                            conn = None
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(5 * (attempt + 1))  # Backoff exponencial
+                            continue
+                        raise
+                return None, None
             except Exception as e:
                 logger.error(f"Erro ao executar query: {e}")
                 raise
-            # Não é necessário um 'finally' aqui porque a liberação da conexão é tratada pelo chamador
-            # ou dentro do loop de retentativa se a aquisição falhar.
 
     async def save_config(self, guild_id: int, config: dict):
         cursor = None
@@ -362,7 +363,6 @@ class Database:
             if conn:
                 self.pool.release(conn)
 
-
     async def load_config(self, guild_id: int) -> Optional[dict]:
         cursor = None
         conn = None
@@ -384,7 +384,6 @@ class Database:
                 await cursor.close()
             if conn:
                 self.pool.release(conn)
-
 
     async def log_voice_join(self, user_id: int, guild_id: int):
         now = datetime.utcnow()
@@ -457,7 +456,6 @@ class Database:
             if conn:
                 self.pool.release(conn)
 
-
     async def get_voice_sessions(self, user_id: int, guild_id: int, 
                                start_date: datetime, end_date: datetime) -> List[Dict]:
         cursor = None
@@ -480,7 +478,6 @@ class Database:
                 await cursor.close()
             if conn:
                 self.pool.release(conn)
-
 
     async def log_period_check(self, user_id: int, guild_id: int, 
                              start_date: datetime, end_date: datetime, 
@@ -526,7 +523,6 @@ class Database:
                 await cursor.close()
             if conn:
                 self.pool.release(conn)
-
 
     async def log_warning(self, user_id: int, guild_id: int, warning_type: str):
         now = datetime.utcnow()

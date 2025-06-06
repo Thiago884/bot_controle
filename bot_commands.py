@@ -815,23 +815,21 @@ async def _execute_check_user_history(interaction: discord.Interaction, member: 
     try:
         logger.info(f"Iniciando check_user_history para {member.name} solicitado por {interaction.user}")
         
-        # Adiciona um pequeno delay antes de cada operação que pode causar rate limit
-        await asyncio.sleep(1)
+        # Delay inicial maior para evitar rate limits
+        await asyncio.sleep(2)
         
-        # 1. Coletar todos os dados necessários
+        # 1. Coletar todos os dados necessários com delays entre consultas
         logger.info("Coletando dados básicos do usuário...")
         user_data = await bot.db.get_user_activity(member.id, member.guild.id)
         
-        # Adiciona delay entre consultas
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(1)  # Delay entre consultas
         
-        logger.info("Coletando sessões de voz (últimos 90 dias)...")
+        logger.info("Coletando sessões de voz (últimos 30 dias)...")
         end_date = datetime.now(bot.timezone)
-        start_date = end_date - timedelta(days=90)
+        start_date = end_date - timedelta(days=30)  # Reduzido de 90 para 30 dias
         voice_sessions = await bot.db.get_voice_sessions(member.id, member.guild.id, start_date, end_date)
         
-        # Adiciona delay entre consultas
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(1)  # Delay entre consultas
         
         logger.info("Coletando avisos, cargos removidos e verificações de período...")
         async with bot.db.pool.acquire() as conn:
@@ -842,10 +840,11 @@ async def _execute_check_user_history(interaction: discord.Interaction, member: 
                 FROM user_warnings 
                 WHERE user_id = %s AND guild_id = %s
                 ORDER BY warning_date DESC
+                LIMIT 5  # Limite adicionado
                 ''', (member.id, member.guild.id))
                 all_warnings = await cursor.fetchall()
                 
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.5)  # Delay entre consultas
                 
                 # Cargos removidos
                 await cursor.execute('''
@@ -853,10 +852,11 @@ async def _execute_check_user_history(interaction: discord.Interaction, member: 
                 FROM removed_roles 
                 WHERE user_id = %s AND guild_id = %s
                 ORDER BY removal_date DESC
+                LIMIT 5  # Limite adicionado
                 ''', (member.id, member.guild.id))
                 removed_roles = await cursor.fetchall()
                 
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.5)  # Delay entre consultas
                 
                 # Períodos verificados
                 await cursor.execute('''
@@ -980,51 +980,53 @@ async def _execute_check_user_history(interaction: discord.Interaction, member: 
             )
             embed.add_field(name="⚠️ Avisos Recentes", value=warnings_value, inline=True)
         
-        embed.set_footer(text=f"ID do usuário: {member.id} | Período: 90 dias")
+        embed.set_footer(text=f"ID do usuário: {member.id} | Período: 30 dias")
         
         # 11. Gerar e enviar gráfico de atividade
         graph_buffer = await generate_activity_graph(member, voice_sessions)
         
         logger.info("Enviando relatório...")
-        try:
-            if graph_buffer:
-                graph_file = discord.File(graph_buffer, filename='atividade.png')
-                embed.set_image(url="attachment://atividade.png")
-                await interaction.followup.send(embed=embed, file=graph_file)
-            else:
-                await interaction.followup.send(embed=embed)
-            
-            logger.info("Relatório enviado com sucesso")
-        except discord.errors.HTTPException as e:
-            if e.status == 429:  # Rate limited
-                retry_after = e.response.headers.get('Retry-After', 60)
-                logger.error(f"Rate limit ao enviar embed. Tentando novamente em {retry_after} segundos")
-                await asyncio.sleep(float(retry_after))
-                try:
-                    if graph_buffer:
-                        graph_file = discord.File(graph_buffer, filename='atividade.png')
-                        embed.set_image(url="attachment://atividade.png")
-                        await interaction.followup.send(embed=embed, file=graph_file)
-                    else:
-                        await interaction.followup.send(embed=embed)
-                except Exception as e:
-                    logger.error(f"Erro ao tentar enviar embed novamente: {e}")
-                    await interaction.edit_original_response(content="❌ Ocorreu um erro ao enviar o relatório completo.")
-            elif e.status == 401:  # Invalid Webhook Token
-                logger.error("Token de webhook inválido, tentando enviar mensagem simples")
-                await interaction.edit_original_response(content="📊 Relatório disponível, mas não foi possível enviar o formato completo.")
-            else:
-                raise
         
+        # Sistema de tentativas com tratamento de rate limit
+        max_retries = 3
+        retry_delay = 5  # segundos
+        
+        for attempt in range(max_retries):
+            try:
+                if graph_buffer:
+                    graph_file = discord.File(graph_buffer, filename='atividade.png')
+                    embed.set_image(url="attachment://atividade.png")
+                    await interaction.followup.send(embed=embed, file=graph_file)
+                else:
+                    await interaction.followup.send(embed=embed)
+                break  # Se enviou com sucesso, sai do loop
+            except discord.errors.HTTPException as e:
+                if e.status == 429:
+                    retry_after = int(e.response.headers.get('Retry-After', retry_delay))
+                    logger.warning(f"Rate limit (tentativa {attempt + 1}/{max_retries}). Tentando novamente em {retry_after} segundos")
+                    await asyncio.sleep(retry_after)
+                    continue
+                raise
+        else:
+            logger.error("Falha após várias tentativas de enviar o relatório")
+            try:
+                # Tenta enviar uma mensagem mais simples
+                await interaction.followup.send(
+                    "📊 Relatório disponível, mas não foi possível enviar o formato completo devido a limitações do Discord.")
+            except:
+                pass
+                
     except Exception as e:
         logger.error(f"Erro ao gerar relatório completo: {e}", exc_info=True)
         try:
-            await interaction.edit_original_response(content="❌ Ocorreu um erro ao gerar o relatório completo.")
-        except Exception as followup_error:
-            logger.error(f"Erro ao enviar mensagem de erro: {followup_error}")
+            # Mensagem de erro simplificada
+            await interaction.followup.send(
+                "❌ Ocorreu um erro ao gerar o relatório completo.")
+        except:
+            pass
 
 @bot.tree.command(name="check_user_history", description="Relatório completo de atividade do usuário")
-@app_commands.checks.cooldown(1, 120.0, key=lambda i: (i.guild_id, i.user.id))  # Aumentado para 120 segundos
+@app_commands.checks.cooldown(1, 180.0, key=lambda i: (i.guild_id, i.user.id))  # Aumentado para 180 segundos
 @allowed_roles_only()
 async def check_user_history(interaction: discord.Interaction, member: discord.Member):
     """Gera um relatório completo da atividade de um usuário"""
@@ -1106,15 +1108,17 @@ async def force_check(interaction: discord.Interaction, member: discord.Member):
             )
         
         # Tentar enviar a resposta com tratamento de rate limit
-        try:
-            await interaction.followup.send(message)
-        except discord.errors.HTTPException as e:
-            if e.status == 429:
-                retry_after = e.response.headers.get('Retry-After', 60)
-                logger.warning(f"Rate limit ao enviar resposta. Tentando novamente em {retry_after} segundos")
-                await asyncio.sleep(float(retry_after))
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
                 await interaction.followup.send(message)
-            else:
+                break
+            except discord.errors.HTTPException as e:
+                if e.status == 429 and attempt < max_retries - 1:
+                    retry_after = float(e.response.headers.get('Retry-After', 5))
+                    logger.warning(f"Rate limit ao enviar resposta (tentativa {attempt + 1}). Tentando novamente em {retry_after} segundos")
+                    await asyncio.sleep(retry_after)
+                    continue
                 raise
         
         await bot.log_action(
