@@ -810,278 +810,174 @@ async def check_user(interaction: discord.Interaction, member: discord.Member):
         logger.error(f"Erro ao executar check_user: {e}")
         await interaction.response.send_message("❌ Ocorreu um erro ao verificar a atividade do usuário.", ephemeral=True)
 
-async def _execute_check_user_history(interaction: discord.Interaction, member: discord.Member):
-    """Executa a verificação completa do histórico de um usuário"""
+@bot.tree.command(name="check_user_history", description="Relatório completo de atividade do usuário")
+@app_commands.checks.cooldown(1, 300.0, key=lambda i: (i.guild_id, i.user.id))  # 5 minutos de cooldown
+@allowed_roles_only()
+async def check_user_history(interaction: discord.Interaction, member: discord.Member):
+    """Gera um relatório completo da atividade de um usuário"""
     try:
-        logger.info(f"Iniciando check_user_history para {member.name} solicitado por {interaction.user}")
+        await interaction.response.defer(thinking=True)
         
-        # Delay inicial maior para evitar rate limits
-        await asyncio.sleep(2)
+        # Verificar se o bot está rate limited
+        if bot.rate_limited:
+            await interaction.followup.send(
+                "⚠️ O bot está temporariamente limitado pelo Discord. Por favor, tente novamente mais tarde.")
+            return
+            
+        # Adicionar delays maiores entre as etapas
+        await asyncio.sleep(2)  # Delay inicial maior
         
-        # 1. Coletar todos os dados necessários com delays entre consultas
-        logger.info("Coletando dados básicos do usuário...")
-        user_data = await bot.db.get_user_activity(member.id, member.guild.id)
-        
-        await asyncio.sleep(1)  # Delay entre consultas
-        
-        logger.info("Coletando sessões de voz (últimos 30 dias)...")
+        # Reduzir o período de consulta de 30 para 14 dias para diminuir a carga
         end_date = datetime.now(bot.timezone)
-        start_date = end_date - timedelta(days=30)  # Reduzido de 90 para 30 dias
-        voice_sessions = await bot.db.get_voice_sessions(member.id, member.guild.id, start_date, end_date)
+        start_date = end_date - timedelta(days=14)
         
-        await asyncio.sleep(1)  # Delay entre consultas
-        
-        logger.info("Coletando avisos, cargos removidos e verificações de período...")
-        async with bot.db.pool.acquire() as conn:
-            async with conn.cursor() as cursor:
-                # Avisos
-                await cursor.execute('''
-                SELECT warning_type, warning_date 
-                FROM user_warnings 
-                WHERE user_id = %s AND guild_id = %s
-                ORDER BY warning_date DESC
-                LIMIT 5  # Limite adicionado
-                ''', (member.id, member.guild.id))
-                all_warnings = await cursor.fetchall()
-                
-                await asyncio.sleep(0.5)  # Delay entre consultas
-                
-                # Cargos removidos
-                await cursor.execute('''
-                SELECT role_id, removal_date 
-                FROM removed_roles 
-                WHERE user_id = %s AND guild_id = %s
-                ORDER BY removal_date DESC
-                LIMIT 5  # Limite adicionado
-                ''', (member.id, member.guild.id))
-                removed_roles = await cursor.fetchall()
-                
-                await asyncio.sleep(0.5)  # Delay entre consultas
-                
-                # Períodos verificados
-                await cursor.execute('''
-                SELECT period_start, period_end, meets_requirements
-                FROM checked_periods
-                WHERE user_id = %s AND guild_id = %s
-                ORDER BY period_start DESC
-                LIMIT 5
-                ''', (member.id, member.guild.id))
-                period_checks = await cursor.fetchall()
-        
-        logger.info("Processando estatísticas...")
-        # Estatísticas gerais
-        total_sessions = user_data.get('voice_sessions', 0) if user_data else 0
-        total_time = user_data.get('total_voice_time', 0) if user_data else 0
-        avg_session = total_time / total_sessions if total_sessions > 0 else 0
-        
-        # Encontrar sessão mais longa
-        longest_session = max(voice_sessions, key=lambda x: x['duration'], default=None)
-        
-        # Padrões de horário (agora como texto)
-        hour_counts = [0] * 24
-        for session in voice_sessions:
-            hour = session['join_time'].hour
-            hour_counts[hour] += session['duration'] / 3600  # em horas
-        
-        hour_stats = "\n".join(
-            f"{h:02d}h-{(h+1)%24:02d}h: {int(count)}h {int((count%1)*60)}m" 
-            for h, count in enumerate(hour_counts) if count > 0
-        )
-        
-        # Dias da semana
-        weekday_names = ['Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado', 'Domingo']
-        weekday_counts = [0] * 7
-        for session in voice_sessions:
-            weekday = session['join_time'].weekday()
-            weekday_counts[weekday] += session['duration'] / 3600  # em horas
-        
-        weekday_stats = "\n".join(
-            f"{weekday_names[i]}: {int(count)}h {int((count%1)*60)}m" 
-            for i, count in enumerate(weekday_counts) if count > 0
-        )
-        
-        # 4. Criar o embed principal
-        logger.info("Criando embed de relatório...")
-        embed = discord.Embed(
-            title=f"📊 Relatório Completo de {member.display_name}",
-            color=discord.Color.blue(),
-            timestamp=datetime.now(bot.timezone))
-        
-        embed.set_thumbnail(url=member.display_avatar.url)
-        
-        # 5. Seção de Estatísticas Gerais
-        stats_value = (
-            f"🎙️ **Total de Sessões:** {total_sessions}\n"
-            f"⏱️ **Tempo Total:** {int(total_time//3600)}h {int((total_time%3600)//60)}m\n"
-            f"📅 **Média por Sessão:** {int(avg_session//60)}m\n"
-        )
-        
-        if longest_session:
-            stats_value += (
-                f"🏆 **Sessão Mais Longa:** {int(longest_session['duration']//3600)}h "
-                f"{int((longest_session['duration']%3600)//60)}m "
-                f"(em {longest_session['join_time'].strftime('%d/%m/%Y')}\n"
-            )
-        
-        embed.add_field(name="📈 Estatísticas Gerais", value=stats_value, inline=False)
-        
-        # 6. Seção de Status Atual
-        last_check = period_checks[0] if period_checks else None
-        if last_check:
-            period_start = last_check['period_start'].replace(tzinfo=bot.timezone)
-            period_end = last_check['period_end'].replace(tzinfo=bot.timezone)
-            meets_req = last_check['meets_requirements']
+        # Coletar dados com delays entre consultas
+        try:
+            user_data = await bot.db.get_user_activity(member.id, member.guild.id)
+            await asyncio.sleep(1)
             
-            # Calcular dias restantes
-            days_left = (period_end - datetime.now(bot.timezone)).days
+            voice_sessions = await bot.db.get_voice_sessions(member.id, member.guild.id, start_date, end_date)
+            await asyncio.sleep(1)
             
-            status_value = (
-                f"📅 **Período:** {period_start.strftime('%d/%m/%Y')} - {period_end.strftime('%d/%m/%Y')}\n"
-                f"⏳ **Dias Restantes:** {days_left}\n"
-                f"✅ **Status:** {'Cumprindo' if meets_req else 'Não cumprindo'}\n"
-                f"🎯 **Requisitos:** {bot.config['required_minutes']}min em {bot.config['required_days']} dias"
+            # Coletar apenas os dados essenciais
+            async with bot.db.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute('''
+                        SELECT warning_type, warning_date 
+                        FROM user_warnings 
+                        WHERE user_id = %s AND guild_id = %s
+                        ORDER BY warning_date DESC
+                        LIMIT 3
+                    ''', (member.id, member.guild.id))
+                    all_warnings = await cursor.fetchall()
+                    
+                    await asyncio.sleep(0.5)
+                    
+                    await cursor.execute('''
+                        SELECT role_id, removal_date 
+                        FROM removed_roles 
+                        WHERE user_id = %s AND guild_id = %s
+                        ORDER BY removal_date DESC
+                        LIMIT 3
+                    ''', (member.id, member.guild.id))
+                    removed_roles = await cursor.fetchall()
+                    
+                    await asyncio.sleep(0.5)
+                    
+                    await cursor.execute('''
+                        SELECT period_start, period_end, meets_requirements
+                        FROM checked_periods
+                        WHERE user_id = %s AND guild_id = %s
+                        ORDER BY period_start DESC
+                        LIMIT 1
+                    ''', (member.id, member.guild.id))
+                    period_checks = await cursor.fetchone()
+            
+            # Criar embed simplificado
+            embed = discord.Embed(
+                title=f"📊 Relatório de Atividade - {member.display_name}",
+                color=discord.Color.blue(),
+                description=f"Período: {start_date.strftime('%d/%m/%Y')} a {end_date.strftime('%d/%m/%Y')}"
             )
             
-            embed.add_field(name="🔄 Status Atual", value=status_value, inline=False)
-        
-        # 7. Seção de Histórico Recente
-        if voice_sessions:
-            recent_sessions = voice_sessions[:5]  # Últimas 5 sessões
-            sessions_value = "\n".join(
-                f"▸ {s['join_time'].strftime('%d/%m %H:%M')} - "
-                f"{int(s['duration']//60)}min"
-                for s in recent_sessions
+            embed.set_thumbnail(url=member.display_avatar.url)
+            
+            # Adicionar campos básicos
+            total_time = sum(s['duration'] for s in voice_sessions) / 60  # em minutos
+            embed.add_field(
+                name="📈 Estatísticas",
+                value=f"• Sessões: {len(voice_sessions)}\n• Tempo total: {int(total_time)} minutos",
+                inline=True
             )
-            embed.add_field(name="🕒 Últimas Sessões", value=sessions_value, inline=True)
-        
-        # 8. Seção de Padrões de Atividade
-        activity_patterns = ""
-        if hour_stats:
-            activity_patterns += f"**Horários mais ativos:**\n{hour_stats}\n\n"
-        if weekday_stats:
-            activity_patterns += f"**Dias mais ativos:**\n{weekday_stats}"
-        
-        if activity_patterns:
-            embed.add_field(name="⏰ Padrões de Atividade", value=activity_patterns, inline=True)
-        
-        # 9. Seção de Cargos
-        current_roles = [role for role in member.roles if role.id in bot.config['tracked_roles']]
-        roles_value = "Nenhum cargo monitorado"
-        if current_roles:
-            roles_value = "\n".join(f"▸ {role.mention}" for role in current_roles)
-        
-        embed.add_field(name="🎖️ Cargos Atuais", value=roles_value, inline=True)
-        
-        # 10. Seção de Avisos
-        if all_warnings:
-            warnings_value = "\n".join(
-                f"▸ {w['warning_type']} - {w['warning_date'].strftime('%d/%m/%Y')}"
-                for w in all_warnings[:3]  # Mostrar apenas 3 avisos recentes
-            )
-            embed.add_field(name="⚠️ Avisos Recentes", value=warnings_value, inline=True)
-        
-        embed.set_footer(text=f"ID do usuário: {member.id} | Período: 30 dias")
-        
-        # 11. Gerar e enviar gráfico de atividade
-        graph_buffer = await generate_activity_graph(member, voice_sessions)
-        
-        logger.info("Enviando relatório...")
-        
-        # Sistema de tentativas com tratamento de rate limit
-        max_retries = 3
-        retry_delay = 5  # segundos
-        
-        for attempt in range(max_retries):
+            
+            if period_checks:
+                period_start = period_checks['period_start'].replace(tzinfo=bot.timezone)
+                period_end = period_checks['period_end'].replace(tzinfo=bot.timezone)
+                days_remaining = (period_end - datetime.now(bot.timezone)).days
+                
+                embed.add_field(
+                    name="🔄 Status Atual",
+                    value=(
+                        f"• Período: {period_start.strftime('%d/%m/%Y')} a {period_end.strftime('%d/%m/%Y')}\n"
+                        f"• Dias restantes: {days_remaining}\n"
+                        f"• Status: {'✅ Cumprindo' if period_checks['meets_requirements'] else '⚠️ Não cumprindo'}"
+                    ),
+                    inline=True
+                )
+            
+            # Adicionar avisos se houver
+            if all_warnings:
+                warnings_str = "\n".join(
+                    f"• {w['warning_type']} - {w['warning_date'].strftime('%d/%m/%Y')}"
+                    for w in all_warnings
+                )
+                embed.add_field(name="⚠️ Avisos", value=warnings_str, inline=False)
+            
+            # Tentar enviar o gráfico apenas se não houver rate limit
             try:
+                graph_buffer = await generate_activity_graph(member, voice_sessions)
                 if graph_buffer:
                     graph_file = discord.File(graph_buffer, filename='atividade.png')
                     embed.set_image(url="attachment://atividade.png")
                     await interaction.followup.send(embed=embed, file=graph_file)
                 else:
                     await interaction.followup.send(embed=embed)
-                break  # Se enviou com sucesso, sai do loop
             except discord.errors.HTTPException as e:
                 if e.status == 429:
-                    retry_after = int(e.response.headers.get('Retry-After', retry_delay))
-                    logger.warning(f"Rate limit (tentativa {attempt + 1}/{max_retries}). Tentando novamente em {retry_after} segundos")
-                    await asyncio.sleep(retry_after)
-                    continue
-                raise
-        else:
-            logger.error("Falha após várias tentativas de enviar o relatório")
-            try:
-                # Tenta enviar uma mensagem mais simples
-                await interaction.followup.send(
-                    "📊 Relatório disponível, mas não foi possível enviar o formato completo devido a limitações do Discord.")
-            except:
-                pass
-                
-    except Exception as e:
-        logger.error(f"Erro ao gerar relatório completo: {e}", exc_info=True)
-        try:
-            # Mensagem de erro simplificada
+                    bot.rate_limited = True
+                    bot.last_rate_limit = datetime.now()
+                    await interaction.followup.send(
+                        "⚠️ O Discord está limitando nosso acesso. O gráfico não pôde ser enviado.",
+                        embed=embed
+                    )
+                else:
+                    raise
+                    
+        except Exception as e:
+            logger.error(f"Erro ao gerar relatório: {e}")
             await interaction.followup.send(
-                "❌ Ocorreu um erro ao gerar o relatório completo.")
-        except:
-            pass
-
-@bot.tree.command(name="check_user_history", description="Relatório completo de atividade do usuário")
-@app_commands.checks.cooldown(1, 180.0, key=lambda i: (i.guild_id, i.user.id))  # Aumentado para 180 segundos
-@allowed_roles_only()
-async def check_user_history(interaction: discord.Interaction, member: discord.Member):
-    """Gera um relatório completo da atividade de um usuário"""
-    try:
-        await interaction.response.defer(thinking=True)
-        # Adiciona um pequeno delay antes de processar para evitar rate limits
-        await asyncio.sleep(1)
-        
-        # Adiciona o comando à fila para processamento
-        await bot.command_queue.put((
-            interaction,
-            _execute_check_user_history,
-            [member],
-            {}
-        ))
+                "❌ Ocorreu um erro ao gerar o relatório completo. Por favor, tente novamente mais tarde.")
+            
     except Exception as e:
-        logger.error(f"Erro ao enfileirar check_user_history: {e}")
+        logger.error(f"Erro no comando check_user_history: {e}")
         try:
             await interaction.followup.send(
                 "❌ Ocorreu um erro ao processar sua requisição.")
-        except Exception as e:
-            logger.error(f"Erro ao enviar mensagem de erro: {e}")
-            try:
-                await interaction.edit_original_response(content="❌ Ocorreu um erro ao processar sua requisição.")
-            except Exception as e:
-                logger.error(f"Erro ao editar resposta original: {e}")
+        except:
+            pass
 
 @check_user_history.error
 async def check_user_history_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     """Trata erros específicos do comando check_user_history"""
     if isinstance(error, app_commands.CommandOnCooldown):
-        logger.warning(f"Comando check_user_history em cooldown para {interaction.user}: {error}")
+        remaining = int(error.retry_after)
+        hours, remainder = divmod(remaining, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        
+        time_str = ""
+        if hours > 0:
+            time_str += f"{hours}h "
+        if minutes > 0:
+            time_str += f"{minutes}m "
+        time_str += f"{seconds}s"
+        
         try:
             await interaction.response.send_message(
-                f"⏳ Este comando está em cooldown. Tente novamente em {error.retry_after:.1f} segundos.")
-        except discord.errors.HTTPException as http_error:
-            logger.error(f"Erro ao enviar mensagem de cooldown: {http_error}")
-    
-    elif isinstance(error, discord.errors.HTTPException) and error.status == 429:
-        retry_after = error.response.headers.get('Retry-After', 60)
-        logger.error(f"Rate limit atingido no comando check_user_history. Tentar novamente após {retry_after} segundos")
-        try:
-            await asyncio.sleep(float(retry_after))
-            await interaction.followup.send(
-                f"⚠️ O bot está sendo limitado pelo Discord. Por favor, tente novamente em {retry_after} segundos.")
-        except Exception as e:
-            logger.error(f"Erro ao enviar mensagem de rate limit: {e}")
-    
+                f"⏳ Este comando está em cooldown. Tente novamente em {time_str}.",
+                ephemeral=True
+            )
+        except:
+            pass
+            
     elif isinstance(error, Exception):
-        logger.error(f"Erro não tratado em check_user_history: {error}", exc_info=True)
+        logger.error(f"Erro não tratado em check_user_history: {error}")
         try:
-            await interaction.followup.send(
-                "❌ Ocorreu um erro inesperado. Por favor, tente novamente mais tarde.")
-        except Exception as e:
-            logger.error(f"Erro ao enviar mensagem de erro: {e}")
+            await interaction.response.send_message(
+                "❌ Ocorreu um erro inesperado. Por favor, tente novamente mais tarde.",
+                ephemeral=True
+            )
+        except:
+            pass
 
 @bot.tree.command(name="force_check", description="Força uma verificação imediata de inatividade para um usuário")
 @app_commands.checks.cooldown(1, 30.0, key=lambda i: (i.guild_id, i.user.id))  # 30 segundos de cooldown
@@ -1092,7 +988,7 @@ async def force_check(interaction: discord.Interaction, member: discord.Member):
     try:
         await interaction.response.defer(thinking=True)
         
-        # Adiciona um pequeno delay antes de processar para evitar rate limits
+        # Adicionar um pequeno delay antes de processar para evitar rate limits
         await asyncio.sleep(1)
         
         from tasks import _execute_force_check
