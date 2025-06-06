@@ -88,8 +88,8 @@ class InactivityBot(commands.Bot):
         self.timezone = pytz.timezone('America/Sao_Paulo')  # Valor padrão inicial
         self.db = None
         self.active_sessions = {}
-        self.voice_event_queue = asyncio.Queue()
-        self.command_queue = asyncio.Queue()
+        self.voice_event_queue = asyncio.Queue(maxsize=1000)  # Limite para prevenir sobrecarga
+        self.command_queue = asyncio.Queue(maxsize=500)      # Limite para comandos
         self.voice_event_processor_task = None
         self.command_processor_task = None
         self.rate_limited = False
@@ -99,6 +99,11 @@ class InactivityBot(commands.Bot):
         self.db_backup = None
         self.pool_monitor_task = None
         self._setup_complete = False
+        self._last_db_check = None
+        self._health_check_interval = 300  # 5 minutos
+        self._last_config_save = None
+        self._config_save_interval = 1800  # 30 minutos
+        self._batch_processing_size = 10   # Tamanho do lote para processamento em batch
 
     async def setup_hook(self):
         """Configuração assíncrona que é executada após o login mas antes de conectar ao websocket"""
@@ -132,6 +137,9 @@ class InactivityBot(commands.Bot):
             
             # Inicia o monitoramento do pool
             self.pool_monitor_task = asyncio.create_task(self.monitor_db_pool())
+            
+            # Inicia a verificação periódica de saúde
+            self.health_check_task = asyncio.create_task(self.periodic_health_check())
 
     async def initialize_db(self):
         max_retries = 5
@@ -142,6 +150,17 @@ class InactivityBot(commands.Bot):
                 self.db = Database()
                 await self.db.initialize()
                 logger.info("Banco de dados inicializado com sucesso")
+                
+                # Verificar e criar tabelas se necessário
+                await self.db.create_tables()
+                
+                # Carregar configuração do banco de dados se existir
+                db_config = await self.db.load_config(0)  # ID 0 para configuração global
+                if db_config:
+                    self.config.update(db_config)
+                    await self.save_config()
+                    logger.info("Configuração carregada do banco de dados")
+                
                 break
             except Exception as e:
                 logger.error(f"Tentativa {attempt + 1} de conexão ao banco de dados falhou: {e}")
@@ -156,23 +175,69 @@ class InactivityBot(commands.Bot):
         while True:
             try:
                 if hasattr(self, 'db') and self.db:
-                    connected, running = await self.db.check_pool_status()
-                    if connected is not None:
+                    pool_status = await self.db.check_pool_status()
+                    if pool_status:
                         log_message = (
-                            f"Status do pool de conexões: {connected} conectadas, {running} rodando"
+                            f"Status do pool: {pool_status['used']} conexões ativas de "
+                            f"{pool_status['size']} (máx: {pool_status['maxsize']})"
                         )
                         logger.info(log_message)
                         
-                        # Ajuste dinâmico do pool baseado na carga
-                        if connected > 25:  # Se estiver usando mais de 25 conexões
-                            logger.warning("Pool de conexões com alta utilização - considerando aumento")
-                        elif connected < 5:  # Se estiver usando menos de 5 conexões
-                            logger.info("Pool de conexões com baixa utilização")
+                        # Ajuste dinâmico se necessário
+                        if pool_status['used'] > 20:  # Próximo do limite
+                            logger.warning("Aproximando do limite de conexões - considerando otimizações")
+                            await self.log_action(
+                                "Monitoramento do Pool",
+                                None,
+                                f"Uso elevado de conexões: {pool_status['used']}/{pool_status['maxsize']}"
+                            )
                 
-                await asyncio.sleep(1800)  # Verifica a cada 30 minutos
+                await asyncio.sleep(300)  # Verifica a cada 5 minutos
             except Exception as e:
                 log_with_context(f"Erro no monitoramento do pool: {e}", logging.ERROR)
                 await asyncio.sleep(60)  # Espera 1 minuto antes de tentar novamente em caso de erro
+
+    async def periodic_health_check(self):
+        """Verificação periódica de saúde do bot"""
+        while True:
+            try:
+                # Verificar filas
+                queue_status = {
+                    'voice_events': self.voice_event_queue.qsize(),
+                    'commands': self.command_queue.qsize()
+                }
+                
+                if queue_status['voice_events'] > 500:
+                    logger.warning(f"Fila de eventos de voz grande: {queue_status['voice_events']}")
+                if queue_status['commands'] > 200:
+                    logger.warning(f"Fila de comandos grande: {queue_status['commands']}")
+                
+                # Verificar conexão com o banco de dados
+                if hasattr(self, 'db') and self.db:
+                    try:
+                        async with self.db.pool.acquire() as conn:
+                            async with conn.cursor() as cursor:
+                                await cursor.execute("SELECT 1")
+                                await cursor.fetchone()
+                        logger.debug("Health check: Banco de dados respondendo")
+                    except Exception as e:
+                        logger.error(f"Health check falhou para o banco de dados: {e}")
+                        await self.log_action(
+                            "Erro de Saúde",
+                            None,
+                            f"Falha na conexão com o banco de dados: {str(e)}"
+                        )
+                
+                # Salvar configuração periodicamente
+                if (self._last_config_save is None or 
+                    (datetime.now() - self._last_config_save).total_seconds() > self._config_save_interval):
+                    await self.save_config()
+                    self._last_config_save = datetime.now()
+                
+                await asyncio.sleep(self._health_check_interval)
+            except Exception as e:
+                logger.error(f"Erro no health check: {e}")
+                await asyncio.sleep(60)
 
     def load_config(self):
         try:
@@ -190,12 +255,13 @@ class InactivityBot(commands.Bot):
             # Atualiza o timezone com a configuração carregada
             self.timezone = pytz.timezone(self.config.get('timezone', 'America/Sao_Paulo'))
             
-            # Garante que o canal de notificações padrão está definido
+            # Garante que canais essenciais estão definidos
             if 'notification_channel' not in self.config or not self.config['notification_channel']:
                 self.config['notification_channel'] = 1224897652060196996
-                with open(CONFIG_FILE, 'w') as f:
-                    json.dump(self.config, f, indent=4)
+            if 'log_channel' not in self.config or not self.config['log_channel']:
+                self.config['log_channel'] = 1376013013206827161
                 
+            logger.info("Configuração carregada com sucesso")
         except Exception as e:
             logger.error(f"Erro ao carregar configuração: {e}")
             self.config = DEFAULT_CONFIG
@@ -203,6 +269,10 @@ class InactivityBot(commands.Bot):
                 json.dump(self.config, f, indent=4)
 
     async def save_config(self):
+        """Salva a configuração com tratamento de erros e rate limiting"""
+        if not hasattr(self, 'config') or not self.config:
+            return
+            
         try:
             # Salva no arquivo local
             with open(CONFIG_FILE, 'w') as f:
@@ -215,96 +285,108 @@ class InactivityBot(commands.Bot):
                     logger.info("Configuração salva no banco de dados com sucesso")
                 except Exception as db_error:
                     logger.error(f"Erro ao salvar configuração no banco de dados: {db_error}")
+                    
+            self._last_config_save = datetime.now()
         except Exception as e:
             logger.error(f"Erro ao salvar configuração: {e}")
             raise
 
-    def start_backup_task(self):
-        @tasks.loop(hours=24)
-        async def database_backup():
-            await self.wait_until_ready()
-            if hasattr(self, 'db_backup'):
-                success = await self.db_backup.create_backup()
-                if success:
-                    await self.log_action("Backup do Banco de Dados", None, "Backup diário realizado com sucesso")
-        
-        database_backup.start()
-
     async def log_action(self, action: str, member: Optional[discord.Member] = None, details: str = None, file: discord.File = None):
+        """Registra uma ação no canal de logs com tratamento de rate limit"""
         try:
             channel = self.get_channel(self.config.get('log_channel', 1376013013206827161))
-            if channel:
-                embed = discord.Embed(
-                    title=f"Ação: {action}",
-                    color=discord.Color.orange(),
-                    timestamp=datetime.now(self.timezone)
-                )
-                if member is not None:
-                    embed.description = f"Usuário: {member.mention}"
-                else:
-                    embed.description = "Ação do sistema"
+            if not channel:
+                logger.warning("Canal de logs não encontrado")
+                return
                 
-                if details:
-                    embed.add_field(name="Detalhes", value=details, inline=False)
-                
+            embed = discord.Embed(
+                title=f"Ação: {action}",
+                color=discord.Color.orange(),
+                timestamp=datetime.now(self.timezone)
+            )
+            
+            if member is not None:
+                embed.description = f"Usuário: {member.mention}"
+                embed.set_thumbnail(url=member.display_avatar.url)
+            else:
+                embed.description = "Ação do sistema"
+            
+            if details:
+                embed.add_field(name="Detalhes", value=details, inline=False)
+            
+            max_retries = 3
+            for attempt in range(max_retries):
                 try:
                     if file:
                         await channel.send(embed=embed, file=file)
                     else:
                         await channel.send(embed=embed)
+                    break
                 except discord.errors.HTTPException as e:
                     if e.status == 429:  # Rate limited
-                        retry_after = e.response.headers.get('Retry-After', 60)
-                        logger.warning(f"Rate limit ao enviar log. Tentando novamente em {retry_after} segundos")
-                        await asyncio.sleep(float(retry_after))
-                        if file:
-                            await channel.send(embed=embed, file=file)
-                        else:
-                            await channel.send(embed=embed)
-                    else:
-                        raise
+                        retry_after = float(e.response.headers.get('Retry-After', 5))
+                        logger.warning(f"Rate limit ao enviar log (tentativa {attempt + 1}). Tentando novamente em {retry_after} segundos")
+                        await asyncio.sleep(retry_after)
+                        continue
+                    logger.error(f"Erro ao enviar log: {e}")
+                    break
         except Exception as e:
             logger.error(f"Erro ao registrar ação no log: {e}")
 
     async def notify_roles(self, message: str, is_warning: bool = False):
+        """Envia notificação para os cargos com tratamento de rate limit"""
         try:
-            if is_warning:
-                # Para avisos de risco, usa o canal de notificações
-                channel = self.get_channel(self.config.get('notification_channel'))
-                if channel:
-                    try:
-                        await channel.send(message)
-                    except discord.errors.HTTPException as e:
-                        if e.status == 429:  # Rate limited
-                            retry_after = e.response.headers.get('Retry-After', 60)
-                            logger.warning(f"Rate limit ao enviar notificação. Tentando novamente em {retry_after} segundos")
-                            await asyncio.sleep(float(retry_after))
-                            await channel.send(message)
-                        else:
-                            raise
-            else:
-                # Para outras notificações, usa o canal de logs
-                await self.log_action("Notificação", None, message)
+            channel_id = self.config.get('notification_channel') if is_warning else self.config.get('log_channel')
+            if not channel_id:
+                logger.warning("Canal de notificação não configurado")
+                return
+                
+            channel = self.get_channel(channel_id)
+            if not channel:
+                logger.warning(f"Canal de notificação {channel_id} não encontrado")
+                return
+                
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    await channel.send(message)
+                    break
+                except discord.errors.HTTPException as e:
+                    if e.status == 429:  # Rate limited
+                        retry_after = float(e.response.headers.get('Retry-After', 5))
+                        logger.warning(f"Rate limit ao enviar notificação (tentativa {attempt + 1}). Tentando novamente em {retry_after} segundos")
+                        await asyncio.sleep(retry_after)
+                        continue
+                    raise
         except Exception as e:
             logger.error(f"Erro ao enviar notificação: {e}")
+            await self.log_action("Erro de Notificação", None, f"Falha ao enviar mensagem: {str(e)}")
 
     async def send_dm(self, member: discord.Member, message: str):
+        """Envia mensagem direta com tratamento de erros e rate limiting"""
         try:
-            await member.send(message)
-        except discord.Forbidden:
-            await self.log_action("DM Falhou", member, "Não foi possível enviar mensagem direta para o usuário.")
-        except discord.errors.HTTPException as e:
-            if e.status == 429:  # Rate limited
-                retry_after = e.response.headers.get('Retry-After', 60)
-                logger.warning(f"Rate limit ao enviar DM. Tentando novamente em {retry_after} segundos")
-                await asyncio.sleep(float(retry_after))
-                await member.send(message)
-            else:
-                raise
+            max_retries = 3
+            initial_delay = 1
+            
+            for attempt in range(max_retries):
+                try:
+                    await member.send(message)
+                    break
+                except discord.Forbidden:
+                    await self.log_action("DM Falhou", member, "Não foi possível enviar mensagem direta para o usuário.")
+                    break
+                except discord.errors.HTTPException as e:
+                    if e.status == 429:  # Rate limited
+                        delay = initial_delay * (attempt + 1)
+                        logger.warning(f"Rate limit ao enviar DM (tentativa {attempt + 1}). Tentando novamente em {delay} segundos")
+                        await asyncio.sleep(delay)
+                        continue
+                    raise
         except Exception as e:
             logger.error(f"Erro ao enviar DM para {member}: {e}")
 
     async def send_warning(self, member: discord.Member, warning_type: str):
+        """Envia aviso de inatividade com mensagem configurável"""
         try:
             warnings_config = self.config.get('warnings', {})
             messages = warnings_config.get('messages', {})
@@ -329,89 +411,126 @@ class InactivityBot(commands.Bot):
             logger.error(f"Erro ao enviar aviso para {member}: {e}")
 
     async def process_voice_events(self):
+        """Processa eventos de voz em lotes para melhor eficiência"""
         while True:
             try:
-                event = await self.voice_event_queue.get()
-                event_type, member, before, after = event
+                # Processar em lotes para reduzir carga no banco de dados
+                batch = []
+                for _ in range(min(self._batch_processing_size, self.voice_event_queue.qsize())):
+                    batch.append(await self.voice_event_queue.get())
                 
-                if member.id in self.config['whitelist']['users'] or \
-                   any(role.id in self.config['whitelist']['roles'] for role in member.roles):
+                # Processar o lote
+                await self._process_voice_batch(batch)
+                
+                # Marcar como concluído
+                for _ in batch:
                     self.voice_event_queue.task_done()
+                    
+                # Pequena pausa entre lotes
+                await asyncio.sleep(0.1)
+                
+            except Exception as e:
+                logger.error(f"Erro no processador de eventos de voz: {e}")
+                await asyncio.sleep(1)  # Previne loop rápido em caso de erro
+
+    async def _process_voice_batch(self, batch):
+        """Processa um lote de eventos de voz"""
+        processed = {}
+        
+        for event in batch:
+            event_type, member, before, after = event
+            key = (member.id, member.guild.id)
+            
+            if key not in processed:
+                processed[key] = {
+                    'member': member,
+                    'events': []
+                }
+            processed[key]['events'].append((before, after))
+        
+        # Processar cada usuário separadamente
+        for user_data in processed.values():
+            try:
+                await self._process_user_voice_events(user_data['member'], user_data['events'])
+            except Exception as e:
+                logger.error(f"Erro ao processar eventos para {user_data['member']}: {e}")
+
+    async def _process_user_voice_events(self, member, events):
+        """Processa eventos de voz para um único usuário"""
+        absence_channel_id = self.config.get('absence_channel')
+        
+        for before, after in events:
+            # Verificar whitelist
+            if member.id in self.config['whitelist']['users'] or \
+               any(role.id in self.config['whitelist']['roles'] for role in member.roles):
+                continue
+            
+            # Entrou em um canal de voz (não estava em nenhum antes)
+            if before.channel is None and after.channel is not None:
+                # Se entrou no canal de ausência, não registramos
+                if after.channel.id == absence_channel_id:
                     continue
                     
-                absence_channel_id = self.config.get('absence_channel')
-                
-                # Entrou em um canal de voz (não estava em nenhum antes)
-                if before.channel is None and after.channel is not None:
-                    # Se entrou no canal de ausência, não registramos
-                    if after.channel.id == absence_channel_id:
-                        self.voice_event_queue.task_done()
+                try:
+                    await self.db.log_voice_join(member.id, member.guild.id)
+                    self.active_sessions[(member.id, member.guild.id)] = datetime.utcnow()
+                    await self.log_action("Entrou em voz", member, f"Canal: {after.channel.name}")
+                except Exception as e:
+                    logger.error(f"Erro ao registrar entrada em voz: {e}")
+                    await self.log_action("Erro DB - Entrada em voz", member, str(e))
+            
+            # Saiu de um canal de voz (não entrou em outro)
+            elif before.channel is not None and after.channel is None:
+                session_start = self.active_sessions.get((member.id, member.guild.id))
+                if session_start:
+                    # Se estava no canal de ausência, apenas remove da sessão sem contar o tempo
+                    if before.channel.id == absence_channel_id:
+                        del self.active_sessions[(member.id, member.guild.id)]
                         continue
                         
-                    try:
-                        await self.db.log_voice_join(member.id, member.guild.id)
-                        self.active_sessions[(member.id, member.guild.id)] = datetime.utcnow()
-                        await self.log_action("Entrou em voz", member, f"Canal: {after.channel.name}")
-                    except Exception as e:
-                        logger.error(f"Erro ao registrar entrada em voz: {e}")
-                        await self.log_action("Erro DB - Entrada em voz", member, str(e))
-                
-                # Saiu de um canal de voz (não entrou em outro)
-                elif before.channel is not None and after.channel is None:
+                    duration = (datetime.utcnow() - session_start).total_seconds()
+                    if duration >= self.config['required_minutes'] * 60:
+                        try:
+                            await self.db.log_voice_leave(member.id, member.guild.id, int(duration))
+                        except Exception as e:
+                            logger.error(f"Erro ao registrar saída de voz: {e}")
+                            await self.log_action("Erro DB - Saída de voz", member, str(e))
+                    del self.active_sessions[(member.id, member.guild.id)]
+                    await self.log_action("Saiu de voz", member, 
+                                       f"Canal: {before.channel.name} | Duração: {int(duration//60)} minutos")
+            
+            # Movido de um canal para outro
+            elif before.channel is not None and after.channel is not None:
+                # Saiu do canal normal para o canal de ausência
+                if after.channel.id == absence_channel_id:
                     session_start = self.active_sessions.get((member.id, member.guild.id))
                     if session_start:
-                        # Se estava no canal de ausência, apenas remove da sessão sem contar o tempo
-                        if before.channel.id == absence_channel_id:
-                            del self.active_sessions[(member.id, member.guild.id)]
-                            self.voice_event_queue.task_done()
-                            continue
-                            
                         duration = (datetime.utcnow() - session_start).total_seconds()
                         if duration >= self.config['required_minutes'] * 60:
                             try:
                                 await self.db.log_voice_leave(member.id, member.guild.id, int(duration))
                             except Exception as e:
-                                logger.error(f"Erro ao registrar saída de voz: {e}")
-                                await self.log_action("Erro DB - Saída de voz", member, str(e))
+                                logger.error(f"Erro ao registrar saída de voz (movido para ausência): {e}")
                         del self.active_sessions[(member.id, member.guild.id)]
-                        await self.log_action("Saiu de voz", member, 
-                                           f"Canal: {before.channel.name} | Duração: {int(duration//60)} minutos")
+                        await self.log_action("Movido para ausência", member, 
+                                           f"De: {before.channel.name} | Duração: {int(duration//60)} minutos")
                 
-                # Movido de um canal para outro
-                elif before.channel is not None and after.channel is not None:
-                    # Saiu do canal normal para o canal de ausência
-                    if after.channel.id == absence_channel_id:
-                        session_start = self.active_sessions.get((member.id, member.guild.id))
-                        if session_start:
-                            duration = (datetime.utcnow() - session_start).total_seconds()
-                            if duration >= self.config['required_minutes'] * 60:
-                                try:
-                                    await self.db.log_voice_leave(member.id, member.guild.id, int(duration))
-                                except Exception as e:
-                                    logger.error(f"Erro ao registrar saída de voz (movido para ausência): {e}")
-                            del self.active_sessions[(member.id, member.guild.id)]
-                            await self.log_action("Movido para ausência", member, 
-                                               f"De: {before.channel.name} | Duração: {int(duration//60)} minutos")
-                    
-                    # Saiu do canal de ausência para um canal normal
-                    elif before.channel.id == absence_channel_id:
-                        try:
-                            await self.db.log_voice_join(member.id, member.guild.id)
-                            self.active_sessions[(member.id, member.guild.id)] = datetime.utcnow()
-                            await self.log_action("Retornou de ausência", member, f"Para: {after.channel.name}")
-                        except Exception as e:
-                            logger.error(f"Erro ao registrar retorno de ausência: {e}")
-                
-                self.voice_event_queue.task_done()
-            except Exception as e:
-                logger.error(f"Erro no processador de eventos de voz: {e}")
-                await asyncio.sleep(1)  # Previne loop rápido em caso de erro
+                # Saiu do canal de ausência para um canal normal
+                elif before.channel.id == absence_channel_id:
+                    try:
+                        await self.db.log_voice_join(member.id, member.guild.id)
+                        self.active_sessions[(member.id, member.guild.id)] = datetime.utcnow()
+                        await self.log_action("Retornou de ausência", member, f"Para: {after.channel.name}")
+                    except Exception as e:
+                        logger.error(f"Erro ao registrar retorno de ausência: {e}")
 
     async def process_commands_queue(self):
+        """Processa fila de comandos com rate limiting inteligente"""
         while True:
             try:
                 interaction, command, args, kwargs = await self.command_queue.get()
                 
+                # Verificar rate limit
                 if self.rate_limited:
                     now = datetime.now()
                     if self.last_rate_limit and (now - self.last_rate_limit).seconds < 60:
@@ -425,22 +544,26 @@ class InactivityBot(commands.Bot):
                     else:
                         self.rate_limited = False
                 
-                # Adiciona delay antes de processar cada comando
+                # Adicionar delay antes de processar cada comando
                 await asyncio.sleep(self.rate_limit_delay)
                 
                 try:
                     await command(interaction, *args, **kwargs)
+                    
+                    # Se não houve erro, reduz gradualmente o delay (backoff decrescente)
+                    self.rate_limit_delay = max(self.rate_limit_delay * 0.9, 0.5)  # Mínimo de 0.5 segundos
+                    
                 except discord.errors.HTTPException as e:
                     if e.status == 429:  # Rate limited
                         self.rate_limited = True
                         self.last_rate_limit = datetime.now()
-                        retry_after = e.response.headers.get('Retry-After', 60)
+                        retry_after = float(e.response.headers.get('Retry-After', 60))
                         logger.error(f"Rate limit atingido. Tentar novamente após {retry_after} segundos")
                         
                         # Aumenta o delay para evitar novos rate limits (backoff exponencial)
                         self.rate_limit_delay = min(self.rate_limit_delay * 2, self.max_rate_limit_delay)
                         
-                        await asyncio.sleep(float(retry_after))
+                        await asyncio.sleep(retry_after)
                         self.rate_limited = False
                         
                         # Reenfileira o comando com um delay maior
@@ -455,11 +578,9 @@ class InactivityBot(commands.Bot):
                             "❌ Ocorreu um erro ao processar o comando.")
                     except Exception as e:
                         logger.error(f"Erro ao enviar mensagem de erro: {e}")
-                else:
-                    # Se não houve erro, reduz gradualmente o delay (backoff decrescente)
-                    self.rate_limit_delay = max(self.rate_limit_delay * 0.9, 0.5)  # Mínimo de 0.5 segundos
                 
                 self.command_queue.task_done()
+                
             except Exception as e:
                 logger.error(f"Erro no processador de comandos: {e}")
                 await asyncio.sleep(1)
@@ -494,7 +615,7 @@ intents.message_content = True
 bot = InactivityBot(
     command_prefix='!', 
     intents=intents,
-    max_messages=None,  # Reduzir cache de mensagens
+    max_messages=1000,  # Limitar cache de mensagens
     chunk_guilds_at_startup=False,  # Não carregar todos os membros no startup
     member_cache_flags=discord.MemberCacheFlags.none(),  # Minimizar cache de membros
     enable_debug_events=False,
@@ -505,12 +626,20 @@ bot = InactivityBot(
 async def on_ready():
     logger.info(f'Bot conectado como {bot.user}')
     await bot.log_action("Inicialização", None, "🤖 Bot de Controle de Atividades iniciado com sucesso!")
+    
+    # Verificar canais essenciais
+    if not bot.get_channel(bot.config.get('log_channel')):
+        logger.warning("Canal de logs não encontrado!")
+    if not bot.get_channel(bot.config.get('notification_channel')):
+        logger.warning("Canal de notificações não encontrado!")
 
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
     try:
         # Adiciona o evento à fila para processamento assíncrono
         await bot.voice_event_queue.put(('voice_state_update', member, before, after))
+    except asyncio.QueueFull:
+        logger.warning("Fila de eventos de voz cheia - evento descartado")
     except Exception as e:
         logger.error(f"Erro ao enfileirar evento de voz: {e}")
 

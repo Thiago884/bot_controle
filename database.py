@@ -29,10 +29,73 @@ class DatabaseBackup:
             self.backup_enabled = False
 
     async def create_backup(self):
+        """Cria backup do banco de dados usando mysqldump se disponível, ou fallback para método manual"""
         if not self.backup_enabled:
             logger.info("Backups locais estão desabilitados - pulando criação de backup")
             return False
             
+        try:
+            # Tentar usar mysqldump primeiro (mais eficiente)
+            success = await self._create_backup_mysqldump()
+            if success:
+                return True
+                
+            # Fallback para método manual se mysqldump falhar
+            return await self._create_backup_manual()
+        except Exception as e:
+            logger.error(f"Erro ao criar backup: {e}", exc_info=True)
+            return False
+
+    async def _create_backup_mysqldump(self):
+        """Tenta criar backup usando mysqldump"""
+        try:
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            backup_file = os.path.join(self.backup_dir, f'backup_{timestamp}.sql')
+            zip_file = f'{backup_file}.zip'
+            
+            dump_cmd = (
+                f"mysqldump -h {os.getenv('DB_HOST')} "
+                f"-u {os.getenv('DB_USER')} "
+                f"-p{os.getenv('DB_PASS')} "
+                f"{os.getenv('DB_NAME')}"
+            )
+            
+            proc = await asyncio.create_subprocess_shell(
+                dump_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            stdout, stderr = await proc.communicate()
+            
+            if proc.returncode != 0:
+                raise Exception(f"mysqldump failed: {stderr.decode()}")
+            
+            # Salvar backup
+            with open(backup_file, 'wb') as f:
+                f.write(stdout)
+            
+            # Compactar
+            with zipfile.ZipFile(zip_file, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                zipf.write(backup_file, os.path.basename(backup_file))
+            
+            # Remover arquivo SQL temporário
+            try:
+                os.remove(backup_file)
+            except Exception as e:
+                logger.warning(f"Erro ao remover arquivo SQL temporário: {e}")
+            
+            # Limpar backups antigos (manter últimos 5)
+            self._cleanup_old_backups(keep=5)
+            
+            logger.info(f"Backup criado com sucesso via mysqldump: {zip_file}")
+            return True
+        except Exception as e:
+            logger.warning(f"Falha ao usar mysqldump, tentando método manual: {e}")
+            return False
+
+    async def _create_backup_manual(self):
+        """Método manual de backup para fallback"""
         try:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             backup_file = os.path.join(self.backup_dir, f'backup_{timestamp}.sql')
@@ -40,18 +103,17 @@ class DatabaseBackup:
             
             async with self.db.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
-                    # Get all tables
                     await cursor.execute("SHOW TABLES")
                     tables = [table['Tables_in_' + os.getenv('DB_NAME')] for table in await cursor.fetchall()]
                     
                     with open(backup_file, 'w', encoding='utf-8') as f:
                         for table in tables:
-                            # Write table structure
+                            # Escrever estrutura da tabela
                             await cursor.execute(f"SHOW CREATE TABLE `{table}`")
                             create_table = (await cursor.fetchone())['Create Table']
                             f.write(f"{create_table};\n\n")
                             
-                            # Write table data
+                            # Escrever dados da tabela
                             await cursor.execute(f"SELECT * FROM `{table}`")
                             rows = await cursor.fetchall()
                             if rows:
@@ -74,38 +136,49 @@ class DatabaseBackup:
                                     else:
                                         f.write(";\n\n")
             
-            # Create zip file directly without removing SQL file first
+            # Compactar
             with zipfile.ZipFile(zip_file, 'w', zipfile.ZIP_DEFLATED) as zipf:
                 zipf.write(backup_file, os.path.basename(backup_file))
             
-            # Now remove the SQL file after successful zip creation
+            # Remover arquivo SQL temporário
             try:
                 os.remove(backup_file)
             except Exception as e:
                 logger.warning(f"Erro ao remover arquivo SQL temporário: {e}")
             
-            # Clean up old backups (keep last 7)
-            backups = sorted(glob.glob(os.path.join(self.backup_dir, '*.zip')))
-            for old_backup in backups[:-7]:
-                try:
-                    os.remove(old_backup)
-                except Exception as e:
-                    logger.warning(f"Erro ao remover backup antigo {old_backup}: {e}")
+            # Limpar backups antigos
+            self._cleanup_old_backups(keep=5)
             
-            logger.info(f"Backup criado com sucesso: {zip_file}")
+            logger.info(f"Backup criado com sucesso (método manual): {zip_file}")
             return True
         except Exception as e:
-            logger.error(f"Erro ao criar backup: {e}", exc_info=True)
+            logger.error(f"Erro no método manual de backup: {e}")
             return False
+
+    def _cleanup_old_backups(self, keep=5):
+        """Remove backups antigos, mantendo apenas os 'keep' mais recentes"""
+        try:
+            backups = sorted(glob.glob(os.path.join(self.backup_dir, '*.zip')))
+            for old_backup in backups[:-keep]:
+                try:
+                    os.remove(old_backup)
+                    logger.info(f"Backup antigo removido: {old_backup}")
+                except Exception as e:
+                    logger.warning(f"Erro ao remover backup antigo {old_backup}: {e}")
+        except Exception as e:
+            logger.warning(f"Erro ao limpar backups antigos: {e}")
 
 class Database:
     def __init__(self):
         self.pool = None
-        self.semaphore = asyncio.Semaphore(10)  # Reduzido de 20 para 10
+        self.semaphore = asyncio.Semaphore(10)  # Limitar concorrência
         self._is_initialized = False
         self.heartbeat_task = None
+        self._config_cache = {}  # Cache para configurações
+        self._last_config_update = None
 
     async def initialize(self):
+        """Inicializa o pool de conexões com configurações otimizadas para HostGator"""
         if self._is_initialized:
             return
             
@@ -119,29 +192,36 @@ class Database:
                     user=os.getenv('DB_USER'),
                     password=os.getenv('DB_PASS'),
                     db=os.getenv('DB_NAME'),
-                    minsize=1,  # Reduzido de 5
-                    maxsize=5,  # Reduzido de 30 para 5 (adequado para plano HostGator)
+                    minsize=2,  # Conexões mínimas mantidas
+                    maxsize=15,  # Limite abaixo do máximo do HostGator (25)
                     connect_timeout=30,
                     autocommit=True,
                     cursorclass=DictCursor,
-                    pool_recycle=300,  # Reduzido para 5 minutos
+                    pool_recycle=50,  # Reciclar conexões antes do timeout de 60s
+                    echo=False  # Desativar logs de queries para performance
                 )
                 
-                # Testar conexão
-                async with self.pool.acquire() as conn:
-                    async with conn.cursor() as cursor:
-                        await cursor.execute("SELECT 1")
-                        await cursor.fetchone()
+                # Testar conexão com timeout
+                try:
+                    async with self.pool.acquire() as conn:
+                        async with conn.cursor() as cursor:
+                            await asyncio.wait_for(cursor.execute("SELECT 1"), timeout=10)
+                            await cursor.fetchone()
+                except asyncio.TimeoutError:
+                    raise Exception("Timeout ao testar conexão com o banco de dados")
                 
-                # Verificar e criar tabelas apenas se não estiverem inicializadas
+                # Verificar e criar tabelas se não estiverem inicializadas
                 if not self._is_initialized:
                     await self.create_tables()
                     self._is_initialized = True
                     logger.info("Banco de dados inicializado com sucesso")
                 
                 # Iniciar task de heartbeat
-                self.heartbeat_task = asyncio.create_task(self._db_heartbeat(interval=600)) # Aumentado para 10 minutos
+                self.heartbeat_task = asyncio.create_task(self._db_heartbeat(interval=300))  # 5 minutos
                 logger.info("Task de heartbeat do banco de dados iniciada")
+                
+                # Aquecer o pool (criar algumas conexões iniciais)
+                await self._warmup_pool()
                 
                 return
                 
@@ -154,23 +234,43 @@ class Database:
                 else:
                     raise
 
-    async def _db_heartbeat(self, interval: int = 600):
-        """Envia um ping periódico para manter a conexão ativa"""
+    async def _warmup_pool(self):
+        """Cria algumas conexões iniciais para aquecer o pool"""
+        try:
+            warmup_conns = []
+            for _ in range(min(3, self.pool.minsize)):
+                conn = await self.pool.acquire()
+                warmup_conns.append(conn)
+            
+            # Liberar conexões após aquecimento
+            for conn in warmup_conns:
+                self.pool.release(conn)
+                
+            logger.info(f"Pool aquecido com {len(warmup_conns)} conexões iniciais")
+        except Exception as e:
+            logger.warning(f"Erro ao aquecer pool: {e}")
+
+    async def _db_heartbeat(self, interval: int = 300):
+        """Envia um ping periódico para manter conexões ativas"""
         while True:
             try:
+                # Verificar e reciclar conexões inativas
                 async with self.pool.acquire() as conn:
                     async with conn.cursor() as cursor:
-                        await cursor.execute("SELECT 1")
+                        await asyncio.wait_for(cursor.execute("SELECT 1"), timeout=10)
                         await cursor.fetchone()
+                
+                logger.debug("Heartbeat do banco de dados executado com sucesso")
                 await asyncio.sleep(interval)
             except asyncio.CancelledError:
                 logger.info("Heartbeat do banco de dados cancelado.")
                 break
             except Exception as e:
                 logger.error(f"Erro no heartbeat do banco de dados: {e}")
-                await asyncio.sleep(300)  # Espera 5 minutos antes de tentar novamente
+                await asyncio.sleep(60)  # Espera 1 minuto antes de tentar novamente
 
     async def close(self):
+        """Fecha o pool de conexões de forma segura"""
         if self.heartbeat_task:
             self.heartbeat_task.cancel()
             try:
@@ -185,31 +285,18 @@ class Database:
             logger.info("Pool de conexões fechado")
 
     async def check_pool_status(self):
+        """Retorna estatísticas do pool de conexões"""
         if self.pool:
-            conn = None
-            try:
-                conn = await self.pool.acquire()
-                async with conn.cursor() as cursor:
-                    # Obter Threads_connected
-                    await cursor.execute("SHOW STATUS LIKE 'Threads_connected'")
-                    result_connected = await cursor.fetchone()
-                    threads_connected = int(result_connected['Value']) if result_connected and 'Value' in result_connected else 0
-
-                    # Obter Threads_running
-                    await cursor.execute("SHOW STATUS LIKE 'Threads_running'")
-                    result_running = await cursor.fetchone()
-                    threads_running = int(result_running['Value']) if result_running and 'Value' in result_running else 0
-                    
-                    return threads_connected, threads_running
-            except Exception as e:
-                logger.error(f"Erro ao verificar status do pool: {e}", exc_info=True)
-                return None, None
-            finally:
-                if conn:
-                    self.pool.release(conn)
-        return None, None
+            return {
+                'size': self.pool.size,
+                'freesize': self.pool.freesize,
+                'used': self.pool.size - self.pool.freesize,
+                'maxsize': self.pool.maxsize
+            }
+        return None
 
     async def create_tables(self):
+        """Cria tabelas necessárias com índices otimizados"""
         async with self.semaphore:
             conn = None
             try:
@@ -218,7 +305,7 @@ class Database:
                     # Suprimir warnings de tabelas existentes
                     await cursor.execute("SET sql_notes = 0;")
                     
-                    # Usar IF NOT EXISTS para evitar warnings
+                    # Tabela de atividade do usuário
                     await cursor.execute('''
                     CREATE TABLE IF NOT EXISTS user_activity (
                         user_id BIGINT,
@@ -230,9 +317,11 @@ class Database:
                         PRIMARY KEY (user_id, guild_id),
                         INDEX idx_guild_user (guild_id, user_id),
                         INDEX idx_last_join (last_voice_join),
-                        INDEX idx_last_leave (last_voice_leave)
+                        INDEX idx_last_leave (last_voice_leave),
+                        INDEX idx_activity_composite (guild_id, user_id, last_voice_join, last_voice_leave)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci''')
                     
+                    # Tabela de sessões de voz
                     await cursor.execute('''
                     CREATE TABLE IF NOT EXISTS voice_sessions (
                         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -244,9 +333,12 @@ class Database:
                         INDEX idx_user_guild (user_id, guild_id),
                         INDEX idx_join_time (join_time),
                         INDEX idx_leave_time (leave_time),
-                        INDEX idx_user_guild_time (user_id, guild_id, join_time, leave_time)
+                        INDEX idx_user_guild_time (user_id, guild_id, join_time, leave_time),
+                        INDEX idx_duration (duration),
+                        INDEX idx_session_composite (user_id, guild_id, join_time, leave_time, duration)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci''')
                     
+                    # Tabela de avisos
                     await cursor.execute('''
                     CREATE TABLE IF NOT EXISTS user_warnings (
                         user_id BIGINT,
@@ -258,6 +350,7 @@ class Database:
                         INDEX idx_user_guild_warning (user_id, guild_id, warning_type, warning_date)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci''')
                     
+                    # Tabela de cargos removidos
                     await cursor.execute('''
                     CREATE TABLE IF NOT EXISTS removed_roles (
                         user_id BIGINT,
@@ -265,9 +358,11 @@ class Database:
                         role_id BIGINT,
                         removal_date DATETIME,
                         PRIMARY KEY (user_id, guild_id, role_id),
-                        INDEX idx_removal_date (removal_date)
+                        INDEX idx_removal_date (removal_date),
+                        INDEX idx_removal_composite (user_id, guild_id, role_id, removal_date)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci''')
                     
+                    # Tabela de membros expulsos
                     await cursor.execute('''
                     CREATE TABLE IF NOT EXISTS kicked_members (
                         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -279,6 +374,7 @@ class Database:
                         INDEX idx_kick_date (kick_date)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci''')
                     
+                    # Tabela de períodos verificados
                     await cursor.execute('''
                     CREATE TABLE IF NOT EXISTS checked_periods (
                         user_id BIGINT,
@@ -292,6 +388,7 @@ class Database:
                         INDEX idx_user_guild_period (user_id, guild_id, period_start, period_end)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci''')
                     
+                    # Tabela de configuração do bot
                     await cursor.execute('''
                     CREATE TABLE IF NOT EXISTS bot_config (
                         guild_id BIGINT PRIMARY KEY,
@@ -311,51 +408,85 @@ class Database:
                 if conn:
                     self.pool.release(conn)
 
-    async def execute_query(self, query: str, params: tuple = None):
+    async def execute_query(self, query: str, params: tuple = None, timeout: int = 30):
+        """Executa uma query com tratamento de timeout e retry"""
         async with self.semaphore:
             max_retries = 3
             conn = None
-            try:
-                for attempt in range(max_retries):
-                    try:
-                        conn = await self.pool.acquire()
-                        cursor = await conn.cursor()
-                        await cursor.execute(query, params or ())
-                        return cursor, conn
-                    except (aiomysql.OperationalError, aiomysql.InterfaceError) as e:
-                        if "max_user_connections" in str(e):
-                            logger.error(f"Limite de conexões excedido (tentativa {attempt + 1}/{max_retries})")
-                            await asyncio.sleep(10 * (attempt + 1))  # Backoff exponencial
-                            continue
-                        logger.error(f"Erro de conexão (tentativa {attempt + 1}/{max_retries}): {e}")
-                        if conn:
-                            self.pool.release(conn)
-                            conn = None
-                        if attempt < max_retries - 1:
-                            await asyncio.sleep(5 * (attempt + 1))  # Backoff exponencial
-                            continue
-                        raise
-                return None, None
-            except Exception as e:
-                logger.error(f"Erro ao executar query: {e}")
-                raise
+            for attempt in range(max_retries):
+                try:
+                    # Adquirir conexão com timeout
+                    conn = await asyncio.wait_for(self.pool.acquire(), timeout=timeout)
+                    
+                    # Executar query com timeout
+                    cursor = await conn.cursor()
+                    await asyncio.wait_for(cursor.execute(query, params or ()), timeout=timeout)
+                    
+                    return cursor, conn
+                    
+                except (aiomysql.OperationalError, aiomysql.InterfaceError) as e:
+                    if "max_user_connections" in str(e):
+                        logger.error(f"Limite de conexões excedido (tentativa {attempt + 1}/{max_retries})")
+                        await asyncio.sleep(5 * (attempt + 1))  # Backoff exponencial
+                        continue
+                        
+                    logger.error(f"Erro de conexão (tentativa {attempt + 1}/{max_retries}): {e}")
+                    if conn:
+                        self.pool.release(conn)
+                        conn = None
+                        
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(3 * (attempt + 1))  # Backoff exponencial
+                        continue
+                        
+                    raise
+                    
+                except asyncio.TimeoutError:
+                    logger.error(f"Timeout ao executar query (tentativa {attempt + 1})")
+                    if conn:
+                        self.pool.release(conn)
+                        conn = None
+                        
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(3 * (attempt + 1))  # Backoff exponencial
+                        continue
+                        
+                    raise TimeoutError("Timeout ao executar query no banco de dados")
+                    
+                except Exception as e:
+                    logger.error(f"Erro ao executar query: {e}")
+                    if conn:
+                        self.pool.release(conn)
+                    raise
 
     async def save_config(self, guild_id: int, config: dict):
+        """Salva configuração com cache"""
         cursor = None
         conn = None
         try:
+            # Atualizar cache
+            self._config_cache[guild_id] = config
+            self._last_config_update = datetime.utcnow()
+            
+            # Serializar para JSON
+            config_json = json.dumps(config)
+            
             cursor, conn = await self.execute_query('''
                 INSERT INTO bot_config (guild_id, config_json, last_updated)
                 VALUES (%s, %s, %s)
                 ON DUPLICATE KEY UPDATE
                     config_json = VALUES(config_json),
                     last_updated = VALUES(last_updated)
-            ''', (guild_id, json.dumps(config), datetime.utcnow()))
+            ''', (guild_id, config_json, datetime.utcnow()))
+            
             await conn.commit()
             logger.info(f"Configuração salva no banco de dados para a guild {guild_id}")
             return True
         except Exception as e:
             logger.error(f"Erro ao salvar configuração: {e}")
+            # Remover do cache em caso de erro
+            if guild_id in self._config_cache:
+                del self._config_cache[guild_id]
             return False
         finally:
             if cursor:
@@ -364,6 +495,14 @@ class Database:
                 self.pool.release(conn)
 
     async def load_config(self, guild_id: int) -> Optional[dict]:
+        """Carrega configuração com cache"""
+        # Verificar cache primeiro
+        if guild_id in self._config_cache:
+            # Se a configuração foi atualizada recentemente, retornar do cache
+            if self._last_config_update and (datetime.utcnow() - self._last_config_update).total_seconds() < 300:
+                logger.debug(f"Retornando configuração do cache para guild {guild_id}")
+                return self._config_cache[guild_id]
+        
         cursor = None
         conn = None
         try:
@@ -371,10 +510,16 @@ class Database:
                 SELECT config_json FROM bot_config
                 WHERE guild_id = %s
             ''', (guild_id,))
+            
             result = await cursor.fetchone()
             if result:
+                config = json.loads(result['config_json'])
+                # Atualizar cache
+                self._config_cache[guild_id] = config
+                self._last_config_update = datetime.utcnow()
+                
                 logger.info(f"Configuração carregada do banco de dados para a guild {guild_id}")
-                return json.loads(result['config_json'])
+                return config
             return None
         except Exception as e:
             logger.error(f"Erro ao carregar configuração: {e}")
@@ -386,6 +531,7 @@ class Database:
                 self.pool.release(conn)
 
     async def log_voice_join(self, user_id: int, guild_id: int):
+        """Registra entrada em canal de voz"""
         now = datetime.utcnow()
         cursor = None
         conn = None
@@ -409,11 +555,13 @@ class Database:
                 self.pool.release(conn)
 
     async def log_voice_leave(self, user_id: int, guild_id: int, duration: int):
+        """Registra saída de canal de voz"""
         now = datetime.utcnow()
         conn = None
         try:
             conn = await self.pool.acquire()
             async with conn.cursor() as cursor:
+                # Atualizar atividade do usuário
                 await cursor.execute('''
                     UPDATE user_activity 
                     SET last_voice_leave = %s,
@@ -421,6 +569,7 @@ class Database:
                     WHERE user_id = %s AND guild_id = %s
                 ''', (now, duration, user_id, guild_id))
                 
+                # Registrar sessão de voz
                 join_time = now - timedelta(seconds=duration)
                 await cursor.execute('''
                     INSERT INTO voice_sessions
@@ -437,6 +586,7 @@ class Database:
                 self.pool.release(conn)
 
     async def get_user_activity(self, user_id: int, guild_id: int) -> Dict:
+        """Obtém dados de atividade do usuário"""
         cursor = None
         conn = None
         try:
@@ -445,6 +595,7 @@ class Database:
                 FROM user_activity 
                 WHERE user_id = %s AND guild_id = %s
             ''', (user_id, guild_id))
+            
             result = await cursor.fetchone()
             return result if result else {}
         except Exception as e:
@@ -458,6 +609,7 @@ class Database:
 
     async def get_voice_sessions(self, user_id: int, guild_id: int, 
                                start_date: datetime, end_date: datetime) -> List[Dict]:
+        """Obtém sessões de voz do usuário em um período"""
         cursor = None
         conn = None
         try:
@@ -468,6 +620,7 @@ class Database:
                 AND join_time >= %s AND leave_time <= %s
                 ORDER BY join_time
             ''', (user_id, guild_id, start_date, end_date))
+            
             result = await cursor.fetchall()
             return result
         except Exception as e:
@@ -482,6 +635,7 @@ class Database:
     async def log_period_check(self, user_id: int, guild_id: int, 
                              start_date: datetime, end_date: datetime, 
                              meets_requirements: bool):
+        """Registra verificação de período"""
         cursor = None
         conn = None
         try:
@@ -492,6 +646,7 @@ class Database:
                 ON DUPLICATE KEY UPDATE
                     meets_requirements = VALUES(meets_requirements)
             ''', (user_id, guild_id, start_date, end_date, meets_requirements))
+            
             await conn.commit()
         except Exception as e:
             logger.error(f"Erro ao registrar verificação de período: {e}")
@@ -503,6 +658,7 @@ class Database:
                 self.pool.release(conn)
 
     async def get_last_period_check(self, user_id: int, guild_id: int) -> Optional[Dict]:
+        """Obtém última verificação de período"""
         cursor = None
         conn = None
         try:
@@ -513,6 +669,7 @@ class Database:
                 ORDER BY period_start DESC
                 LIMIT 1
             ''', (user_id, guild_id))
+            
             result = await cursor.fetchone()
             return result
         except Exception as e:
@@ -525,6 +682,7 @@ class Database:
                 self.pool.release(conn)
 
     async def log_warning(self, user_id: int, guild_id: int, warning_type: str):
+        """Registra aviso enviado ao usuário"""
         now = datetime.utcnow()
         cursor = None
         conn = None
@@ -536,6 +694,7 @@ class Database:
                 ON DUPLICATE KEY UPDATE 
                     warning_date = VALUES(warning_date)
             ''', (user_id, guild_id, warning_type, now))
+            
             await conn.commit()
         except Exception as e:
             logger.error(f"Erro ao registrar aviso: {e}")
@@ -547,6 +706,7 @@ class Database:
                 self.pool.release(conn)
 
     async def get_last_warning(self, user_id: int, guild_id: int) -> Optional[Tuple[str, datetime]]:
+        """Obtém último aviso enviado ao usuário"""
         cursor = None
         conn = None
         try:
@@ -557,6 +717,7 @@ class Database:
                 ORDER BY warning_date DESC
                 LIMIT 1
             ''', (user_id, guild_id))
+            
             result = await cursor.fetchone()
             if result:
                 return result['warning_type'], result['warning_date']
@@ -571,11 +732,13 @@ class Database:
                 self.pool.release(conn)
 
     async def log_removed_roles(self, user_id: int, guild_id: int, role_ids: List[int]):
+        """Registra cargos removidos por inatividade"""
         now = datetime.utcnow()
         conn = None
         try:
             conn = await self.pool.acquire()
             async with conn.cursor() as cursor:
+                # Usar uma única transação para múltiplos inserts
                 for role_id in role_ids:
                     await cursor.execute('''
                         INSERT INTO removed_roles 
@@ -584,6 +747,7 @@ class Database:
                         ON DUPLICATE KEY UPDATE 
                             removal_date = VALUES(removal_date)
                     ''', (user_id, guild_id, role_id, now))
+                
                 await conn.commit()
         except Exception as e:
             logger.error(f"Erro ao registrar cargos removidos: {e}")
@@ -593,6 +757,7 @@ class Database:
                 self.pool.release(conn)
 
     async def log_kicked_member(self, user_id: int, guild_id: int, reason: str):
+        """Registra membro expulso por inatividade"""
         now = datetime.utcnow()
         cursor = None
         conn = None
@@ -602,6 +767,7 @@ class Database:
                 (user_id, guild_id, kick_date, reason) 
                 VALUES (%s, %s, %s, %s)
             ''', (user_id, guild_id, now, reason))
+            
             await conn.commit()
         except Exception as e:
             logger.error(f"Erro ao registrar membro expulso: {e}")
@@ -613,6 +779,7 @@ class Database:
                 self.pool.release(conn)
 
     async def cleanup_old_data(self, days: int = 60):
+        """Limpa dados antigos do banco de dados"""
         conn = None
         try:
             cutoff_date = datetime.utcnow() - timedelta(days=days)
