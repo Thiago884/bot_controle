@@ -1082,12 +1082,16 @@ async def check_user_history_error(interaction: discord.Interaction, error: app_
             logger.error(f"Erro ao enviar mensagem de erro: {e}")
 
 @bot.tree.command(name="force_check", description="Força uma verificação imediata de inatividade para um usuário")
+@app_commands.checks.cooldown(1, 30.0, key=lambda i: (i.guild_id, i.user.id))  # 30 segundos de cooldown
 @allowed_roles_only()
 @commands.has_permissions(administrator=True)
 async def force_check(interaction: discord.Interaction, member: discord.Member):
     """Força uma verificação imediata de inatividade para um usuário específico"""
     try:
         await interaction.response.defer(thinking=True)
+        
+        # Adiciona um pequeno delay antes de processar para evitar rate limits
+        await asyncio.sleep(1)
         
         from tasks import _execute_force_check
         result = await _execute_force_check(member)
@@ -1101,7 +1105,18 @@ async def force_check(interaction: discord.Interaction, member: discord.Member):
                 f"Sessões no período: {result['sessions_count']}"
             )
         
-        await interaction.followup.send(message)
+        # Tentar enviar a resposta com tratamento de rate limit
+        try:
+            await interaction.followup.send(message)
+        except discord.errors.HTTPException as e:
+            if e.status == 429:
+                retry_after = e.response.headers.get('Retry-After', 60)
+                logger.warning(f"Rate limit ao enviar resposta. Tentando novamente em {retry_after} segundos")
+                await asyncio.sleep(float(retry_after))
+                await interaction.followup.send(message)
+            else:
+                raise
+        
         await bot.log_action(
             "Verificação Forçada",
             interaction.user,
@@ -1110,8 +1125,25 @@ async def force_check(interaction: discord.Interaction, member: discord.Member):
         )
     except Exception as e:
         logger.error(f"Erro ao forçar verificação: {e}")
-        await interaction.followup.send(
-            "❌ Ocorreu um erro ao forçar a verificação. Por favor, tente novamente.")
+        try:
+            await interaction.followup.send(
+                "❌ Ocorreu um erro ao forçar a verificação. Por favor, tente novamente.")
+        except discord.errors.HTTPException as e:
+            if e.status == 429:
+                logger.error("Rate limit ao tentar enviar mensagem de erro")
+
+@force_check.error
+async def force_check_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    """Trata erros específicos do comando force_check"""
+    if isinstance(error, app_commands.CommandOnCooldown):
+        await interaction.response.send_message(
+            f"⏳ Este comando está em cooldown. Tente novamente em {error.retry_after:.1f} segundos.",
+            ephemeral=True)
+    else:
+        logger.error(f"Erro no comando force_check: {error}")
+        await interaction.response.send_message(
+            "❌ Ocorreu um erro ao executar este comando.",
+            ephemeral=True)
 
 @bot.tree.command(name="cleanup_data", description="Limpa dados antigos do banco de dados")
 @allowed_roles_only()
