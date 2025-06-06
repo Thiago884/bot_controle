@@ -825,21 +825,21 @@ async def check_user_history(interaction: discord.Interaction, member: discord.M
             return
             
         # Adicionar delays maiores entre as etapas
-        await asyncio.sleep(2)  # Delay inicial maior
+        await asyncio.sleep(5)  # Aumentado para 5 segundos
         
         # Reduzir o período de consulta de 30 para 14 dias para diminuir a carga
         end_date = datetime.now(bot.timezone)
         start_date = end_date - timedelta(days=14)
         
-        # Coletar dados com delays entre consultas
         try:
+            # Coletar dados com delays entre consultas
             user_data = await bot.db.get_user_activity(member.id, member.guild.id)
-            await asyncio.sleep(1)
+            await asyncio.sleep(2)  # Aumentado para 2 segundos
             
             voice_sessions = await bot.db.get_voice_sessions(member.id, member.guild.id, start_date, end_date)
-            await asyncio.sleep(1)
+            await asyncio.sleep(2)  # Aumentado para 2 segundos
             
-            # Coletar apenas os dados essenciais
+            # Coletar apenas os dados essenciais com mais delays
             async with bot.db.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
                     await cursor.execute('''
@@ -851,7 +851,7 @@ async def check_user_history(interaction: discord.Interaction, member: discord.M
                     ''', (member.id, member.guild.id))
                     all_warnings = await cursor.fetchall()
                     
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(1)  # Aumentado para 1 segundo
                     
                     await cursor.execute('''
                         SELECT role_id, removal_date 
@@ -862,7 +862,7 @@ async def check_user_history(interaction: discord.Interaction, member: discord.M
                     ''', (member.id, member.guild.id))
                     removed_roles = await cursor.fetchall()
                     
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(1)  # Aumentado para 1 segundo
                     
                     await cursor.execute('''
                         SELECT period_start, period_end, meets_requirements
@@ -913,6 +913,14 @@ async def check_user_history(interaction: discord.Interaction, member: discord.M
                 )
                 embed.add_field(name="⚠️ Avisos", value=warnings_str, inline=False)
             
+            # Enviar apenas o embed sem o gráfico se estiver rate limited
+            if bot.rate_limited:
+                await interaction.followup.send(
+                    "⚠️ O Discord está limitando nosso acesso. O gráfico não pôde ser enviado.",
+                    embed=embed
+                )
+                return
+                
             # Tentar enviar o gráfico apenas se não houver rate limit
             try:
                 graph_buffer = await generate_activity_graph(member, voice_sessions)
