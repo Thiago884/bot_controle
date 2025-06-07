@@ -6,8 +6,6 @@ from datetime import datetime, timedelta
 import logging
 from main import bot, allowed_roles_only
 import asyncio
-from io import BytesIO
-from utils import generate_activity_graph
 
 logger = logging.getLogger('inactivity_bot')
 
@@ -255,7 +253,7 @@ async def set_kick_days(interaction: discord.Interaction, days: int):
         logger.error(f"Erro ao definir dias para expulsão: {e}")
         embed = discord.Embed(
             title="❌ Erro",
-            description="Ocorreu um erro ao atualizar a configuração. Por favor, tente novamente.",
+            description="Ocorreu um erro ao definir o canal. Por favor, tente novamente.",
             color=discord.Color.red()
         )
         await interaction.response.send_message(embed=embed)
@@ -913,33 +911,16 @@ async def check_user_history(interaction: discord.Interaction, member: discord.M
                 )
                 embed.add_field(name="⚠️ Avisos", value=warnings_str, inline=False)
             
-            # Enviar apenas o embed sem o gráfico se estiver rate limited
-            if bot.rate_limited:
-                await interaction.followup.send(
-                    "⚠️ O Discord está limitando nosso acesso. O gráfico não pôde ser enviado.",
-                    embed=embed
+            # Adicionar cargos removidos se houver
+            if removed_roles:
+                roles_str = "\n".join(
+                    f"• <@&{r['role_id']}> - {r['removal_date'].strftime('%d/%m/%Y')}"
+                    for r in removed_roles
                 )
-                return
-                
-            # Tentar enviar o gráfico apenas se não houver rate limit
-            try:
-                graph_buffer = await generate_activity_graph(member, voice_sessions)
-                if graph_buffer:
-                    graph_file = discord.File(graph_buffer, filename='atividade.png')
-                    embed.set_image(url="attachment://atividade.png")
-                    await interaction.followup.send(embed=embed, file=graph_file)
-                else:
-                    await interaction.followup.send(embed=embed)
-            except discord.errors.HTTPException as e:
-                if e.status == 429:
-                    bot.rate_limited = True
-                    bot.last_rate_limit = datetime.now()
-                    await interaction.followup.send(
-                        "⚠️ O Discord está limitando nosso acesso. O gráfico não pôde ser enviado.",
-                        embed=embed
-                    )
-                else:
-                    raise
+                embed.add_field(name="🔴 Cargos Removidos", value=roles_str, inline=False)
+            
+            # Enviar apenas o embed sem o gráfico
+            await interaction.followup.send(embed=embed)
                     
         except Exception as e:
             logger.error(f"Erro ao gerar relatório: {e}")
