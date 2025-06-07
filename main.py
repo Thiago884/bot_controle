@@ -482,6 +482,7 @@ class InactivityBot(commands.Bot):
                any(role.id in self.config['whitelist']['roles'] for role in member.roles):
                 continue
             
+            # Verificar se after.channel existe antes de acessar .name
             if before.channel is None and after.channel is not None:
                 if after.channel.id == absence_channel_id:
                     continue
@@ -489,7 +490,8 @@ class InactivityBot(commands.Bot):
                 try:
                     await self.db.log_voice_join(member.id, member.guild.id)
                     self.active_sessions[(member.id, member.guild.id)] = datetime.utcnow()
-                    await self.log_action("Entrou em voz", member, f"Canal: {after.channel.name}")
+                    channel_name = getattr(after.channel, 'name', 'Unknown Channel')
+                    await self.log_action("Entrou em voz", member, f"Canal: {channel_name}")
                 except Exception as e:
                     logger.error(f"Erro ao registrar entrada em voz: {e}")
                     await self.log_action("Erro DB - Entrada em voz", member, str(e))
@@ -509,8 +511,9 @@ class InactivityBot(commands.Bot):
                             logger.error(f"Erro ao registrar saída de voz: {e}")
                             await self.log_action("Erro DB - Saída de voz", member, str(e))
                     del self.active_sessions[(member.id, member.guild.id)]
+                    channel_name = getattr(before.channel, 'name', 'Unknown Channel')
                     await self.log_action("Saiu de voz", member, 
-                                       f"Canal: {before.channel.name} | Duração: {int(duration//60)} minutos")
+                                       f"Canal: {channel_name} | Duração: {int(duration//60)} minutos")
             
             elif before.channel is not None and after.channel is not None:
                 if after.channel.id == absence_channel_id:
@@ -523,14 +526,16 @@ class InactivityBot(commands.Bot):
                             except Exception as e:
                                 logger.error(f"Erro ao registrar saída de voz (movido para ausência): {e}")
                         del self.active_sessions[(member.id, member.guild.id)]
+                        channel_name = getattr(before.channel, 'name', 'Unknown Channel')
                         await self.log_action("Movido para ausência", member, 
-                                           f"De: {before.channel.name} | Duração: {int(duration//60)} minutos")
+                                           f"De: {channel_name} | Duração: {int(duration//60)} minutos")
                 
                 elif before.channel.id == absence_channel_id:
                     try:
                         await self.db.log_voice_join(member.id, member.guild.id)
                         self.active_sessions[(member.id, member.guild.id)] = datetime.utcnow()
-                        await self.log_action("Retornou de ausência", member, f"Para: {after.channel.name}")
+                        channel_name = getattr(after.channel, 'name', 'Unknown Channel')
+                        await self.log_action("Retornou de ausência", member, f"Para: {channel_name}")
                     except Exception as e:
                         logger.error(f"Erro ao registrar retorno de ausência: {e}")
 
