@@ -87,7 +87,7 @@ class InactivityBot(commands.Bot):
         self.config = {}
         self.timezone = pytz.timezone('America/Sao_Paulo')
         self.db = None
-        self.active_sessions = {}
+        self.active_sessions = {}  # { (user_id, guild_id): {'start_time': datetime, 'last_audio_time': datetime, 'audio_disabled': bool} }
         self.voice_event_queue = asyncio.Queue(maxsize=1000)
         self.command_queue = asyncio.Queue(maxsize=500)
         self.high_priority_queue = asyncio.Queue(maxsize=100)
@@ -112,7 +112,8 @@ class InactivityBot(commands.Bot):
         self._last_config_save = None
         self._config_save_interval = 1800
         self._batch_processing_size = 10
-        self._api_request_delay = 1.0  # Delay base entre requisições à API
+        self._api_request_delay = 1.0
+        self.audio_check_task = None
 
     async def setup_hook(self):
         """Configuração assíncrona que é executada após o login mas antes de conectar ao websocket"""
@@ -139,6 +140,38 @@ class InactivityBot(commands.Bot):
             self.queue_processor_task = asyncio.create_task(self.process_queues())
             self.pool_monitor_task = asyncio.create_task(self.monitor_db_pool())
             self.health_check_task = asyncio.create_task(self.periodic_health_check())
+            self.audio_check_task = asyncio.create_task(self.check_audio_states())
+
+    async def check_audio_states(self):
+        """Verifica periodicamente o estado do áudio dos membros em canais de voz"""
+        while True:
+            try:
+                for guild in self.guilds:
+                    for voice_channel in guild.voice_channels:
+                        for member in voice_channel.members:
+                            audio_key = (member.id, guild.id)
+                            if audio_key in self.active_sessions:
+                                # Verificar mudanças no estado do áudio
+                                new_audio_state = member.voice.self_mute or member.voice.self_deaf
+                                
+                                # Se o estado mudou
+                                if self.active_sessions[audio_key]['audio_disabled'] != new_audio_state:
+                                    self.active_sessions[audio_key]['audio_disabled'] = new_audio_state
+                                    
+                                    # Se o áudio foi reativado, atualizar o last_audio_time
+                                    if not new_audio_state:
+                                        self.active_sessions[audio_key]['last_audio_time'] = datetime.utcnow()
+                                        
+                                        log_message = (
+                                            f"Áudio reativado - "
+                                            f"Tempo sem áudio: {int((datetime.utcnow() - self.active_sessions[audio_key]['last_audio_time']).total_seconds()//60)} minutos"
+                                        )
+                                        await self.log_action("Áudio Reativado", member, log_message)
+                
+                await asyncio.sleep(30)  # Verificar a cada 30 segundos
+            except Exception as e:
+                logger.error(f"Erro ao verificar estados de áudio: {e}")
+                await asyncio.sleep(60)
 
     async def initialize_db(self):
         max_retries = 5
@@ -482,6 +515,25 @@ class InactivityBot(commands.Bot):
                any(role.id in self.config['whitelist']['roles'] for role in member.roles):
                 continue
             
+            # Verificar mudanças no estado do áudio
+            audio_key = (member.id, member.guild.id)
+            if before.channel and after.channel and before.channel == after.channel:
+                if (before.self_mute != after.self_mute) or (before.self_deaf != after.self_deaf):
+                    if audio_key in self.active_sessions:
+                        new_audio_state = after.self_mute or after.self_deaf
+                        if self.active_sessions[audio_key]['audio_disabled'] != new_audio_state:
+                            self.active_sessions[audio_key]['audio_disabled'] = new_audio_state
+                            
+                            # Se o áudio foi reativado, atualizar o last_audio_time
+                            if not new_audio_state:
+                                self.active_sessions[audio_key]['last_audio_time'] = datetime.utcnow()
+                                
+                                log_message = (
+                                    f"Áudio reativado - "
+                                    f"Tempo sem áudio: {int((datetime.utcnow() - self.active_sessions[audio_key]['last_audio_time']).total_seconds()//60)} minutos"
+                                )
+                                await self.log_action("Áudio Reativado", member, log_message)
+            
             # Verificar se after.channel existe antes de acessar .name
             if before.channel is None and after.channel is not None:
                 if after.channel.id == absence_channel_id:
@@ -489,7 +541,11 @@ class InactivityBot(commands.Bot):
                     
                 try:
                     await self.db.log_voice_join(member.id, member.guild.id)
-                    self.active_sessions[(member.id, member.guild.id)] = datetime.utcnow()
+                    self.active_sessions[audio_key] = {
+                        'start_time': datetime.utcnow(),
+                        'last_audio_time': datetime.utcnow(),
+                        'audio_disabled': after.self_mute or after.self_deaf
+                    }
                     channel_name = getattr(after.channel, 'name', 'Unknown Channel')
                     await self.log_action("Entrou em voz", member, f"Canal: {channel_name}")
                 except Exception as e:
@@ -497,43 +553,61 @@ class InactivityBot(commands.Bot):
                     await self.log_action("Erro DB - Entrada em voz", member, str(e))
             
             elif before.channel is not None and after.channel is None:
-                session_start = self.active_sessions.get((member.id, member.guild.id))
-                if session_start:
+                session_data = self.active_sessions.get(audio_key)
+                if session_data:
                     if before.channel.id == absence_channel_id:
-                        del self.active_sessions[(member.id, member.guild.id)]
+                        del self.active_sessions[audio_key]
                         continue
                         
-                    duration = (datetime.utcnow() - session_start).total_seconds()
-                    if duration >= self.config['required_minutes'] * 60:
+                    # Calcular apenas o tempo com áudio ativo
+                    if not session_data['audio_disabled']:
+                        audio_active_time = (datetime.utcnow() - session_data['last_audio_time']).total_seconds()
+                        total_time = (datetime.utcnow() - session_data['start_time']).total_seconds()
+                        effective_time = total_time - (total_time - audio_active_time)
+                    else:
+                        effective_time = (session_data['last_audio_time'] - session_data['start_time']).total_seconds()
+                    
+                    if effective_time >= self.config['required_minutes'] * 60:
                         try:
-                            await self.db.log_voice_leave(member.id, member.guild.id, int(duration))
+                            await self.db.log_voice_leave(member.id, member.guild.id, int(effective_time))
                         except Exception as e:
                             logger.error(f"Erro ao registrar saída de voz: {e}")
                             await self.log_action("Erro DB - Saída de voz", member, str(e))
-                    del self.active_sessions[(member.id, member.guild.id)]
+                    del self.active_sessions[audio_key]
                     channel_name = getattr(before.channel, 'name', 'Unknown Channel')
                     await self.log_action("Saiu de voz", member, 
-                                       f"Canal: {channel_name} | Duração: {int(duration//60)} minutos")
+                                       f"Canal: {channel_name} | Duração efetiva: {int(effective_time//60)} minutos")
             
             elif before.channel is not None and after.channel is not None:
                 if after.channel.id == absence_channel_id:
-                    session_start = self.active_sessions.get((member.id, member.guild.id))
-                    if session_start:
-                        duration = (datetime.utcnow() - session_start).total_seconds()
-                        if duration >= self.config['required_minutes'] * 60:
+                    session_data = self.active_sessions.get(audio_key)
+                    if session_data:
+                        # Calcular apenas o tempo com áudio ativo
+                        if not session_data['audio_disabled']:
+                            audio_active_time = (datetime.utcnow() - session_data['last_audio_time']).total_seconds()
+                            total_time = (datetime.utcnow() - session_data['start_time']).total_seconds()
+                            effective_time = total_time - (total_time - audio_active_time)
+                        else:
+                            effective_time = (session_data['last_audio_time'] - session_data['start_time']).total_seconds()
+                        
+                        if effective_time >= self.config['required_minutes'] * 60:
                             try:
-                                await self.db.log_voice_leave(member.id, member.guild.id, int(duration))
+                                await self.db.log_voice_leave(member.id, member.guild.id, int(effective_time))
                             except Exception as e:
                                 logger.error(f"Erro ao registrar saída de voz (movido para ausência): {e}")
-                        del self.active_sessions[(member.id, member.guild.id)]
+                        del self.active_sessions[audio_key]
                         channel_name = getattr(before.channel, 'name', 'Unknown Channel')
                         await self.log_action("Movido para ausência", member, 
-                                           f"De: {channel_name} | Duração: {int(duration//60)} minutos")
+                                           f"De: {channel_name} | Duração efetiva: {int(effective_time//60)} minutos")
                 
                 elif before.channel.id == absence_channel_id:
                     try:
                         await self.db.log_voice_join(member.id, member.guild.id)
-                        self.active_sessions[(member.id, member.guild.id)] = datetime.utcnow()
+                        self.active_sessions[audio_key] = {
+                            'start_time': datetime.utcnow(),
+                            'last_audio_time': datetime.utcnow(),
+                            'audio_disabled': after.self_mute or after.self_deaf
+                        }
                         channel_name = getattr(after.channel, 'name', 'Unknown Channel')
                         await self.log_action("Retornou de ausência", member, f"Para: {channel_name}")
                     except Exception as e:

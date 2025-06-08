@@ -806,7 +806,8 @@ async def check_user(interaction: discord.Interaction, member: discord.Member):
 
     except Exception as e:
         logger.error(f"Erro ao executar check_user: {e}")
-        await interaction.response.send_message("❌ Ocorreu um erro ao verificar a atividade do usuário.", ephemeral=True)
+        await interaction.response.send_message(
+            "❌ Ocorreu um erro ao verificar a atividade do usuário.", ephemeral=True)
 
 @bot.tree.command(name="check_user_history", description="Relatório completo de atividade do usuário")
 @app_commands.checks.cooldown(1, 300.0, key=lambda i: (i.guild_id, i.user.id))  # 5 minutos de cooldown
@@ -992,19 +993,8 @@ async def force_check(interaction: discord.Interaction, member: discord.Member):
                 f"Sessões no período: {result['sessions_count']}"
             )
         
-        # Tentar enviar a resposta com tratamento de rate limit
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                await interaction.followup.send(message)
-                break
-            except discord.errors.HTTPException as e:
-                if e.status == 429 and attempt < max_retries - 1:
-                    retry_after = float(e.response.headers.get('Retry-After', 5))
-                    logger.warning(f"Rate limit ao enviar resposta (tentativa {attempt + 1}). Tentando novamente em {retry_after} segundos")
-                    await asyncio.sleep(retry_after)
-                    continue
-                raise
+        # Usar o sistema de filas do bot para enviar a resposta
+        await bot.high_priority_queue.put((interaction, message, None, None, "high"))
         
         await bot.log_action(
             "Verificação Forçada",
