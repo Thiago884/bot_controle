@@ -151,12 +151,32 @@ class InactivityBot(commands.Bot):
                         for member in voice_channel.members:
                             audio_key = (member.id, guild.id)
                             if audio_key in self.active_sessions:
-                                current_audio_state = member.voice.self_deaf  # Verifica apenas o estado do áudio
+                                current_audio_state = member.voice.self_deaf
                                 
                                 # Se o áudio está desativado e não estávamos rastreando
                                 if current_audio_state and not self.active_sessions[audio_key]['audio_disabled']:
                                     self.active_sessions[audio_key]['audio_disabled'] = True
                                     self.active_sessions[audio_key]['audio_off_time'] = datetime.utcnow()
+                                    
+                                    # Log detalhado
+                                    time_in_voice = (datetime.utcnow() - self.active_sessions[audio_key]['start_time']).total_seconds()
+                                    embed = discord.Embed(
+                                        title="🔇 Áudio Desativado (Verificação Periódica)",
+                                        color=discord.Color.orange(),
+                                        timestamp=datetime.now(self.timezone))
+                                    embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
+                                    embed.add_field(name="Usuário", value=member.mention, inline=True)
+                                    embed.add_field(name="Canal", value=voice_channel.name, inline=True)
+                                    embed.add_field(name="Tempo em voz", value=f"{int(time_in_voice//60)} minutos {int(time_in_voice%60)} segundos", inline=False)
+                                    embed.set_footer(text=f"ID: {member.id}")
+                                    
+                                    await self.high_priority_queue.put((
+                                        self.get_channel(self.config['log_channel']),
+                                        None,
+                                        embed,
+                                        None,
+                                        "high"
+                                    ))
                                 
                                 # Se o áudio está ativado mas estava marcado como desativado
                                 elif not current_audio_state and self.active_sessions[audio_key]['audio_disabled']:
@@ -167,11 +187,30 @@ class InactivityBot(commands.Bot):
                                             self.active_sessions[audio_key].get('total_audio_off_time', 0) + audio_off_duration
                                         del self.active_sessions[audio_key]['audio_off_time']
                                         
-                                        log_message = (
-                                            f"Áudio reativado - "
-                                            f"Tempo sem áudio: {int(audio_off_duration//60)} minutos"
-                                        )
-                                        await self.log_action("Áudio Reativado", member, log_message)
+                                        # Log detalhado
+                                        total_time = (datetime.utcnow() - self.active_sessions[audio_key]['start_time']).total_seconds()
+                                        embed = discord.Embed(
+                                            title="🔊 Áudio Reativado (Verificação Periódica)",
+                                            color=discord.Color.green(),
+                                            timestamp=datetime.now(self.timezone))
+                                        embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
+                                        embed.add_field(name="Usuário", value=member.mention, inline=True)
+                                        embed.add_field(name="Canal", value=voice_channel.name, inline=True)
+                                        embed.add_field(name="Tempo sem áudio", 
+                                                      value=f"{int(audio_off_duration//60)} minutos {int(audio_off_duration%60)} segundos", 
+                                                      inline=True)
+                                        embed.add_field(name="Tempo total em voz", 
+                                                      value=f"{int(total_time//60)} minutos {int(total_time%60)} segundos", 
+                                                      inline=True)
+                                        embed.set_footer(text=f"ID: {member.id}")
+                                        
+                                        await self.high_priority_queue.put((
+                                            self.get_channel(self.config['log_channel']),
+                                            None,
+                                            embed,
+                                            None,
+                                            "high"
+                                        ))
                 
                 await asyncio.sleep(30)  # Verificar a cada 30 segundos
             except Exception as e:
@@ -395,20 +434,40 @@ class InactivityBot(commands.Bot):
                 logger.warning("Canal de logs não encontrado")
                 return
                 
+            # Definir cor baseada no tipo de ação
+            if "Áudio Desativado" in action:
+                color = discord.Color.orange()
+                icon = "🔇"
+            elif "Áudio Reativado" in action:
+                color = discord.Color.green()
+                icon = "🔊"
+            elif "Erro" in action:
+                color = discord.Color.red()
+                icon = "❌"
+            elif "Aviso" in action:
+                color = discord.Color.gold()
+                icon = "⚠️"
+            else:
+                color = discord.Color.blue()
+                icon = "ℹ️"
+                
             embed = discord.Embed(
-                title=f"Ação: {action}",
-                color=discord.Color.orange(),
-                timestamp=datetime.now(self.timezone)
-            )
+                title=f"{icon} {action}",
+                color=color,
+                timestamp=datetime.now(self.timezone))
             
             if member is not None:
-                embed.description = f"Usuário: {member.mention}"
-                embed.set_thumbnail(url=member.display_avatar.url)
-            else:
-                embed.description = "Ação do sistema"
+                embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
+                embed.add_field(name="Usuário", value=member.mention, inline=True)
+                embed.add_field(name="ID", value=f"`{member.id}`", inline=True)
             
             if details:
-                embed.add_field(name="Detalhes", value=details, inline=False)
+                # Formatar detalhes para melhor legibilidade
+                if '\n' in details:
+                    details = details.replace('\n', '\n• ')
+                    embed.add_field(name="Detalhes", value=f"• {details}", inline=False)
+                else:
+                    embed.add_field(name="Detalhes", value=details, inline=False)
             
             # Adicionar à fila de alta prioridade
             await self.high_priority_queue.put((channel, None, embed, file, "high"))
@@ -429,10 +488,23 @@ class InactivityBot(commands.Bot):
                 logger.warning(f"Canal de notificação {channel_id} não encontrado")
                 return
                 
-            # Adicionar à fila apropriada baseado na prioridade
-            priority = "high" if is_warning else "normal"
-            queue = self.high_priority_queue if is_warning else self.normal_priority_queue
-            await queue.put((channel, message, None, None, priority))
+            # Criar embed para notificações
+            if is_warning:
+                embed = discord.Embed(
+                    title="⚠️ Aviso de Inatividade",
+                    description=message,
+                    color=discord.Color.gold(),
+                    timestamp=datetime.now(self.timezone))
+                priority = "high"
+            else:
+                embed = discord.Embed(
+                    title="ℹ️ Notificação",
+                    description=message,
+                    color=discord.Color.blue(),
+                    timestamp=datetime.now(self.timezone))
+                priority = "normal"
+            
+            await self.high_priority_queue.put((channel, None, embed, None, priority))
             
         except Exception as e:
             logger.error(f"Erro ao enviar notificação: {e}")
@@ -441,8 +513,14 @@ class InactivityBot(commands.Bot):
     async def send_dm(self, member: discord.Member, message: str):
         """Envia mensagem direta com tratamento de erros e rate limiting"""
         try:
+            # Criar embed para DMs
+            embed = discord.Embed(
+                description=message,
+                color=discord.Color.blue(),
+                timestamp=datetime.now(self.timezone))
+            
             # Adicionar à fila de baixa prioridade para evitar rate limits
-            await self.low_priority_queue.put((member, message, None, None, "low"))
+            await self.low_priority_queue.put((member, None, embed, None, "low"))
         except Exception as e:
             logger.error(f"Erro ao enviar DM para {member}: {e}")
 
@@ -465,7 +543,26 @@ class InactivityBot(commands.Bot):
             else:
                 return
             
-            await self.send_dm(member, message)
+            # Criar embed para avisos
+            if warning_type == 'first':
+                title = "⚠️ Primeiro Aviso"
+                color = discord.Color.gold()
+            elif warning_type == 'second':
+                title = "🔴 Último Aviso"
+                color = discord.Color.red()
+            else:
+                title = "❌ Cargos Removidos"
+                color = discord.Color.dark_red()
+            
+            embed = discord.Embed(
+                title=title,
+                description=message,
+                color=color,
+                timestamp=datetime.now(self.timezone))
+            
+            embed.set_author(name=member.guild.name, icon_url=member.guild.icon.url if member.guild.icon else None)
+            
+            await self.send_dm(member, embed.description)
             await self.db.log_warning(member.id, member.guild.id, warning_type)
             await self.log_action(f"Aviso Enviado ({warning_type})", member)
         except Exception as e:
@@ -521,33 +618,70 @@ class InactivityBot(commands.Bot):
                any(role.id in self.config['whitelist']['roles'] for role in member.roles):
                 continue
             
-            # Verificar mudanças no estado do áudio (somente self_deaf)
+            # Verificar mudanças no estado do áudio (self_deaf)
             if before.channel and after.channel and before.channel == after.channel:
-                audio_state_changed = (before.self_deaf != after.self_deaf)
-                
-                if audio_state_changed and audio_key in self.active_sessions:
-                    new_audio_state = after.self_deaf  # Somente verifica se o áudio está desativado
-                    old_audio_state = self.active_sessions[audio_key]['audio_disabled']
-                    
-                    # Se o estado mudou de ativado para desativado
-                    if not old_audio_state and new_audio_state:
-                        self.active_sessions[audio_key]['audio_disabled'] = True
-                        self.active_sessions[audio_key]['audio_off_time'] = datetime.utcnow()
-                        
-                    # Se o estado mudou de desativado para ativado
-                    elif old_audio_state and not new_audio_state:
-                        self.active_sessions[audio_key]['audio_disabled'] = False
-                        if 'audio_off_time' in self.active_sessions[audio_key]:
-                            audio_off_duration = (datetime.utcnow() - self.active_sessions[audio_key]['audio_off_time']).total_seconds()
-                            self.active_sessions[audio_key]['total_audio_off_time'] = \
-                                self.active_sessions[audio_key].get('total_audio_off_time', 0) + audio_off_duration
-                            del self.active_sessions[audio_key]['audio_off_time']
+                if before.self_deaf != after.self_deaf:
+                    if audio_key in self.active_sessions:
+                        # Áudio foi desativado
+                        if after.self_deaf and not before.self_deaf:
+                            self.active_sessions[audio_key]['audio_disabled'] = True
+                            self.active_sessions[audio_key]['audio_off_time'] = datetime.utcnow()
                             
-                            log_message = (
-                                f"Áudio reativado - "
-                                f"Tempo sem áudio: {int(audio_off_duration//60)} minutos"
-                            )
-                            await self.log_action("Áudio Reativado", member, log_message)
+                            # Log detalhado
+                            time_in_voice = (datetime.utcnow() - self.active_sessions[audio_key]['start_time']).total_seconds()
+                            embed = discord.Embed(
+                                title="🔇 Áudio Desativado",
+                                color=discord.Color.orange(),
+                                timestamp=datetime.now(self.timezone))
+                            embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
+                            embed.add_field(name="Usuário", value=member.mention, inline=True)
+                            embed.add_field(name="Canal", value=after.channel.name, inline=True)
+                            embed.add_field(name="Tempo em voz", 
+                                          value=f"{int(time_in_voice//60)} minutos {int(time_in_voice%60)} segundos", 
+                                          inline=False)
+                            embed.set_footer(text=f"ID: {member.id}")
+                            
+                            await self.high_priority_queue.put((
+                                self.get_channel(self.config['log_channel']),
+                                None,
+                                embed,
+                                None,
+                                "high"
+                            ))
+                        
+                        # Áudio foi reativado
+                        elif not after.self_deaf and before.self_deaf:
+                            self.active_sessions[audio_key]['audio_disabled'] = False
+                            if 'audio_off_time' in self.active_sessions[audio_key]:
+                                audio_off_duration = (datetime.utcnow() - self.active_sessions[audio_key]['audio_off_time']).total_seconds()
+                                self.active_sessions[audio_key]['total_audio_off_time'] = \
+                                    self.active_sessions[audio_key].get('total_audio_off_time', 0) + audio_off_duration
+                                del self.active_sessions[audio_key]['audio_off_time']
+                                
+                                # Log detalhado
+                                total_time = (datetime.utcnow() - self.active_sessions[audio_key]['start_time']).total_seconds()
+                                embed = discord.Embed(
+                                    title="🔊 Áudio Reativado",
+                                    color=discord.Color.green(),
+                                    timestamp=datetime.now(self.timezone))
+                                embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
+                                embed.add_field(name="Usuário", value=member.mention, inline=True)
+                                embed.add_field(name="Canal", value=after.channel.name, inline=True)
+                                embed.add_field(name="Tempo sem áudio", 
+                                              value=f"{int(audio_off_duration//60)} minutos {int(audio_off_duration%60)} segundos", 
+                                              inline=True)
+                                embed.add_field(name="Tempo total em voz", 
+                                              value=f"{int(total_time//60)} minutos {int(total_time%60)} segundos", 
+                                              inline=True)
+                                embed.set_footer(text=f"ID: {member.id}")
+                                
+                                await self.high_priority_queue.put((
+                                    self.get_channel(self.config['log_channel']),
+                                    None,
+                                    embed,
+                                    None,
+                                    "high"
+                                ))
             
             # Verificar se after.channel existe antes de acessar .name
             if before.channel is None and after.channel is not None:
@@ -559,11 +693,30 @@ class InactivityBot(commands.Bot):
                     self.active_sessions[audio_key] = {
                         'start_time': datetime.utcnow(),
                         'last_audio_time': datetime.utcnow(),
-                        'audio_disabled': after.self_deaf,  # Somente verifica self_deaf
+                        'audio_disabled': after.self_deaf,
                         'total_audio_off_time': 0
                     }
-                    channel_name = getattr(after.channel, 'name', 'Unknown Channel')
-                    await self.log_action("Entrou em voz", member, f"Canal: {channel_name}")
+                    
+                    # Log detalhado
+                    embed = discord.Embed(
+                        title="🎤 Entrou em Voz",
+                        color=discord.Color.green(),
+                        timestamp=datetime.now(self.timezone))
+                    embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
+                    embed.add_field(name="Usuário", value=member.mention, inline=True)
+                    embed.add_field(name="Canal", value=after.channel.name, inline=True)
+                    embed.add_field(name="Estado do Áudio", 
+                                  value="🔇 Mudo" if after.self_deaf else "🔊 Ativo", 
+                                  inline=True)
+                    embed.set_footer(text=f"ID: {member.id}")
+                    
+                    await self.high_priority_queue.put((
+                        self.get_channel(self.config['log_channel']),
+                        None,
+                        embed,
+                        None,
+                        "high"
+                    ))
                 except Exception as e:
                     logger.error(f"Erro ao registrar entrada em voz: {e}")
                     await self.log_action("Erro DB - Entrada em voz", member, str(e))
@@ -586,10 +739,32 @@ class InactivityBot(commands.Bot):
                         except Exception as e:
                             logger.error(f"Erro ao registrar saída de voz: {e}")
                             await self.log_action("Erro DB - Saída de voz", member, str(e))
+                    
+                    # Log detalhado
+                    embed = discord.Embed(
+                        title="🚪 Saiu de Voz",
+                        color=discord.Color.blue(),
+                        timestamp=datetime.now(self.timezone))
+                    embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
+                    embed.add_field(name="Usuário", value=member.mention, inline=True)
+                    embed.add_field(name="Canal", value=before.channel.name, inline=True)
+                    embed.add_field(name="Tempo Efetivo", 
+                                  value=f"{int(effective_time//60)} minutos {int(effective_time%60)} segundos", 
+                                  inline=True)
+                    embed.add_field(name="Tempo sem Áudio", 
+                                  value=f"{int(audio_off_time//60)} minutos {int(audio_off_time%60)} segundos", 
+                                  inline=True)
+                    embed.set_footer(text=f"ID: {member.id}")
+                    
+                    await self.high_priority_queue.put((
+                        self.get_channel(self.config['log_channel']),
+                        None,
+                        embed,
+                        None,
+                        "high"
+                    ))
+                    
                     del self.active_sessions[audio_key]
-                    channel_name = getattr(before.channel, 'name', 'Unknown Channel')
-                    await self.log_action("Saiu de voz", member, 
-                                       f"Canal: {channel_name} | Duração efetiva: {int(effective_time//60)} minutos | Tempo sem áudio: {int(audio_off_time//60)} minutos")
             
             elif before.channel is not None and after.channel is not None:
                 if after.channel.id == absence_channel_id:
@@ -605,10 +780,33 @@ class InactivityBot(commands.Bot):
                                 await self.db.log_voice_leave(member.id, member.guild.id, int(effective_time))
                             except Exception as e:
                                 logger.error(f"Erro ao registrar saída de voz (movido para ausência): {e}")
+                        
+                        # Log detalhado
+                        embed = discord.Embed(
+                            title="⏸️ Movido para Ausência",
+                            color=discord.Color.light_grey(),
+                            timestamp=datetime.now(self.timezone))
+                        embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
+                        embed.add_field(name="Usuário", value=member.mention, inline=True)
+                        embed.add_field(name="De", value=before.channel.name, inline=True)
+                        embed.add_field(name="Para", value=after.channel.name, inline=True)
+                        embed.add_field(name="Tempo Efetivo", 
+                                      value=f"{int(effective_time//60)} minutos {int(effective_time%60)} segundos", 
+                                      inline=True)
+                        embed.add_field(name="Tempo sem Áudio", 
+                                      value=f"{int(audio_off_time//60)} minutos {int(audio_off_time%60)} segundos", 
+                                      inline=True)
+                        embed.set_footer(text=f"ID: {member.id}")
+                        
+                        await self.high_priority_queue.put((
+                            self.get_channel(self.config['log_channel']),
+                            None,
+                            embed,
+                            None,
+                            "high"
+                        ))
+                        
                         del self.active_sessions[audio_key]
-                        channel_name = getattr(before.channel, 'name', 'Unknown Channel')
-                        await self.log_action("Movido para ausência", member, 
-                                           f"De: {channel_name} | Duração efetiva: {int(effective_time//60)} minutos | Tempo sem áudio: {int(audio_off_time//60)} minutos")
                 
                 elif before.channel.id == absence_channel_id:
                     try:
@@ -616,11 +814,30 @@ class InactivityBot(commands.Bot):
                         self.active_sessions[audio_key] = {
                             'start_time': datetime.utcnow(),
                             'last_audio_time': datetime.utcnow(),
-                            'audio_disabled': after.self_deaf,  # Somente verifica self_deaf
+                            'audio_disabled': after.self_deaf,
                             'total_audio_off_time': 0
                         }
-                        channel_name = getattr(after.channel, 'name', 'Unknown Channel')
-                        await self.log_action("Retornou de ausência", member, f"Para: {channel_name}")
+                        
+                        # Log detalhado
+                        embed = discord.Embed(
+                            title="▶️ Retornou de Ausência",
+                            color=discord.Color.green(),
+                            timestamp=datetime.now(self.timezone))
+                        embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
+                        embed.add_field(name="Usuário", value=member.mention, inline=True)
+                        embed.add_field(name="Para", value=after.channel.name, inline=True)
+                        embed.add_field(name="Estado do Áudio", 
+                                      value="🔇 Mudo" if after.self_deaf else "🔊 Ativo", 
+                                      inline=True)
+                        embed.set_footer(text=f"ID: {member.id}")
+                        
+                        await self.high_priority_queue.put((
+                            self.get_channel(self.config['log_channel']),
+                            None,
+                            embed,
+                            None,
+                            "high"
+                        ))
                     except Exception as e:
                         logger.error(f"Erro ao registrar retorno de ausência: {e}")
 
@@ -717,7 +934,19 @@ bot = InactivityBot(
 @bot.event
 async def on_ready():
     logger.info(f'Bot conectado como {bot.user}')
-    await bot.log_action("Inicialização", None, "🤖 Bot de Controle de Atividades iniciado com sucesso!")
+    
+    # Embed de inicialização mais bonito
+    embed = discord.Embed(
+        title="🤖 Bot de Controle de Atividades Iniciado",
+        description=f"Conectado como {bot.user.mention}",
+        color=discord.Color.green(),
+        timestamp=datetime.now(bot.timezone))
+    embed.add_field(name="Servidores", value=str(len(bot.guilds)), inline=True)
+    embed.add_field(name="Latência", value=f"{round(bot.latency * 1000)}ms", inline=True)
+    embed.set_thumbnail(url=bot.user.display_avatar.url)
+    embed.set_footer(text="Sistema de Controle de Atividades")
+    
+    await bot.log_action("Inicialização", None, embed=embed)
     
     if not bot.get_channel(bot.config.get('log_channel')):
         logger.warning("Canal de logs não encontrado!")
