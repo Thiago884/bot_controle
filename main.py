@@ -426,12 +426,23 @@ class InactivityBot(commands.Bot):
         except Exception as e:
             logger.error(f"Erro ao processar item da fila: {e}")
 
-    async def log_action(self, action: str, member: Optional[discord.Member] = None, details: str = None, file: discord.File = None):
+    async def log_action(self, action: str, member: Optional[discord.Member] = None, details: str = None, file: discord.File = None, embed: discord.Embed = None):
         """Registra uma ação no canal de logs com tratamento de rate limit"""
         try:
             channel = self.get_channel(self.config.get('log_channel', 1376013013206827161))
             if not channel:
                 logger.warning("Canal de logs não encontrado")
+                return
+                
+            # Se um embed foi fornecido, usá-lo diretamente
+            if embed is not None:
+                await self.high_priority_queue.put((
+                    channel,
+                    None,
+                    embed,
+                    None,
+                    "high"
+                ))
                 return
                 
             # Definir cor baseada no tipo de ação
@@ -470,7 +481,13 @@ class InactivityBot(commands.Bot):
                     embed.add_field(name="Detalhes", value=details, inline=False)
             
             # Adicionar à fila de alta prioridade
-            await self.high_priority_queue.put((channel, None, embed, file, "high"))
+            await self.high_priority_queue.put((
+                channel,
+                None,
+                embed,
+                None,
+                "high"
+            ))
             
         except Exception as e:
             logger.error(f"Erro ao registrar ação no log: {e}")
