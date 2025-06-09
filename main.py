@@ -4,10 +4,11 @@ import pytz
 import json
 import os
 import logging
-from logging.handlers import RotatingFileHandler
-from dotenv import load_dotenv
 import asyncio
 import time
+import random
+from logging.handlers import RotatingFileHandler
+from dotenv import load_dotenv
 from datetime import datetime, timedelta
 from typing import Optional
 from discord.ext import tasks
@@ -114,6 +115,140 @@ class InactivityBot(commands.Bot):
         self._batch_processing_size = 10
         self._api_request_delay = 1.0
         self.audio_check_task = None
+        
+        # Sistema de cache aprimorado
+        self._cache = {
+            'config': {
+                'data': {},
+                'last_updated': {},
+                'ttl': 300  # 5 minutos
+            },
+            'user_data': {
+                'data': {},
+                'last_updated': {},
+                'ttl': 600  # 10 minutos
+            },
+            'guild_data': {
+                'data': {},
+                'last_updated': {},
+                'ttl': 900  # 15 minutos
+            }
+        }
+        self._cache_lock = asyncio.Lock()
+        
+        # Sistema avançado de rate limiting
+        self.rate_limit_stats = {
+            'global': {
+                'last_hit': None,
+                'retry_after': 0,
+                'count': 0,
+                'max_retries': 5,
+                'backoff_base': 1.5
+            },
+            'endpoints': {
+                'send_message': {
+                    'last_hit': None,
+                    'retry_after': 0,
+                    'count': 0,
+                    'max_retries': 3,
+                    'backoff_base': 1.2
+                },
+                'modify_roles': {
+                    'last_hit': None,
+                    'retry_after': 0,
+                    'count': 0,
+                    'max_retries': 3,
+                    'backoff_base': 1.3
+                }
+            }
+        }
+        self.rate_limit_lock = asyncio.Lock()
+
+    async def get_cached_config(self, guild_id: int):
+        """Obtém configuração do cache se válida"""
+        async with self._cache_lock:
+            cache = self._cache['config']
+            if guild_id in cache['data']:
+                if time.time() - cache['last_updated'][guild_id] < cache['ttl']:
+                    return cache['data'][guild_id]
+        return None
+        
+    async def set_cached_config(self, guild_id: int, config: dict):
+        """Armazena configuração no cache"""
+        async with self._cache_lock:
+            self._cache['config']['data'][guild_id] = config
+            self._cache['config']['last_updated'][guild_id] = time.time()
+            
+    async def get_cached_user_data(self, user_id: int, guild_id: int):
+        """Obtém dados de usuário do cache se válidos"""
+        cache_key = f"{user_id}_{guild_id}"
+        async with self._cache_lock:
+            cache = self._cache['user_data']
+            if cache_key in cache['data']:
+                if time.time() - cache['last_updated'][cache_key] < cache['ttl']:
+                    return cache['data'][cache_key]
+        return None
+        
+    async def set_cached_user_data(self, user_id: int, guild_id: int, data: dict):
+        """Armazena dados de usuário no cache"""
+        cache_key = f"{user_id}_{guild_id}"
+        async with self._cache_lock:
+            self._cache['user_data']['data'][cache_key] = data
+            self._cache['user_data']['last_updated'][cache_key] = time.time()
+            
+    async def invalidate_cache(self, cache_type: str, key: str = None):
+        """Invalida cache completo ou um item específico"""
+        async with self._cache_lock:
+            if cache_type in self._cache:
+                if key:
+                    if key in self._cache[cache_type]['data']:
+                        del self._cache[cache_type]['data'][key]
+                    if key in self._cache[cache_type]['last_updated']:
+                        del self._cache[cache_type]['last_updated'][key]
+                else:
+                    self._cache[cache_type]['data'] = {}
+                    self._cache[cache_type]['last_updated'] = {}
+
+    async def check_rate_limit(self, endpoint: str = 'global') -> float:
+        """Verifica se há rate limit e retorna tempo de espera necessário"""
+        async with self.rate_limit_lock:
+            stats = self.rate_limit_stats.get(endpoint, self.rate_limit_stats['global'])
+            
+            if stats['last_hit'] and (time.time() - stats['last_hit']) < stats['retry_after']:
+                stats['count'] += 1
+                if stats['count'] > stats['max_retries']:
+                    return -1  # Indica que devemos abortar
+                
+                # Backoff exponencial com jitter
+                backoff = min(
+                    stats['backoff_base'] ** stats['count'] + random.uniform(0, 0.1),
+                    60  # Máximo de 60 segundos
+                )
+                return backoff
+                
+            return 0  # Sem rate limit ativo
+            
+    async def update_rate_limit(self, endpoint: str, retry_after: float):
+        """Atualiza estatísticas de rate limit"""
+        async with self.rate_limit_lock:
+            if endpoint not in self.rate_limit_stats['endpoints']:
+                self.rate_limit_stats['endpoints'][endpoint] = {
+                    'last_hit': time.time(),
+                    'retry_after': retry_after,
+                    'count': 1,
+                    'max_retries': 3,
+                    'backoff_base': 1.2
+                }
+            else:
+                stats = self.rate_limit_stats['endpoints'][endpoint]
+                stats['last_hit'] = time.time()
+                stats['retry_after'] = retry_after
+                stats['count'] += 1
+                
+            # Atualizar também o rate limit global
+            self.rate_limit_stats['global']['last_hit'] = time.time()
+            self.rate_limit_stats['global']['retry_after'] = retry_after
+            self.rate_limit_stats['global']['count'] += 1
 
     async def setup_hook(self):
         """Configuração assíncrona que é executada após o login mas antes de conectar ao websocket"""
@@ -361,28 +496,37 @@ class InactivityBot(commands.Bot):
 
     async def safe_send(self, channel, content=None, embed=None, file=None, retry_count=0):
         """Método seguro para enviar mensagens com tratamento de rate limits"""
-        if self.rate_limited:
-            if self.last_rate_limit_time and (datetime.now() - self.last_rate_limit_time).total_seconds() < 60:
-                logger.warning("Ignorando envio devido a rate limit recente")
-                return False
-            self.rate_limited = False
-
+        # Verificar rate limit antes de tentar
+        wait_time = await self.check_rate_limit('send_message')
+        if wait_time == -1:
+            logger.warning("Máximo de tentativas de rate limit atingido para envio de mensagem")
+            return False
+        elif wait_time > 0:
+            await asyncio.sleep(wait_time)
+            
         try:
             await channel.send(content=content, embed=embed, file=file)
-            self.rate_limit_count = 0
-            return True
-        except discord.errors.HTTPException as e:
-            if e.status == 429:
-                self.rate_limited = True
-                self.last_rate_limit_time = datetime.now()
-                retry_after = float(e.response.headers.get('Retry-After', 5))
+            
+            # Resetar contadores se bem-sucedido
+            async with self.rate_limit_lock:
+                if 'send_message' in self.rate_limit_stats['endpoints']:
+                    self.rate_limit_stats['endpoints']['send_message']['count'] = 0
+                self.rate_limit_stats['global']['count'] = 0
                 
-                if retry_count < self.max_rate_limit_retries:
-                    logger.warning(f"Rate limit atingido. Tentando novamente em {retry_after} segundos (tentativa {retry_count + 1})")
+            return True
+            
+        except discord.errors.HTTPException as e:
+            if e.status == 429:  # Rate limited
+                retry_after = float(e.response.headers.get('Retry-After', 5))
+                logger.warning(f"Rate limit atingido. Tentando novamente em {retry_after} segundos")
+                
+                await self.update_rate_limit('send_message', retry_after)
+                
+                if retry_count < self.rate_limit_stats['endpoints']['send_message']['max_retries']:
                     await asyncio.sleep(retry_after)
                     return await self.safe_send(channel, content, embed, file, retry_count + 1)
-                
-                logger.error(f"Rate limit persistente após {self.max_rate_limit_retries} tentativas")
+                    
+                logger.error("Máximo de tentativas de rate limit atingido")
                 return False
             raise
 
