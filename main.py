@@ -151,7 +151,7 @@ class InactivityBot(commands.Bot):
                         for member in voice_channel.members:
                             audio_key = (member.id, guild.id)
                             if audio_key in self.active_sessions:
-                                current_audio_state = member.voice.self_mute or member.voice.self_deaf
+                                current_audio_state = member.voice.self_deaf  # Verifica apenas o estado do áudio
                                 
                                 # Se o áudio está desativado e não estávamos rastreando
                                 if current_audio_state and not self.active_sessions[audio_key]['audio_disabled']:
@@ -521,12 +521,12 @@ class InactivityBot(commands.Bot):
                any(role.id in self.config['whitelist']['roles'] for role in member.roles):
                 continue
             
-            # Verificar mudanças no estado do áudio
+            # Verificar mudanças no estado do áudio (somente self_deaf)
             if before.channel and after.channel and before.channel == after.channel:
-                audio_state_changed = (before.self_mute != after.self_mute) or (before.self_deaf != after.self_deaf)
+                audio_state_changed = (before.self_deaf != after.self_deaf)
                 
                 if audio_state_changed and audio_key in self.active_sessions:
-                    new_audio_state = after.self_mute or after.self_deaf
+                    new_audio_state = after.self_deaf  # Somente verifica se o áudio está desativado
                     old_audio_state = self.active_sessions[audio_key]['audio_disabled']
                     
                     # Se o estado mudou de ativado para desativado
@@ -559,7 +559,7 @@ class InactivityBot(commands.Bot):
                     self.active_sessions[audio_key] = {
                         'start_time': datetime.utcnow(),
                         'last_audio_time': datetime.utcnow(),
-                        'audio_disabled': after.self_mute or after.self_deaf,
+                        'audio_disabled': after.self_deaf,  # Somente verifica self_deaf
                         'total_audio_off_time': 0
                     }
                     channel_name = getattr(after.channel, 'name', 'Unknown Channel')
@@ -616,7 +616,7 @@ class InactivityBot(commands.Bot):
                         self.active_sessions[audio_key] = {
                             'start_time': datetime.utcnow(),
                             'last_audio_time': datetime.utcnow(),
-                            'audio_disabled': after.self_mute or after.self_deaf,
+                            'audio_disabled': after.self_deaf,  # Somente verifica self_deaf
                             'total_audio_off_time': 0
                         }
                         channel_name = getattr(after.channel, 'name', 'Unknown Channel')
