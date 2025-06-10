@@ -411,14 +411,16 @@ class Database:
                         INDEX idx_date (activity_date)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci''')
                     
-                    # Índices adicionais para consultas frequentes
+                    # Índices adicionais para consultas frequentes (CORRIGIDO)
                     await cursor.execute('''
                     ALTER TABLE voice_sessions 
-                    ADD INDEX idx_user_guild_date (user_id, guild_id, DATE(join_time))''')
+                    ADD INDEX idx_user_guild_join (user_id, guild_id, join_time)
+                    ''')
                     
                     await cursor.execute('''
                     ALTER TABLE user_activity
-                    ADD INDEX idx_last_activity (guild_id, last_voice_leave)''')
+                    ADD INDEX idx_last_activity (guild_id, last_voice_leave)
+                    ''')
                     
                     await conn.commit()
                     logger.info("Tabelas e índices otimizados criados/verificados")
@@ -455,6 +457,11 @@ class Database:
                     logger.info("Tabelas criadas/verificadas com sucesso")
             except Exception as e:
                 logger.error(f"Erro ao criar tabelas: {e}")
+                if conn:
+                    try:
+                        await conn.rollback()
+                    except:
+                        pass
                 raise
             finally:
                 if conn:
@@ -889,7 +896,7 @@ class Database:
                 await conn.commit()
                 
                 log_message = (
-                    f"Limpeza de dados antigos concluída: "
+                    f"Limpeza de dados antigos concluída: " 
                     f"Sessões de voz: {voice_deleted}, "
                     f"Avisos: {warnings_deleted}, "
                     f"Cargos removidos: {roles_deleted}, "
