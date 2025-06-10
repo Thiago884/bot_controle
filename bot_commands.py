@@ -4,8 +4,9 @@ from discord.ext import commands
 from typing import Optional, List
 from datetime import datetime, timedelta
 import logging
-from main import bot, allowed_roles_only
 import asyncio
+import random
+from main import bot, allowed_roles_only
 
 logger = logging.getLogger('inactivity_bot')
 
@@ -810,124 +811,88 @@ async def check_user(interaction: discord.Interaction, member: discord.Member):
             "❌ Ocorreu um erro ao verificar a atividade do usuário.", ephemeral=True)
 
 @bot.tree.command(name="check_user_history", description="Relatório completo de atividade do usuário")
-@app_commands.checks.cooldown(1, 300.0, key=lambda i: (i.guild_id, i.user.id))  # 5 minutos de cooldown
+@app_commands.checks.cooldown(1, 600.0, key=lambda i: (i.guild_id, i.user.id))  # Aumentado para 10 minutos de cooldown
 @allowed_roles_only()
 async def check_user_history(interaction: discord.Interaction, member: discord.Member):
-    """Gera um relatório completo da atividade de um usuário"""
+    """Gera um relatório completo da atividade de um usuário com proteção robusta contra rate limits"""
     try:
         await interaction.response.defer(thinking=True)
         
-        # Verificar se o bot está rate limited
+        # Verificação inicial de rate limit
         if bot.rate_limited:
+            wait_time = max(60, (datetime.now() - bot.last_rate_limit).total_seconds())
             await interaction.followup.send(
-                "⚠️ O bot está temporariamente limitado pelo Discord. Por favor, tente novamente mais tarde.")
+                f"⚠️ O bot está temporariamente limitado pelo Discord. Por favor, tente novamente em {int(wait_time)} segundos.")
             return
             
-        # Adicionar delays maiores entre as etapas
-        await asyncio.sleep(5)  # Aumentado para 5 segundos
+        # Adicionar delay inicial maior
+        await asyncio.sleep(5)
         
-        # Reduzir o período de consulta de 30 para 14 dias para diminuir a carga
+        # Reduzir ainda mais o período de consulta para diminuir a carga
         end_date = datetime.now(bot.timezone)
-        start_date = end_date - timedelta(days=14)
+        start_date = end_date - timedelta(days=7)  # Reduzido para 7 dias
         
+        # Coletar dados com delays maiores entre consultas e tratamento de erros
         try:
-            # Coletar dados com delays entre consultas
-            user_data = await bot.db.get_user_activity(member.id, member.guild.id)
-            await asyncio.sleep(2)  # Aumentado para 2 segundos
+            # Primeiro tentar usar a tabela de agregação diária para otimização
+            user_data = await asyncio.wait_for(
+                get_with_retry(bot.db.get_user_activity, member.id, member.guild.id),
+                timeout=15
+            )
+            await asyncio.sleep(3)
             
-            voice_sessions = await bot.db.get_voice_sessions(member.id, member.guild.id, start_date, end_date)
-            await asyncio.sleep(2)  # Aumentado para 2 segundos
+            voice_sessions = await asyncio.wait_for(
+                get_with_retry(bot.db.get_voice_sessions, member.id, member.guild.id, start_date, end_date),
+                timeout=20
+            )
+            await asyncio.sleep(3)
             
-            # Coletar apenas os dados essenciais com mais delays
-            async with bot.db.pool.acquire() as conn:
-                async with conn.cursor() as cursor:
-                    await cursor.execute('''
-                        SELECT warning_type, warning_date 
-                        FROM user_warnings 
-                        WHERE user_id = %s AND guild_id = %s
-                        ORDER BY warning_date DESC
-                        LIMIT 3
-                    ''', (member.id, member.guild.id))
-                    all_warnings = await cursor.fetchall()
-                    
-                    await asyncio.sleep(1)  # Aumentado para 1 segundo
-                    
-                    await cursor.execute('''
-                        SELECT role_id, removal_date 
-                        FROM removed_roles 
-                        WHERE user_id = %s AND guild_id = %s
-                        ORDER BY removal_date DESC
-                        LIMIT 3
-                    ''', (member.id, member.guild.id))
-                    removed_roles = await cursor.fetchall()
-                    
-                    await asyncio.sleep(1)  # Aumentado para 1 segundo
-                    
-                    await cursor.execute('''
-                        SELECT period_start, period_end, meets_requirements
-                        FROM checked_periods
-                        WHERE user_id = %s AND guild_id = %s
-                        ORDER BY period_start DESC
-                        LIMIT 1
-                    ''', (member.id, member.guild.id))
-                    period_checks = await cursor.fetchone()
+            # Coletar apenas os dados essenciais com delays maiores
+            all_warnings = await asyncio.wait_for(
+                get_with_retry(get_warnings_with_backoff, member.id, member.guild.id),
+                timeout=15
+            )
+            await asyncio.sleep(2)
             
-            # Criar embed simplificado
-            embed = discord.Embed(
-                title=f"📊 Relatório de Atividade - {member.display_name}",
-                color=discord.Color.blue(),
-                description=f"Período: {start_date.strftime('%d/%m/%Y')} a {end_date.strftime('%d/%m/%Y')}"
+            removed_roles = await asyncio.wait_for(
+                get_with_retry(get_removed_roles_with_backoff, member.id, member.guild.id),
+                timeout=15
+            )
+            await asyncio.sleep(2)
+            
+            period_checks = await asyncio.wait_for(
+                get_with_retry(get_period_checks_with_backoff, member.id, member.guild.id),
+                timeout=15
             )
             
-            embed.set_thumbnail(url=member.display_avatar.url)
-            
-            # Adicionar campos básicos
-            total_time = sum(s['duration'] for s in voice_sessions) / 60  # em minutos
-            embed.add_field(
-                name="📈 Estatísticas",
-                value=f"• Sessões: {len(voice_sessions)}\n• Tempo total: {int(total_time)} minutos",
-                inline=True
-            )
-            
-            if period_checks:
-                period_start = period_checks['period_start'].replace(tzinfo=bot.timezone)
-                period_end = period_checks['period_end'].replace(tzinfo=bot.timezone)
-                days_remaining = (period_end - datetime.now(bot.timezone)).days
-                
-                embed.add_field(
-                    name="🔄 Status Atual",
-                    value=(
-                        f"• Período: {period_start.strftime('%d/%m/%Y')} a {period_end.strftime('%d/%m/%Y')}\n"
-                        f"• Dias restantes: {days_remaining}\n"
-                        f"• Status: {'✅ Cumprindo' if period_checks['meets_requirements'] else '⚠️ Não cumprindo'}"
-                    ),
-                    inline=True
-                )
-            
-            # Adicionar avisos se houver
-            if all_warnings:
-                warnings_str = "\n".join(
-                    f"• {w['warning_type']} - {w['warning_date'].strftime('%d/%m/%Y')}"
-                    for w in all_warnings
-                )
-                embed.add_field(name="⚠️ Avisos", value=warnings_str, inline=False)
-            
-            # Adicionar cargos removidos se houver
-            if removed_roles:
-                roles_str = "\n".join(
-                    f"• <@&{r['role_id']}> - {r['removal_date'].strftime('%d/%m/%Y')}"
-                    for r in removed_roles
-                )
-                embed.add_field(name="🔴 Cargos Removidos", value=roles_str, inline=False)
-            
-            # Enviar apenas o embed sem o gráfico
-            await interaction.followup.send(embed=embed)
-                    
-        except Exception as e:
-            logger.error(f"Erro ao gerar relatório: {e}")
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout ao coletar dados para {member}")
             await interaction.followup.send(
-                "❌ Ocorreu um erro ao gerar o relatório completo. Por favor, tente novamente mais tarde.")
+                "⏱️ O tempo para coletar os dados expirou. Por favor, tente novamente mais tarde.")
+            return
+        except Exception as e:
+            logger.error(f"Erro ao coletar dados: {e}")
+            await interaction.followup.send(
+                "❌ Ocorreu um erro ao coletar os dados. Por favor, tente novamente mais tarde.")
+            return
             
+        # Criar embed simplificado sem gráfico inicialmente
+        embed = await create_simple_embed(member, start_date, end_date, user_data, voice_sessions, period_checks, all_warnings, removed_roles)
+        
+        # Enviar resposta inicial
+        await interaction.followup.send(embed=embed)
+        
+        # Se houver sessões, tentar gerar gráfico em segundo plano com delays
+        if voice_sessions:
+            try:
+                await asyncio.sleep(5)  # Delay antes de tentar gerar gráfico
+                report_file = await generate_activity_report_with_backoff(member, voice_sessions)
+                if report_file:
+                    await interaction.followup.send(file=report_file)
+            except Exception as e:
+                logger.error(f"Erro ao gerar gráfico: {e}")
+                # Não enviar mensagem de erro para não sobrecarregar
+                    
     except Exception as e:
         logger.error(f"Erro no comando check_user_history: {e}")
         try:
@@ -935,6 +900,118 @@ async def check_user_history(interaction: discord.Interaction, member: discord.M
                 "❌ Ocorreu um erro ao processar sua requisição.")
         except:
             pass
+
+async def get_with_retry(func, *args, max_retries=3, initial_delay=1, **kwargs):
+    """Executa uma função com retry automático e backoff exponencial"""
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            return await func(*args, **kwargs)
+        except Exception as e:
+            last_error = e
+            wait_time = initial_delay * (2 ** attempt) + random.uniform(0, 0.5)
+            await asyncio.sleep(wait_time)
+    raise last_error
+
+async def get_warnings_with_backoff(user_id, guild_id):
+    """Obtém avisos com backoff exponencial"""
+    async with bot.db.pool.acquire() as conn:
+        async with conn.cursor() as cursor:
+            await cursor.execute('''
+                SELECT warning_type, warning_date 
+                FROM user_warnings 
+                WHERE user_id = %s AND guild_id = %s
+                ORDER BY warning_date DESC
+                LIMIT 3
+            ''', (user_id, guild_id))
+            return await cursor.fetchall()
+
+async def get_removed_roles_with_backoff(user_id, guild_id):
+    """Obtém cargos removidos com backoff exponencial"""
+    async with bot.db.pool.acquire() as conn:
+        async with conn.cursor() as cursor:
+            await cursor.execute('''
+                SELECT role_id, removal_date 
+                FROM removed_roles 
+                WHERE user_id = %s AND guild_id = %s
+                ORDER BY removal_date DESC
+                LIMIT 3
+            ''', (user_id, guild_id))
+            return await cursor.fetchall()
+
+async def get_period_checks_with_backoff(user_id, guild_id):
+    """Obtém verificações de período com backoff exponencial"""
+    async with bot.db.pool.acquire() as conn:
+        async with conn.cursor() as cursor:
+            await cursor.execute('''
+                SELECT period_start, period_end, meets_requirements
+                FROM checked_periods
+                WHERE user_id = %s AND guild_id = %s
+                ORDER BY period_start DESC
+                LIMIT 1
+            ''', (user_id, guild_id))
+            return await cursor.fetchone()
+
+async def generate_activity_report_with_backoff(member, sessions):
+    """Gera relatório de atividade com backoff exponencial"""
+    for attempt in range(3):
+        try:
+            return await generate_activity_report(member, sessions)
+        except Exception as e:
+            wait_time = (2 ** attempt) + random.uniform(0, 1)
+            await asyncio.sleep(wait_time)
+    return None
+
+async def create_simple_embed(member, start_date, end_date, user_data, voice_sessions, period_checks, all_warnings, removed_roles):
+    """Cria um embed simples sem gráfico para resposta rápida"""
+    embed = discord.Embed(
+        title=f"📊 Relatório de Atividade - {member.display_name}",
+        color=discord.Color.blue(),
+        description=f"Período: {start_date.strftime('%d/%m/%Y')} a {end_date.strftime('%d/%m/%Y')}"
+    )
+    
+    embed.set_thumbnail(url=member.display_avatar.url)
+    
+    # Adicionar campos básicos
+    total_time = sum(s['duration'] for s in voice_sessions) / 60 if voice_sessions else 0
+    embed.add_field(
+        name="📈 Estatísticas",
+        value=f"• Sessões: {len(voice_sessions)}\n• Tempo total: {int(total_time)} minutos",
+        inline=True
+    )
+    
+    if period_checks:
+        period_start = period_checks['period_start'].replace(tzinfo=bot.timezone)
+        period_end = period_checks['period_end'].replace(tzinfo=bot.timezone)
+        days_remaining = (period_end - datetime.now(bot.timezone)).days
+        
+        embed.add_field(
+            name="🔄 Status Atual",
+            value=(
+                f"• Período: {period_start.strftime('%d/%m/%Y')} a {period_end.strftime('%d/%m/%Y')}\n"
+                f"• Dias restantes: {days_remaining}\n"
+                f"• Status: {'✅ Cumprindo' if period_checks['meets_requirements'] else '⚠️ Não cumprindo'}"
+            ),
+            inline=True
+        )
+    
+    # Adicionar avisos se houver
+    if all_warnings:
+        warnings_str = "\n".join(
+            f"• {w['warning_type']} - {w['warning_date'].strftime('%d/%m/%Y')}"
+            for w in all_warnings
+        )
+        embed.add_field(name="⚠️ Avisos", value=warnings_str, inline=False)
+    
+    # Adicionar cargos removidos se houver
+    if removed_roles:
+        roles_str = "\n".join(
+            f"• <@&{r['role_id']}> - {r['removal_date'].strftime('%d/%m/%Y')}"
+            for r in removed_roles
+        )
+        embed.add_field(name="🔴 Cargos Removidos", value=roles_str, inline=False)
+    
+    return embed
 
 @check_user_history.error
 async def check_user_history_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
