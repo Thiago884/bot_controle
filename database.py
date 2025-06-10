@@ -446,32 +446,46 @@ class Database:
                     else:
                         logger.info("Índice idx_last_activity já existe - pulando criação")
                     
-                    await conn.commit()
-                    logger.info("Tabelas e índices otimizados criados/verificados")
-                    
-                    # Criar stored procedure para agregação diária
+                    # Verificar se a procedure existe antes de criar
                     await cursor.execute('''
-                    CREATE PROCEDURE IF NOT EXISTS aggregate_daily_voice()
-                    BEGIN
-                        INSERT INTO daily_voice_activity
-                        (user_id, guild_id, activity_date, total_duration, session_count)
-                        SELECT 
-                            user_id, 
-                            guild_id, 
-                            DATE(join_time) as activity_date,
-                            SUM(duration) as total_duration,
-                            COUNT(*) as session_count
-                        FROM voice_sessions
-                        WHERE DATE(join_time) < CURDATE()
-                        AND (user_id, guild_id, DATE(join_time)) NOT IN (
-                            SELECT user_id, guild_id, activity_date 
-                            FROM daily_voice_activity
-                        )
-                        GROUP BY user_id, guild_id, DATE(join_time)
-                        ON DUPLICATE KEY UPDATE
-                            total_duration = VALUES(total_duration),
-                            session_count = VALUES(session_count);
-                    END''')
+                        SELECT 1 FROM information_schema.routines 
+                        WHERE routine_name = 'aggregate_daily_voice' 
+                        AND routine_schema = DATABASE()
+                        LIMIT 1
+                    ''')
+                    procedure_exists = await cursor.fetchone()
+
+                    if not procedure_exists:
+                        await cursor.execute('''
+                            DROP PROCEDURE IF EXISTS aggregate_daily_voice
+                        ''')
+                        await cursor.execute('''
+                            CREATE PROCEDURE aggregate_daily_voice()
+                            BEGIN
+                                INSERT INTO daily_voice_activity
+                                (user_id, guild_id, activity_date, total_duration, session_count)
+                                SELECT 
+                                    user_id, 
+                                    guild_id, 
+                                    DATE(join_time) as activity_date,
+                                    SUM(duration) as total_duration,
+                                    COUNT(*) as session_count
+                                FROM voice_sessions
+                                WHERE DATE(join_time) < CURDATE()
+                                AND (user_id, guild_id, DATE(join_time)) NOT IN (
+                                    SELECT user_id, guild_id, activity_date 
+                                    FROM daily_voice_activity
+                                )
+                                GROUP BY user_id, guild_id, DATE(join_time)
+                                ON DUPLICATE KEY UPDATE
+                                    total_duration = VALUES(total_duration),
+                                    session_count = VALUES(session_count);
+                            END
+                        ''')
+                        await conn.commit()
+                        logger.info("Stored procedure aggregate_daily_voice criada com sucesso")
+                    else:
+                        logger.info("Stored procedure aggregate_daily_voice já existe - pulando criação")
                     
                     await conn.commit()
                     
