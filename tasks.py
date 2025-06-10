@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 import asyncio
 import logging
 from main import bot
@@ -7,7 +7,6 @@ import discord
 from io import BytesIO
 from typing import Optional
 from utils import generate_activity_graph
-import time
 import random
 
 logger = logging.getLogger('inactivity_bot')
@@ -627,6 +626,7 @@ async def _execute_force_check(member: discord.Member):
         logger.error(f"Erro na verificação forçada para {member}: {e}")
         raise
 
+# tasks.py (correção na função setup_tasks)
 def setup_tasks():
     """Configura e inicia todas as tarefas agendadas"""
     # Configurar horários específicos para minimizar impacto
