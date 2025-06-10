@@ -411,16 +411,40 @@ class Database:
                         INDEX idx_date (activity_date)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci''')
                     
-                    # Índices adicionais para consultas frequentes (CORRIGIDO)
+                    # Verificar e adicionar índices apenas se não existirem
                     await cursor.execute('''
-                    ALTER TABLE voice_sessions 
-                    ADD INDEX idx_user_guild_join (user_id, guild_id, join_time)
+                    SELECT 1 FROM information_schema.statistics 
+                    WHERE table_name = 'voice_sessions' AND index_name = 'idx_user_guild_join' 
+                    LIMIT 1
                     ''')
-                    
+                    index_exists = await cursor.fetchone()
+
+                    if not index_exists:
+                        await cursor.execute('''
+                        ALTER TABLE voice_sessions 
+                        ADD INDEX idx_user_guild_join (user_id, guild_id, join_time)
+                        ''')
+                        await conn.commit()
+                        logger.info("Índice idx_user_guild_join criado com sucesso")
+                    else:
+                        logger.info("Índice idx_user_guild_join já existe - pulando criação")
+
                     await cursor.execute('''
-                    ALTER TABLE user_activity
-                    ADD INDEX idx_last_activity (guild_id, last_voice_leave)
+                    SELECT 1 FROM information_schema.statistics 
+                    WHERE table_name = 'user_activity' AND index_name = 'idx_last_activity' 
+                    LIMIT 1
                     ''')
+                    index_exists = await cursor.fetchone()
+
+                    if not index_exists:
+                        await cursor.execute('''
+                        ALTER TABLE user_activity
+                        ADD INDEX idx_last_activity (guild_id, last_voice_leave)
+                        ''')
+                        await conn.commit()
+                        logger.info("Índice idx_last_activity criado com sucesso")
+                    else:
+                        logger.info("Índice idx_last_activity já existe - pulando criação")
                     
                     await conn.commit()
                     logger.info("Tabelas e índices otimizados criados/verificados")
