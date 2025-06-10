@@ -8,6 +8,7 @@ from io import BytesIO
 from typing import Optional
 from utils import generate_activity_graph
 import random
+from datetime import time
 
 logger = logging.getLogger('inactivity_bot')
 
@@ -626,15 +627,18 @@ async def _execute_force_check(member: discord.Member):
         logger.error(f"Erro na verificação forçada para {member}: {e}")
         raise
 
-# tasks.py (correção na função setup_tasks)
+# tasks.py (parte corrigida)
 def setup_tasks():
     """Configura e inicia todas as tarefas agendadas"""
+    # Importar datetime no escopo da função para evitar confusão
+    from datetime import time
+    
     # Configurar horários específicos para minimizar impacto
-    inactivity_check.change_interval(time=datetime.time(hour=3, minute=0))  # 3 AM
-    check_warnings.change_interval(time=datetime.time(hour=6, minute=0))    # 6 AM
-    cleanup_members.change_interval(time=datetime.time(hour=9, minute=0))   # 9 AM
-    database_backup.change_interval(time=datetime.time(hour=0, minute=0))   # Midnight
-    cleanup_old_data.change_interval(time=datetime.time(hour=1, minute=0))  # 1 AM
+    inactivity_check.change_interval(time=time(hour=3, minute=0))  # 3 AM
+    check_warnings.change_interval(time=time(hour=6, minute=0))    # 6 AM
+    cleanup_members.change_interval(time=time(hour=9, minute=0))   # 9 AM
+    database_backup.change_interval(time=time(hour=0, minute=0))   # Midnight
+    cleanup_old_data.change_interval(time=time(hour=1, minute=0))  # 1 AM
     
     # Iniciar todas as tarefas
     inactivity_check.start()
