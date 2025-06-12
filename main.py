@@ -429,11 +429,21 @@ class InactivityBot(commands.Bot):
                 
                 # Processar mensagens da fila prioritária
                 item, priority = await self.message_queue.get()
-                if item is not None:
-                    await self._process_queue_item(item)
-                    self.message_queue.task_done(priority)
-                else:
+                if item is None:
                     await asyncio.sleep(0.1)
+                    continue
+                    
+                # Verificar o tipo de item
+                if isinstance(item, tuple):
+                    if len(item) == 4:  # Formato completo (channel, content, embed, file)
+                        await self._process_queue_item(item)
+                    elif len(item) == 2:  # Formato simplificado (channel, embed)
+                        channel, embed = item
+                        await self.safe_send(channel, embed=embed)
+                else:
+                    logger.warning(f"Item da fila em formato desconhecido: {type(item)}")
+                    
+                self.message_queue.task_done(priority)
                     
             except Exception as e:
                 logger.error(f"Erro no processador de filas: {e}")
@@ -456,6 +466,14 @@ class InactivityBot(commands.Bot):
                     await asyncio.sleep(0.1)
                     continue
                     
+                # Verificar se o item tem o formato esperado
+                if len(item) == 2:  # Formato mais simples (channel, embed)
+                    channel, embed = item
+                    await self.safe_send(channel, embed=embed)
+                    self.message_queue.task_done(priority)
+                    continue
+                    
+                # Formato completo de comando
                 interaction, command, args, kwargs = item
                 
                 if self.rate_limited:
