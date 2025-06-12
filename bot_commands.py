@@ -1,7 +1,7 @@
 import discord
 from discord import app_commands
 from discord.ext import commands
-from typing import Optional, List
+from typing import Optional, List, Literal, Union
 from datetime import datetime, timedelta
 import logging
 from main import bot, allowed_roles_only
@@ -258,94 +258,163 @@ async def set_kick_days(interaction: discord.Interaction, days: int):
         )
         await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="add_tracked_role", description="Adiciona um cargo à lista de cargos monitorados")
+@bot.tree.command(name="whitelist_manage", description="Gerencia a whitelist de usuários e cargos")
+@app_commands.describe(
+    action="Ação a ser realizada (adicionar ou remover)",
+    target_type="Tipo de alvo (usuário ou cargo)",
+    target="Usuário ou cargo a ser gerenciado"
+)
 @allowed_roles_only()
 @commands.has_permissions(administrator=True)
-async def add_tracked_role(interaction: discord.Interaction, role: discord.Role):
-    """Adiciona um cargo à lista de cargos monitorados para inatividade"""
+async def whitelist_manage(
+    interaction: discord.Interaction,
+    action: Literal["add", "remove"],
+    target_type: Literal["user", "role"],
+    target: Union[discord.User, discord.Role]
+):
+    """Gerencia a whitelist de usuários e cargos"""
     try:
-        logger.info(f"Comando add_tracked_role acionado por {interaction.user} para o cargo {role.name}")
+        logger.info(f"Comando whitelist_manage acionado por {interaction.user} - Ação: {action} Tipo: {target_type} Alvo: {target}")
         
-        if role.id not in bot.config['tracked_roles']:
-            bot.config['tracked_roles'].append(role.id)
-            await bot.save_config()
-            
-            embed = discord.Embed(
-                title="✅ Cargo Monitorado Adicionado",
-                description=f"O cargo {role.mention} foi adicionado à lista de monitorados.",
-                color=discord.Color.green()
-            )
-            await interaction.response.send_message(embed=embed)
-            
-            await bot.log_action(
-                "Cargo Monitorado Adicionado",
-                interaction.user,
-                f"Cargo: {role.name} (ID: {role.id})"
-            )
-            
-            await bot.notify_roles(
-                f"🔔 Cargo `{role.name}` adicionado à lista de monitorados de inatividade.",
-                is_warning=False
-            )
-            logger.info(f"Cargo {role.name} adicionado à lista de monitorados")
-        else:
-            embed = discord.Embed(
-                title="ℹ️ Informação",
-                description="Este cargo já está sendo monitorado.",
-                color=discord.Color.blue()
-            )
-            await interaction.response.send_message(embed=embed)
+        config_key = 'users' if target_type == 'user' else 'roles'
+        target_id = target.id
+        
+        if action == "add":
+            if target_id not in bot.config['whitelist'][config_key]:
+                bot.config['whitelist'][config_key].append(target_id)
+                await bot.save_config()
+                
+                embed = discord.Embed(
+                    title="✅ Whitelist Atualizada",
+                    description=f"O {'usuário' if target_type == 'user' else 'cargo'} {target.mention} foi adicionado à whitelist.",
+                    color=discord.Color.green()
+                )
+                
+                await bot.log_action(
+                    "Whitelist Atualizada",
+                    interaction.user,
+                    f"{'Usuário' if target_type == 'user' else 'Cargo'} adicionado: {target.name} (ID: {target.id})"
+                )
+            else:
+                embed = discord.Embed(
+                    title="ℹ️ Informação",
+                    description=f"Este {'usuário' if target_type == 'user' else 'cargo'} já está na whitelist.",
+                    color=discord.Color.blue()
+                )
+        else:  # remove
+            if target_id in bot.config['whitelist'][config_key]:
+                bot.config['whitelist'][config_key].remove(target_id)
+                await bot.save_config()
+                
+                embed = discord.Embed(
+                    title="✅ Whitelist Atualizada",
+                    description=f"O {'usuário' if target_type == 'user' else 'cargo'} {target.mention} foi removido da whitelist.",
+                    color=discord.Color.green()
+                )
+                
+                await bot.log_action(
+                    "Whitelist Atualizada",
+                    interaction.user,
+                    f"{'Usuário' if target_type == 'user' else 'Cargo'} removido: {target.name} (ID: {target.id})"
+                )
+            else:
+                embed = discord.Embed(
+                    title="ℹ️ Informação",
+                    description=f"Este {'usuário' if target_type == 'user' else 'cargo'} não estava na whitelist.",
+                    color=discord.Color.blue()
+                )
+        
+        await interaction.response.send_message(embed=embed)
+        logger.info(f"Whitelist atualizada com sucesso - Ação: {action} Tipo: {target_type} Alvo: {target}")
+    
     except Exception as e:
-        logger.error(f"Erro ao adicionar cargo monitorado: {e}")
+        logger.error(f"Erro ao gerenciar whitelist: {e}")
         embed = discord.Embed(
             title="❌ Erro",
-            description="Ocorreu um erro ao adicionar o cargo. Por favor, tente novamente.",
+            description="Ocorreu um erro ao atualizar a whitelist. Por favor, tente novamente.",
             color=discord.Color.red()
         )
         await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="remove_tracked_role", description="Remove um cargo da lista de cargos monitorados")
+@bot.tree.command(name="manage_tracked_roles", description="Gerencia cargos monitorados por inatividade")
+@app_commands.describe(
+    action="Ação a ser realizada (adicionar ou remover)",
+    role="Cargo a ser gerenciado"
+)
 @allowed_roles_only()
 @commands.has_permissions(administrator=True)
-async def remove_tracked_role(interaction: discord.Interaction, role: discord.Role):
-    """Remove um cargo da lista de cargos monitorados para inatividade"""
+async def manage_tracked_roles(
+    interaction: discord.Interaction,
+    action: Literal["add", "remove"],
+    role: discord.Role
+):
+    """Gerencia cargos monitorados por inatividade"""
     try:
-        logger.info(f"Comando remove_tracked_role acionado por {interaction.user} para o cargo {role.name}")
+        logger.info(f"Comando manage_tracked_roles acionado por {interaction.user} - Ação: {action} Cargo: {role.name}")
         
-        if role.id in bot.config['tracked_roles']:
-            bot.config['tracked_roles'].remove(role.id)
-            await bot.save_config()
-            
-            embed = discord.Embed(
-                title="✅ Cargo Monitorado Removido",
-                description=f"O cargo {role.mention} foi removido da lista de monitorados.",
-                color=discord.Color.green()
-            )
-            await interaction.response.send_message(embed=embed)
-            
-            await bot.log_action(
-                "Cargo Monitorado Removido",
-                interaction.user,
-                f"Cargo: {role.name} (ID: {role.id})"
-            )
-            
-            await bot.notify_roles(
-                f"🔕 Cargo `{role.name}` removido da lista de monitorados de inatividade.",
-                is_warning=False
-            )
-            logger.info(f"Cargo {role.name} removido da lista de monitorados")
-        else:
-            embed = discord.Embed(
-                title="ℹ️ Informação",
-                description="Este cargo não estava sendo monitorado.",
-                color=discord.Color.blue()
-            )
-            await interaction.response.send_message(embed=embed)
+        if action == "add":
+            if role.id not in bot.config['tracked_roles']:
+                bot.config['tracked_roles'].append(role.id)
+                await bot.save_config()
+                
+                embed = discord.Embed(
+                    title="✅ Cargo Monitorado Adicionado",
+                    description=f"O cargo {role.mention} foi adicionado à lista de monitorados.",
+                    color=discord.Color.green()
+                )
+                
+                await bot.log_action(
+                    "Cargo Monitorado Adicionado",
+                    interaction.user,
+                    f"Cargo: {role.name} (ID: {role.id})"
+                )
+                
+                await bot.notify_roles(
+                    f"🔔 Cargo `{role.name}` adicionado à lista de monitorados de inatividade.",
+                    is_warning=False
+                )
+            else:
+                embed = discord.Embed(
+                    title="ℹ️ Informação",
+                    description="Este cargo já está sendo monitorado.",
+                    color=discord.Color.blue()
+                )
+        else:  # remove
+            if role.id in bot.config['tracked_roles']:
+                bot.config['tracked_roles'].remove(role.id)
+                await bot.save_config()
+                
+                embed = discord.Embed(
+                    title="✅ Cargo Monitorado Removido",
+                    description=f"O cargo {role.mention} foi removido da lista de monitorados.",
+                    color=discord.Color.green()
+                )
+                
+                await bot.log_action(
+                    "Cargo Monitorado Removido",
+                    interaction.user,
+                    f"Cargo: {role.name} (ID: {role.id})"
+                )
+                
+                await bot.notify_roles(
+                    f"🔕 Cargo `{role.name}` removido da lista de monitorados de inatividade.",
+                    is_warning=False
+                )
+            else:
+                embed = discord.Embed(
+                    title="ℹ️ Informação",
+                    description="Este cargo não estava sendo monitorado.",
+                    color=discord.Color.blue()
+                )
+        
+        await interaction.response.send_message(embed=embed)
+        logger.info(f"Cargo monitorado atualizado com sucesso - Ação: {action} Cargo: {role.name}")
+    
     except Exception as e:
-        logger.error(f"Erro ao remover cargo monitorado: {e}")
+        logger.error(f"Erro ao gerenciar cargos monitorados: {e}")
         embed = discord.Embed(
             title="❌ Erro",
-            description="Ocorreu um erro ao remover o cargo. Por favor, tente novamente.",
+            description="Ocorreu um erro ao atualizar os cargos monitorados. Por favor, tente novamente.",
             color=discord.Color.red()
         )
         await interaction.response.send_message(embed=embed)
@@ -470,170 +539,6 @@ async def set_warning_message(interaction: discord.Interaction, warning_type: st
         embed = discord.Embed(
             title="❌ Erro",
             description="Ocorreu um erro ao atualizar a mensagem. Por favor, tente novamente.",
-            color=discord.Color.red()
-        )
-        await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="whitelist_add_user", description="Adiciona um usuário à whitelist")
-@allowed_roles_only()
-@commands.has_permissions(administrator=True)
-async def whitelist_add_user(interaction: discord.Interaction, user: discord.User):
-    """Adiciona um usuário à whitelist (não será verificado por inatividade)"""
-    try:
-        logger.info(f"Comando whitelist_add_user acionado por {interaction.user} para o usuário {user.name}")
-        
-        if user.id not in bot.config['whitelist']['users']:
-            bot.config['whitelist']['users'].append(user.id)
-            await bot.save_config()
-            
-            embed = discord.Embed(
-                title="✅ Usuário Whitelistado",
-                description=f"O usuário {user.mention} foi adicionado à whitelist.",
-                color=discord.Color.green()
-            )
-            await interaction.response.send_message(embed=embed)
-            
-            await bot.log_action(
-                "Usuário Adicionado à Whitelist",
-                interaction.user,
-                f"Usuário: {user.name} (ID: {user.id})"
-            )
-            logger.info(f"Usuário {user.name} adicionado à whitelist")
-        else:
-            embed = discord.Embed(
-                title="ℹ️ Informação",
-                description="Este usuário já está na whitelist.",
-                color=discord.Color.blue()
-            )
-            await interaction.response.send_message(embed=embed)
-    except Exception as e:
-        logger.error(f"Erro ao adicionar usuário à whitelist: {e}")
-        embed = discord.Embed(
-            title="❌ Erro",
-            description="Ocorreu um erro ao adicionar o usuário. Por favor, tente novamente.",
-            color=discord.Color.red()
-        )
-        await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="whitelist_add_role", description="Adiciona um cargo à whitelist")
-@allowed_roles_only()
-@commands.has_permissions(administrator=True)
-async def whitelist_add_role(interaction: discord.Interaction, role: discord.Role):
-    """Adiciona um cargo à whitelist (membros com este cargo não serão verificados)"""
-    try:
-        logger.info(f"Comando whitelist_add_role acionado por {interaction.user} para o cargo {role.name}")
-        
-        if role.id not in bot.config['whitelist']['roles']:
-            bot.config['whitelist']['roles'].append(role.id)
-            await bot.save_config()
-            
-            embed = discord.Embed(
-                title="✅ Cargo Whitelistado",
-                description=f"O cargo {role.mention} foi adicionado à whitelist.",
-                color=discord.Color.green()
-            )
-            await interaction.response.send_message(embed=embed)
-            
-            await bot.log_action(
-                "Cargo Adicionado à Whitelist",
-                interaction.user,
-                f"Cargo: {role.name} (ID: {role.id})"
-            )
-            logger.info(f"Cargo {role.name} adicionado à whitelist")
-        else:
-            embed = discord.Embed(
-                title="ℹ️ Informação",
-                description="Este cargo já está na whitelist.",
-                color=discord.Color.blue()
-            )
-            await interaction.response.send_message(embed=embed)
-    except Exception as e:
-        logger.error(f"Erro ao adicionar cargo à whitelist: {e}")
-        embed = discord.Embed(
-            title="❌ Erro",
-            description="Ocorreu um erro ao adicionar o cargo. Por favor, tente novamente.",
-            color=discord.Color.red()
-        )
-        await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="whitelist_remove_user", description="Remove um usuário da whitelist")
-@allowed_roles_only()
-@commands.has_permissions(administrator=True)
-async def whitelist_remove_user(interaction: discord.Interaction, user: discord.User):
-    """Remove um usuário da whitelist (voltará a ser verificado por inatividade)"""
-    try:
-        logger.info(f"Comando whitelist_remove_user acionado por {interaction.user} para o usuário {user.name}")
-        
-        if user.id in bot.config['whitelist']['users']:
-            bot.config['whitelist']['users'].remove(user.id)
-            await bot.save_config()
-            
-            embed = discord.Embed(
-                title="✅ Usuário Removido da Whitelist",
-                description=f"O usuário {user.mention} foi removido da whitelist.",
-                color=discord.Color.green()
-            )
-            await interaction.response.send_message(embed=embed)
-            
-            await bot.log_action(
-                "Usuário Removido da Whitelist",
-                interaction.user,
-                f"Usuário: {user.name} (ID: {user.id})"
-            )
-            logger.info(f"Usuário {user.name} removido da whitelist")
-        else:
-            embed = discord.Embed(
-                title="ℹ️ Informação",
-                description="Este usuário não estava na whitelist.",
-                color=discord.Color.blue()
-            )
-            await interaction.response.send_message(embed=embed)
-    except Exception as e:
-        logger.error(f"Erro ao remover usuário da whitelist: {e}")
-        embed = discord.Embed(
-            title="❌ Erro",
-            description="Ocorreu um erro ao remover o usuário. Por favor, tente novamente.",
-            color=discord.Color.red()
-        )
-        await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="whitelist_remove_role", description="Remove um cargo da whitelist")
-@allowed_roles_only()
-@commands.has_permissions(administrator=True)
-async def whitelist_remove_role(interaction: discord.Interaction, role: discord.Role):
-    """Remove um cargo da whitelist (membros com este cargo voltarão a ser verificados)"""
-    try:
-        logger.info(f"Comando whitelist_remove_role acionado por {interaction.user} para o cargo {role.name}")
-        
-        if role.id in bot.config['whitelist']['roles']:
-            bot.config['whitelist']['roles'].remove(role.id)
-            await bot.save_config()
-            
-            embed = discord.Embed(
-                title="✅ Cargo Removido da Whitelist",
-                description=f"O cargo {role.mention} foi removido da whitelist.",
-                color=discord.Color.green()
-            )
-            await interaction.response.send_message(embed=embed)
-            
-            await bot.log_action(
-                "Cargo Removido da Whitelist",
-                interaction.user,
-                f"Cargo: {role.name} (ID: {role.id})"
-            )
-            logger.info(f"Cargo {role.name} removido da whitelist")
-        else:
-            embed = discord.Embed(
-                title="ℹ️ Informação",
-                description="Este cargo não estava na whitelist.",
-                color=discord.Color.blue()
-            )
-            await interaction.response.send_message(embed=embed)
-    except Exception as e:
-        logger.error(f"Erro ao remover cargo da whitelist: {e}")
-        embed = discord.Embed(
-            title="❌ Erro",
-            description="Ocorreu um erro ao remover o cargo. Por favor, tente novamente.",
             color=discord.Color.red()
         )
         await interaction.response.send_message(embed=embed)

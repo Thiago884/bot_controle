@@ -82,14 +82,38 @@ DEFAULT_CONFIG = {
     }
 }
 
+class PriorityQueue:
+    def __init__(self):
+        self.queues = {
+            'high': asyncio.Queue(maxsize=100),
+            'normal': asyncio.Queue(maxsize=500),
+            'low': asyncio.Queue(maxsize=200)
+        }
+    
+    async def put(self, item, priority='normal'):
+        await self.queues[priority].put(item)
+    
+    async def get(self):
+        # Processa em ordem de prioridade
+        for priority in ['high', 'normal', 'low']:
+            if not self.queues[priority].empty():
+                return await self.queues[priority].get(), priority
+        return None, None
+    
+    def task_done(self, priority):
+        self.queues[priority].task_done()
+    
+    def qsize(self):
+        return {priority: q.qsize() for priority, q in self.queues.items()}
+
 class InactivityBot(commands.Bot):
     def __init__(self, *args, **kwargs):
         kwargs.update({
-            'max_messages': 100,  # Reduzir de 1000 para 100
+            'max_messages': 100,
             'chunk_guilds_at_startup': False,
             'member_cache_flags': discord.MemberCacheFlags.none(),
             'enable_debug_events': False,
-            'heartbeat_timeout': 120.0,  # Aumentar de 60 para 120
+            'heartbeat_timeout': 120.0,
             'guild_ready_timeout': 30.0,
             'connect_timeout': 60.0,
             'reconnect': True,
@@ -102,15 +126,12 @@ class InactivityBot(commands.Bot):
         self.config = {}
         self.timezone = pytz.timezone('America/Sao_Paulo')
         self.db = None
-        self.active_sessions = {}  # { (user_id, guild_id): {'start_time': datetime, 'last_audio_time': datetime, 'audio_disabled': bool, 'audio_off_time': datetime, 'total_audio_off_time': int} }
+        self.active_sessions = {}
         self.voice_event_queue = asyncio.Queue(maxsize=1000)
-        self.command_queue = asyncio.Queue(maxsize=500)
-        self.high_priority_queue = asyncio.Queue(maxsize=100)
-        self.normal_priority_queue = asyncio.Queue(maxsize=500)
-        self.low_priority_queue = asyncio.Queue(maxsize=200)
+        self.message_queue = PriorityQueue()
         self.voice_event_processor_task = None
-        self.command_processor_task = None
         self.queue_processor_task = None
+        self.command_processor_task = None
         self.rate_limited = False
         self.last_rate_limit = None
         self.rate_limit_delay = 1.0
@@ -129,6 +150,7 @@ class InactivityBot(commands.Bot):
         self._batch_processing_size = 10
         self._api_request_delay = 1.0
         self.audio_check_task = None
+        self.health_check_task = None
 
     async def setup_hook(self):
         """Configuração assíncrona que é executada após o login mas antes de conectar ao websocket"""
@@ -151,7 +173,7 @@ class InactivityBot(commands.Bot):
             setup_tasks()
             
             self.voice_event_processor_task = asyncio.create_task(self.process_voice_events())
-            self.command_processor_task = asyncio.create_task(self.process_commands_queue())
+            self.command_processor_task = asyncio.create_task(self.process_commands())
             self.queue_processor_task = asyncio.create_task(self.process_queues())
             self.pool_monitor_task = asyncio.create_task(self.monitor_db_pool())
             self.health_check_task = asyncio.create_task(self.periodic_health_check())
@@ -185,11 +207,8 @@ class InactivityBot(commands.Bot):
                                     embed.add_field(name="Tempo em voz", value=f"{int(time_in_voice//60)} minutos {int(time_in_voice%60)} segundos", inline=False)
                                     embed.set_footer(text=f"ID: {member.id}")
                                     
-                                    await self.high_priority_queue.put((
-                                        self.get_channel(self.config['log_channel']),
-                                        None,
-                                        embed,
-                                        None,
+                                    await self.message_queue.put((
+                                        (self.get_channel(self.config['log_channel']), None, embed, None),
                                         "high"
                                     ))
                                 
@@ -219,15 +238,12 @@ class InactivityBot(commands.Bot):
                                                       inline=True)
                                         embed.set_footer(text=f"ID: {member.id}")
                                         
-                                        await self.high_priority_queue.put((
-                                            self.get_channel(self.config['log_channel']),
-                                            None,
-                                            embed,
-                                            None,
+                                        await self.message_queue.put((
+                                            (self.get_channel(self.config['log_channel']), None, embed, None),
                                             "high"
                                         ))
                 
-                await asyncio.sleep(30)  # Verificar a cada 30 segundos
+                await asyncio.sleep(30)
             except Exception as e:
                 logger.error(f"Erro ao verificar estados de áudio: {e}")
                 await asyncio.sleep(60)
@@ -289,18 +305,13 @@ class InactivityBot(commands.Bot):
         """Verificação periódica de saúde do bot"""
         while True:
             try:
-                queue_status = {
-                    'voice_events': self.voice_event_queue.qsize(),
-                    'commands': self.command_queue.qsize(),
-                    'high_priority': self.high_priority_queue.qsize(),
-                    'normal_priority': self.normal_priority_queue.qsize(),
-                    'low_priority': self.low_priority_queue.qsize()
-                }
+                queue_status = self.message_queue.qsize()
+                queue_status['voice_events'] = self.voice_event_queue.qsize()
                 
                 if queue_status['voice_events'] > 500:
                     logger.warning(f"Fila de eventos de voz grande: {queue_status['voice_events']}")
-                if queue_status['commands'] > 200:
-                    logger.warning(f"Fila de comandos grande: {queue_status['commands']}")
+                if queue_status['normal'] > 200:
+                    logger.warning(f"Fila de comandos grande: {queue_status['normal']}")
                 
                 if hasattr(self, 'db') and self.db:
                     try:
@@ -402,44 +413,99 @@ class InactivityBot(commands.Bot):
             raise
 
     async def process_queues(self):
-        """Processa as filas de mensagens com diferentes prioridades"""
+        """Processa todas as filas de mensagens com prioridades"""
         while True:
             try:
-                # Processar alta prioridade primeiro
-                if not self.high_priority_queue.empty():
-                    item = await self.high_priority_queue.get()
+                # Processar eventos de voz primeiro
+                if not self.voice_event_queue.empty():
+                    batch = []
+                    for _ in range(min(self._batch_processing_size, self.voice_event_queue.qsize())):
+                        batch.append(await self.voice_event_queue.get())
+                    
+                    await self._process_voice_batch(batch)
+                    
+                    for _ in batch:
+                        self.voice_event_queue.task_done()
+                
+                # Processar mensagens da fila prioritária
+                item, priority = await self.message_queue.get()
+                if item is not None:
                     await self._process_queue_item(item)
-                    self.high_priority_queue.task_done()
-                    continue
-                
-                # Depois normal priority
-                if not self.normal_priority_queue.empty():
-                    item = await self.normal_priority_queue.get()
-                    await self._process_queue_item(item)
-                    self.normal_priority_queue.task_done()
-                    continue
-                
-                # Por último low priority
-                if not self.low_priority_queue.empty():
-                    item = await self.low_priority_queue.get()
-                    await self._process_queue_item(item)
-                    self.low_priority_queue.task_done()
-                    continue
-                
-                # Se todas as filas estiverem vazias, esperar um pouco
-                await asyncio.sleep(0.1)
-                
+                    self.message_queue.task_done(priority)
+                else:
+                    await asyncio.sleep(0.1)
+                    
             except Exception as e:
                 logger.error(f"Erro no processador de filas: {e}")
                 await asyncio.sleep(1)
 
     async def _process_queue_item(self, item):
         """Processa um item da fila"""
-        channel, content, embed, file, priority = item
+        channel, content, embed, file = item
         try:
             await self.safe_send(channel, content, embed, file)
         except Exception as e:
             logger.error(f"Erro ao processar item da fila: {e}")
+
+    async def process_commands(self):
+        """Processa comandos da fila de mensagens"""
+        while True:
+            try:
+                item, priority = await self.message_queue.get()
+                if item is None:
+                    await asyncio.sleep(0.1)
+                    continue
+                    
+                interaction, command, args, kwargs = item
+                
+                if self.rate_limited:
+                    now = datetime.now()
+                    if self.last_rate_limit and (now - self.last_rate_limit).seconds < 60:
+                        try:
+                            await interaction.followup.send(
+                                "⚠️ O bot está sendo limitado pelo Discord. Por favor, tente novamente mais tarde.")
+                        except Exception as e:
+                            logger.error(f"Erro ao enviar mensagem de rate limit: {e}")
+                        self.message_queue.task_done(priority)
+                        continue
+                    else:
+                        self.rate_limited = False
+                
+                await asyncio.sleep(self.rate_limit_delay)
+                
+                try:
+                    await command(interaction, *args, **kwargs)
+                    self.rate_limit_delay = max(self.rate_limit_delay * 0.9, 0.5)
+                    
+                except discord.errors.HTTPException as e:
+                    if e.status == 429:
+                        self.rate_limited = True
+                        self.last_rate_limit = datetime.now()
+                        retry_after = float(e.response.headers.get('Retry-After', 60))
+                        logger.error(f"Rate limit atingido. Tentar novamente após {retry_after} segundos")
+                        
+                        self.rate_limit_delay = min(self.rate_limit_delay * 2, self.max_rate_limit_delay)
+                        
+                        await asyncio.sleep(retry_after)
+                        self.rate_limited = False
+                        
+                        await asyncio.sleep(self.rate_limit_delay)
+                        await self.message_queue.put(item, priority)
+                    else:
+                        raise
+                except Exception as e:
+                    logger.error(f"Erro ao executar comando: {e}")
+                    try:
+                        await interaction.followup.send(
+                            "❌ Ocorreu um erro ao processar o comando.")
+                    except Exception as e:
+                        logger.error(f"Erro ao enviar mensagem de erro: {e}")
+                
+                self.message_queue.task_done(priority)
+                
+            except Exception as e:
+                logger.error(f"Erro no processador de comandos: {e}")
+                await asyncio.sleep(1)
 
     async def log_action(self, action: str, member: Optional[discord.Member] = None, details: str = None, file: discord.File = None, embed: discord.Embed = None):
         """Registra uma ação no canal de logs com tratamento de rate limit"""
@@ -451,11 +517,8 @@ class InactivityBot(commands.Bot):
                 
             # Se um embed foi fornecido, usá-lo diretamente
             if embed is not None:
-                await self.high_priority_queue.put((
-                    channel,
-                    None,
-                    embed,
-                    None,
+                await self.message_queue.put((
+                    (channel, None, embed, None),
                     "high"
                 ))
                 return
@@ -496,11 +559,8 @@ class InactivityBot(commands.Bot):
                     embed.add_field(name="Detalhes", value=details, inline=False)
             
             # Adicionar à fila de alta prioridade
-            await self.high_priority_queue.put((
-                channel,
-                None,
-                embed,
-                None,
+            await self.message_queue.put((
+                (channel, None, embed, None),
                 "high"
             ))
             
@@ -536,7 +596,10 @@ class InactivityBot(commands.Bot):
                     timestamp=datetime.now(self.timezone))
                 priority = "normal"
             
-            await self.high_priority_queue.put((channel, None, embed, None, priority))
+            await self.message_queue.put((
+                (channel, None, embed, None),
+                priority
+            ))
             
         except Exception as e:
             logger.error(f"Erro ao enviar notificação: {e}")
@@ -552,7 +615,10 @@ class InactivityBot(commands.Bot):
                 timestamp=datetime.now(self.timezone))
             
             # Adicionar à fila de baixa prioridade para evitar rate limits
-            await self.low_priority_queue.put((member, None, embed, None, "low"))
+            await self.message_queue.put((
+                (member, None, embed, None),
+                "low"
+            ))
         except Exception as e:
             logger.error(f"Erro ao enviar DM para {member}: {e}")
 
@@ -673,11 +739,8 @@ class InactivityBot(commands.Bot):
                                           inline=False)
                             embed.set_footer(text=f"ID: {member.id}")
                             
-                            await self.high_priority_queue.put((
-                                self.get_channel(self.config['log_channel']),
-                                None,
-                                embed,
-                                None,
+                            await self.message_queue.put((
+                                (self.get_channel(self.config['log_channel']), None, embed, None),
                                 "high"
                             ))
                         
@@ -707,11 +770,8 @@ class InactivityBot(commands.Bot):
                                               inline=True)
                                 embed.set_footer(text=f"ID: {member.id}")
                                 
-                                await self.high_priority_queue.put((
-                                    self.get_channel(self.config['log_channel']),
-                                    None,
-                                    embed,
-                                    None,
+                                await self.message_queue.put((
+                                    (self.get_channel(self.config['log_channel']), None, embed, None),
                                     "high"
                                 ))
             
@@ -742,11 +802,8 @@ class InactivityBot(commands.Bot):
                                   inline=True)
                     embed.set_footer(text=f"ID: {member.id}")
                     
-                    await self.high_priority_queue.put((
-                        self.get_channel(self.config['log_channel']),
-                        None,
-                        embed,
-                        None,
+                    await self.message_queue.put((
+                        (self.get_channel(self.config['log_channel']), None, embed, None),
                         "high"
                     ))
                 except Exception as e:
@@ -788,11 +845,8 @@ class InactivityBot(commands.Bot):
                                   inline=True)
                     embed.set_footer(text=f"ID: {member.id}")
                     
-                    await self.high_priority_queue.put((
-                        self.get_channel(self.config['log_channel']),
-                        None,
-                        embed,
-                        None,
+                    await self.message_queue.put((
+                        (self.get_channel(self.config['log_channel']), None, embed, None),
                         "high"
                     ))
                     
@@ -830,11 +884,8 @@ class InactivityBot(commands.Bot):
                                       inline=True)
                         embed.set_footer(text=f"ID: {member.id}")
                         
-                        await self.high_priority_queue.put((
-                            self.get_channel(self.config['log_channel']),
-                            None,
-                            embed,
-                            None,
+                        await self.message_queue.put((
+                            (self.get_channel(self.config['log_channel']), None, embed, None),
                             "high"
                         ))
                         
@@ -863,71 +914,12 @@ class InactivityBot(commands.Bot):
                                       inline=True)
                         embed.set_footer(text=f"ID: {member.id}")
                         
-                        await self.high_priority_queue.put((
-                            self.get_channel(self.config['log_channel']),
-                            None,
-                            embed,
-                            None,
+                        await self.message_queue.put((
+                            (self.get_channel(self.config['log_channel']), None, embed, None),
                             "high"
                         ))
                     except Exception as e:
                         logger.error(f"Erro ao registrar retorno de ausência: {e}")
-
-    async def process_commands_queue(self):
-        """Processa fila de comandos com rate limiting inteligente"""
-        while True:
-            try:
-                interaction, command, args, kwargs = await self.command_queue.get()
-                
-                if self.rate_limited:
-                    now = datetime.now()
-                    if self.last_rate_limit and (now - self.last_rate_limit).seconds < 60:
-                        try:
-                            await interaction.followup.send(
-                                "⚠️ O bot está sendo limitado pelo Discord. Por favor, tente novamente mais tarde.")
-                        except Exception as e:
-                            logger.error(f"Erro ao enviar mensagem de rate limit: {e}")
-                        self.command_queue.task_done()
-                        continue
-                    else:
-                        self.rate_limited = False
-                
-                await asyncio.sleep(self.rate_limit_delay)
-                
-                try:
-                    await command(interaction, *args, **kwargs)
-                    
-                    self.rate_limit_delay = max(self.rate_limit_delay * 0.9, 0.5)
-                    
-                except discord.errors.HTTPException as e:
-                    if e.status == 429:
-                        self.rate_limited = True
-                        self.last_rate_limit = datetime.now()
-                        retry_after = float(e.response.headers.get('Retry-After', 60))
-                        logger.error(f"Rate limit atingido. Tentar novamente após {retry_after} segundos")
-                        
-                        self.rate_limit_delay = min(self.rate_limit_delay * 2, self.max_rate_limit_delay)
-                        
-                        await asyncio.sleep(retry_after)
-                        self.rate_limited = False
-                        
-                        await asyncio.sleep(self.rate_limit_delay)
-                        await self.command_queue.put((interaction, command, args, kwargs))
-                    else:
-                        raise
-                except Exception as e:
-                    logger.error(f"Erro ao executar comando: {e}")
-                    try:
-                        await interaction.followup.send(
-                            "❌ Ocorreu um erro ao processar o comando.")
-                    except Exception as e:
-                        logger.error(f"Erro ao enviar mensagem de erro: {e}")
-                
-                self.command_queue.task_done()
-                
-            except Exception as e:
-                logger.error(f"Erro no processador de comandos: {e}")
-                await asyncio.sleep(1)
 
 # Decorador para verificar cargos permitidos
 def allowed_roles_only():
