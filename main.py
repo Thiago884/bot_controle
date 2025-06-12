@@ -1126,6 +1126,28 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
 # Importar comandos
 from bot_commands import *
 
+# Helper function for login with retry
+async def login_with_retry(bot_instance, token, max_retries=5, initial_delay=2):
+    """Tenta fazer login com retry automático e backoff exponencial"""
+    for attempt in range(max_retries):
+        try:
+            await bot_instance.login(token)
+            return True
+        except discord.errors.HTTPException as e:
+            if e.status == 429:  # Rate limited
+                retry_after = e.retry_after if hasattr(e, 'retry_after') else initial_delay * (2 ** attempt)
+                logger.warning(f"Rate limit atingido na tentativa {attempt + 1}. Tentando novamente em {retry_after} segundos...")
+                await asyncio.sleep(retry_after)
+            else:
+                raise
+        except Exception as e:
+            logger.error(f"Erro na tentativa {attempt + 1}: {e}")
+            if attempt == max_retries - 1:
+                raise
+            wait_time = initial_delay * (2 ** attempt)
+            await asyncio.sleep(wait_time)
+    return False
+
 # Iniciar o bot
 if __name__ == "__main__":
     load_dotenv()
@@ -1142,16 +1164,45 @@ if __name__ == "__main__":
         from web_panel import keep_alive
         keep_alive()
     
-    try:
-        bot.run(os.getenv('DISCORD_TOKEN'))
-    except Exception as e:
-        logger.critical(f"Erro ao iniciar o bot: {e}")
-        raise
-    finally:
-        if hasattr(bot, 'db') and bot.db:
+    max_retries = 5
+    initial_delay = 2
+    for attempt in range(max_retries):
+        try:
+            # Modified startup with retry logic
+            token = os.getenv('DISCORD_TOKEN')
+            
+            # First try to login with retry
             try:
-                loop = asyncio.get_event_loop()
-                if not loop.is_closed():
-                     bot.db.close()
+                 login_with_retry(bot, token)
             except Exception as e:
-                logger.error(f"Erro ao fechar pool de conexões: {e}")
+                logger.critical(f"Falha no login após {max_retries} tentativas: {e}")
+                raise
+            
+            # Then connect to websocket
+            bot.connect()
+            
+            # Run until closed
+            while not bot.is_closed():
+                 asyncio.sleep(1)
+                
+            break
+                
+        except discord.errors.HTTPException as e:
+            if e.status == 429:  # Rate limited
+                retry_after = e.retry_after if hasattr(e, 'retry_after') else initial_delay * (2 ** attempt)
+                logger.warning(f"Rate limit atingido na tentativa {attempt + 1}. Tentando novamente em {retry_after} segundos...")
+                if attempt == max_retries - 1:
+                    logger.critical("Máximo de tentativas de login atingido. Encerrando.")
+                    raise
+                time.sleep(retry_after)
+            else:
+                logger.critical(f"Erro ao iniciar o bot: {e}")
+                raise
+        except Exception as e:
+            logger.critical(f"Erro ao iniciar o bot: {e}")
+            if attempt == max_retries - 1:
+                raise
+            wait_time = initial_delay * (2 ** attempt)
+            time.sleep(wait_time)
+    else:
+        logger.critical("Máximo de tentativas de inicialização atingido. Encerrando.")
