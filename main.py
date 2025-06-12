@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 from discord.ext import tasks
 import aiomysql
+import random
 
 # Configuração do logger
 def setup_logger():
@@ -83,6 +84,20 @@ DEFAULT_CONFIG = {
 
 class InactivityBot(commands.Bot):
     def __init__(self, *args, **kwargs):
+        kwargs.update({
+            'max_messages': 100,  # Reduzir de 1000 para 100
+            'chunk_guilds_at_startup': False,
+            'member_cache_flags': discord.MemberCacheFlags.none(),
+            'enable_debug_events': False,
+            'heartbeat_timeout': 120.0,  # Aumentar de 60 para 120
+            'guild_ready_timeout': 30.0,
+            'connect_timeout': 60.0,
+            'reconnect': True,
+            'shard_count': 1,
+            'shard_ids': None,
+            'activity': None,
+            'status': discord.Status.online
+        })
         super().__init__(*args, **kwargs)
         self.config = {}
         self.timezone = pytz.timezone('America/Sao_Paulo')
@@ -940,12 +955,7 @@ intents.message_content = True
 
 bot = InactivityBot(
     command_prefix='!', 
-    intents=intents,
-    max_messages=1000,
-    chunk_guilds_at_startup=False,
-    member_cache_flags=discord.MemberCacheFlags.none(),
-    enable_debug_events=False,
-    heartbeat_timeout=60.0
+    intents=intents
 )
 
 @bot.event
@@ -984,6 +994,11 @@ from bot_commands import *
 
 # Iniciar o bot
 if __name__ == "__main__":
+    # Adicionar delay aleatório entre 1-10 segundos para evitar rate limit
+    delay = random.uniform(1, 10)
+    logger.info(f"Aguardando {delay:.2f} segundos antes de iniciar para evitar rate limit...")
+    time.sleep(delay)
+    
     load_dotenv()
     
     required_env_vars = ['DISCORD_TOKEN', 'DB_HOST', 'DB_NAME', 'DB_USER', 'DB_PASS']
@@ -998,10 +1013,33 @@ if __name__ == "__main__":
         from web_panel import keep_alive
         keep_alive()
     
+    max_retries = 5
+    initial_delay = 2
+    
+    async def run_bot():
+        for attempt in range(max_retries):
+            try:
+                await bot.start(os.getenv('DISCORD_TOKEN'))
+                break
+            except discord.errors.HTTPException as e:
+                if e.status == 429:
+                    retry_after = float(e.response.headers.get('Retry-After', 60))
+                    logger.error(f"Rate limit atingido (tentativa {attempt + 1}/{max_retries}). Tentando novamente em {retry_after} segundos...")
+                    await asyncio.sleep(retry_after)
+                else:
+                    raise
+            except Exception as e:
+                logger.error(f"Erro ao iniciar o bot (tentativa {attempt + 1}/{max_retries}): {e}")
+                if attempt == max_retries - 1:
+                    raise
+                sleep_time = initial_delay * (2 ** attempt)
+                logger.info(f"Tentando novamente em {sleep_time} segundos...")
+                await asyncio.sleep(sleep_time)
+    
     try:
-        bot.run(os.getenv('DISCORD_TOKEN'))
+        asyncio.run(run_bot())
     except Exception as e:
-        logger.critical(f"Erro ao iniciar o bot: {e}")
+        logger.critical(f"Erro ao iniciar o bot após {max_retries} tentativas: {e}")
         raise
     finally:
         if hasattr(bot, 'db') and bot.db:
