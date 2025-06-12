@@ -14,6 +14,9 @@ from typing import Optional
 from discord.ext import tasks
 import aiomysql
 
+# Import setup_tasks here to avoid circular dependency
+from tasks import setup_tasks
+
 # Configuração básica do logger
 logger = logging.getLogger('inactivity_bot')
 logger.setLevel(logging.INFO)
@@ -310,10 +313,6 @@ class InactivityBot(commands.Bot):
 # Criar instância do bot antes de definir os eventos
 bot = InactivityBot()
 
-# Importar e configurar as tarefas agendadas
-from tasks import setup_tasks
-setup_tasks()
-
 # Eventos do bot
 @bot.event
 async def on_ready():
@@ -334,6 +333,8 @@ async def on_voice_state_update(member, before, after):
 async def main():
     load_dotenv()
     try:
+        # Pass the bot instance to setup_tasks
+        setup_tasks(bot)
         await bot.start(os.getenv('DISCORD_TOKEN'))
     except Exception as e:
         logger.error(f"Erro ao iniciar bot: {e}")
