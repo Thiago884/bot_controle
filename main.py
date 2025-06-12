@@ -214,6 +214,9 @@ class InactivityBot(commands.Bot):
         if channel:
             await self.queues['high'].put((channel, None, discord.Embed(description=message), None))
 
+# Criar instância do bot antes de definir os eventos
+bot = InactivityBot()
+
 # Eventos do bot
 @bot.event
 async def on_ready():
@@ -230,7 +233,6 @@ async def on_voice_state_update(member, before, after):
 # Inicialização do bot
 async def main():
     load_dotenv()
-    bot = InactivityBot()
     try:
         await bot.start(os.getenv('DISCORD_TOKEN'))
     except Exception as e:
