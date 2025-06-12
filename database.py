@@ -397,109 +397,12 @@ class Database:
                         INDEX idx_last_updated (last_updated)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci''')
                     
-                    # Tabela de agregação diária (nova)
-                    await cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS daily_voice_activity (
-                        user_id BIGINT,
-                        guild_id BIGINT,
-                        activity_date DATE,
-                        total_duration INT,
-                        session_count INT,
-                        PRIMARY KEY (user_id, guild_id, activity_date),
-                        INDEX idx_user_guild_date (user_id, guild_id, activity_date),
-                        INDEX idx_guild_date (guild_id, activity_date),
-                        INDEX idx_date (activity_date)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci''')
-                    
-                    # Verificar e adicionar índices apenas se não existirem
-                    await cursor.execute('''
-                    SELECT 1 FROM information_schema.statistics 
-                    WHERE table_name = 'voice_sessions' AND index_name = 'idx_user_guild_join' 
-                    LIMIT 1
-                    ''')
-                    index_exists = await cursor.fetchone()
-
-                    if not index_exists:
-                        await cursor.execute('''
-                        ALTER TABLE voice_sessions 
-                        ADD INDEX idx_user_guild_join (user_id, guild_id, join_time)
-                        ''')
-                        await conn.commit()
-                        logger.info("Índice idx_user_guild_join criado com sucesso")
-                    else:
-                        logger.info("Índice idx_user_guild_join já existe - pulando criação")
-
-                    await cursor.execute('''
-                    SELECT 1 FROM information_schema.statistics 
-                    WHERE table_name = 'user_activity' AND index_name = 'idx_last_activity' 
-                    LIMIT 1
-                    ''')
-                    index_exists = await cursor.fetchone()
-
-                    if not index_exists:
-                        await cursor.execute('''
-                        ALTER TABLE user_activity
-                        ADD INDEX idx_last_activity (guild_id, last_voice_leave)
-                        ''')
-                        await conn.commit()
-                        logger.info("Índice idx_last_activity criado com sucesso")
-                    else:
-                        logger.info("Índice idx_last_activity já existe - pulando criação")
-                    
-                    # Verificar se a procedure existe antes de criar
-                    await cursor.execute('''
-                        SELECT 1 FROM information_schema.routines 
-                        WHERE routine_name = 'aggregate_daily_voice' 
-                        AND routine_schema = DATABASE()
-                        LIMIT 1
-                    ''')
-                    procedure_exists = await cursor.fetchone()
-
-                    if not procedure_exists:
-                        await cursor.execute('''
-                            DROP PROCEDURE IF EXISTS aggregate_daily_voice
-                        ''')
-                        await cursor.execute('''
-                            CREATE PROCEDURE aggregate_daily_voice()
-                            BEGIN
-                                INSERT INTO daily_voice_activity
-                                (user_id, guild_id, activity_date, total_duration, session_count)
-                                SELECT 
-                                    user_id, 
-                                    guild_id, 
-                                    DATE(join_time) as activity_date,
-                                    SUM(duration) as total_duration,
-                                    COUNT(*) as session_count
-                                FROM voice_sessions
-                                WHERE DATE(join_time) < CURDATE()
-                                AND (user_id, guild_id, DATE(join_time)) NOT IN (
-                                    SELECT user_id, guild_id, activity_date 
-                                    FROM daily_voice_activity
-                                )
-                                GROUP BY user_id, guild_id, DATE(join_time)
-                                ON DUPLICATE KEY UPDATE
-                                    total_duration = VALUES(total_duration),
-                                    session_count = VALUES(session_count);
-                            END
-                        ''')
-                        await conn.commit()
-                        logger.info("Stored procedure aggregate_daily_voice criada com sucesso")
-                    else:
-                        logger.info("Stored procedure aggregate_daily_voice já existe - pulando criação")
-                    
-                    await conn.commit()
-                    
                     # Reativar warnings
                     await cursor.execute("SET sql_notes = 1;")
                     await conn.commit()
                     logger.info("Tabelas criadas/verificadas com sucesso")
             except Exception as e:
                 logger.error(f"Erro ao criar tabelas: {e}")
-                if conn:
-                    try:
-                        await conn.rollback()
-                    except:
-                        pass
                 raise
             finally:
                 if conn:
@@ -674,16 +577,6 @@ class Database:
                     VALUES (%s, %s, %s, %s, %s)
                 ''', (user_id, guild_id, join_time, now, duration))
                 
-                # Atualizar agregação diária
-                await cursor.execute('''
-                    INSERT INTO daily_voice_activity
-                    (user_id, guild_id, activity_date, total_duration, session_count)
-                    VALUES (%s, %s, %s, %s, 1)
-                    ON DUPLICATE KEY UPDATE
-                        total_duration = total_duration + VALUES(total_duration),
-                        session_count = session_count + 1
-                ''', (user_id, guild_id, join_time.date(), duration))
-                
                 await conn.commit()
         except Exception as e:
             logger.error(f"Erro ao registrar saída de voz: {e}")
@@ -720,33 +613,15 @@ class Database:
         cursor = None
         conn = None
         try:
-            # Primeiro tentar usar a tabela de agregação diária para otimização
             cursor, conn = await self.execute_query('''
-                SELECT 
-                    MIN(join_time) as join_time,
-                    MAX(leave_time) as leave_time,
-                    SUM(duration) as duration
+                SELECT join_time, leave_time, duration 
                 FROM voice_sessions
                 WHERE user_id = %s AND guild_id = %s
                 AND join_time >= %s AND leave_time <= %s
-                GROUP BY DATE(join_time)
                 ORDER BY join_time
             ''', (user_id, guild_id, start_date, end_date))
             
             result = await cursor.fetchall()
-            
-            # Se não houver resultados, tentar método tradicional
-            if not result:
-                cursor, conn = await self.execute_query('''
-                    SELECT join_time, leave_time, duration 
-                    FROM voice_sessions
-                    WHERE user_id = %s AND guild_id = %s
-                    AND join_time >= %s AND leave_time <= %s
-                    ORDER BY join_time
-                ''', (user_id, guild_id, start_date, end_date))
-                
-                result = await cursor.fetchall()
-            
             return result
         except Exception as e:
             logger.error(f"Erro ao obter sessões de voz: {e}")
@@ -927,42 +802,20 @@ class Database:
                 await cursor.execute("DELETE FROM kicked_members WHERE kick_date < %s", (cutoff_date,))
                 kicks_deleted = cursor.rowcount
                 
-                # Limpar dados de agregação diária antigos
-                await cursor.execute("DELETE FROM daily_voice_activity WHERE activity_date < %s", (cutoff_date.date(),))
-                daily_deleted = cursor.rowcount
-                
                 await conn.commit()
                 
                 log_message = (
-                    f"Limpeza de dados antigos concluída: " 
+                    f"Limpeza de dados antigos concluída: "
                     f"Sessões de voz: {voice_deleted}, "
                     f"Avisos: {warnings_deleted}, "
                     f"Cargos removidos: {roles_deleted}, "
-                    f"Expulsões: {kicks_deleted}, "
-                    f"Agregações diárias: {daily_deleted}"
+                    f"Expulsões: {kicks_deleted}"
                 )
                 logger.info(log_message)
                 return log_message
         except Exception as e:
             logger.error(f"Erro ao limpar dados antigos: {e}")
             raise
-        finally:
-            if conn:
-                self.pool.release(conn)
-
-    async def run_daily_aggregation(self):
-        """Executa o processo de agregação diária"""
-        conn = None
-        try:
-            conn = await self.pool.acquire()
-            async with conn.cursor() as cursor:
-                await cursor.callproc('aggregate_daily_voice')
-                await conn.commit()
-                logger.info("Agregação diária de dados de voz concluída")
-                return True
-        except Exception as e:
-            logger.error(f"Erro ao executar agregação diária: {e}")
-            return False
         finally:
             if conn:
                 self.pool.release(conn)
