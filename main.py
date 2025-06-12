@@ -434,271 +434,20 @@ class InactivityBot(commands.Bot):
                 # Verificar o tipo de item
                 if isinstance(item, tuple):
                     if len(item) == 4:  # Formato completo (channel, content, embed, file)
-                        await self._process_queue_item(item)
+                        channel, content, embed, file = item
+                        await self.safe_send(channel, content, embed, file)
                     elif len(item) == 2:  # Formato simplificado (channel, embed)
                         channel, embed = item
                         await self.safe_send(channel, embed=embed)
+                    else:
+                        logger.warning(f"Item da fila em formato desconhecido: {item}")
                 else:
-                    logger.warning(f"Item da fila em formato desconhecido: {type(item)}")
+                    logger.warning(f"Item da fila não é uma tupla: {type(item)}")
                     
                 self.message_queue.task_done(priority)
                     
             except Exception as e:
                 logger.error(f"Erro no processador de filas: {e}")
-                await asyncio.sleep(1)
-
-    async def _process_queue_item(self, item):
-        """Processa um item da fila"""
-        channel, content, embed, file = item
-        try:
-            await self.safe_send(channel, content, embed, file)
-        except Exception as e:
-            logger.error(f"Erro ao processar item da fila: {e}")
-
-    async def process_commands(self):
-        """Processa comandos da fila de mensagens"""
-        while True:
-            try:
-                item, priority = await self.message_queue.get()
-                if item is None:
-                    await asyncio.sleep(0.1)
-                    continue
-                    
-                # Verificar se o item tem o formato esperado
-                if len(item) == 2:  # Formato mais simples (channel, embed)
-                    channel, embed = item
-                    await self.safe_send(channel, embed=embed)
-                    self.message_queue.task_done(priority)
-                    continue
-                    
-                # Formato completo de comando
-                interaction, command, args, kwargs = item
-                
-                if self.rate_limited:
-                    now = datetime.now()
-                    if self.last_rate_limit and (now - self.last_rate_limit).seconds < 60:
-                        try:
-                            await interaction.followup.send(
-                                "⚠️ O bot está sendo limitado pelo Discord. Por favor, tente novamente mais tarde.")
-                        except Exception as e:
-                            logger.error(f"Erro ao enviar mensagem de rate limit: {e}")
-                        self.message_queue.task_done(priority)
-                        continue
-                    else:
-                        self.rate_limited = False
-                
-                await asyncio.sleep(self.rate_limit_delay)
-                
-                try:
-                    await command(interaction, *args, **kwargs)
-                    self.rate_limit_delay = max(self.rate_limit_delay * 0.9, 0.5)
-                    
-                except discord.errors.HTTPException as e:
-                    if e.status == 429:
-                        self.rate_limited = True
-                        self.last_rate_limit = datetime.now()
-                        retry_after = float(e.response.headers.get('Retry-After', 60))
-                        logger.error(f"Rate limit atingido. Tentar novamente após {retry_after} segundos")
-                        
-                        self.rate_limit_delay = min(self.rate_limit_delay * 2, self.max_rate_limit_delay)
-                        
-                        await asyncio.sleep(retry_after)
-                        self.rate_limited = False
-                        
-                        await asyncio.sleep(self.rate_limit_delay)
-                        await self.message_queue.put(item, priority)
-                    else:
-                        raise
-                except Exception as e:
-                    logger.error(f"Erro ao executar comando: {e}")
-                    try:
-                        await interaction.followup.send(
-                            "❌ Ocorreu um erro ao processar o comando.")
-                    except Exception as e:
-                        logger.error(f"Erro ao enviar mensagem de erro: {e}")
-                
-                self.message_queue.task_done(priority)
-                
-            except Exception as e:
-                logger.error(f"Erro no processador de comandos: {e}")
-                await asyncio.sleep(1)
-
-    async def log_action(self, action: str, member: Optional[discord.Member] = None, details: str = None, file: discord.File = None, embed: discord.Embed = None):
-        """Registra uma ação no canal de logs com tratamento de rate limit"""
-        try:
-            channel = self.get_channel(self.config.get('log_channel', 1376013013206827161))
-            if not channel:
-                logger.warning("Canal de logs não encontrado")
-                return
-                
-            # Se um embed foi fornecido, usá-lo diretamente
-            if embed is not None:
-                await self.message_queue.put((
-                    (channel, None, embed, None),
-                    "high"
-                ))
-                return
-                
-            # Definir cor baseada no tipo de ação
-            if "Áudio Desativado" in action:
-                color = discord.Color.orange()
-                icon = "🔇"
-            elif "Áudio Reativado" in action:
-                color = discord.Color.green()
-                icon = "🔊"
-            elif "Erro" in action:
-                color = discord.Color.red()
-                icon = "❌"
-            elif "Aviso" in action:
-                color = discord.Color.gold()
-                icon = "⚠️"
-            else:
-                color = discord.Color.blue()
-                icon = "ℹ️"
-                
-            embed = discord.Embed(
-                title=f"{icon} {action}",
-                color=color,
-                timestamp=datetime.now(self.timezone))
-            
-            if member is not None:
-                embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
-                embed.add_field(name="Usuário", value=member.mention, inline=True)
-                embed.add_field(name="ID", value=f"`{member.id}`", inline=True)
-            
-            if details:
-                # Formatar detalhes para melhor legibilidade
-                if '\n' in details:
-                    details = details.replace('\n', '\n• ')
-                    embed.add_field(name="Detalhes", value=f"• {details}", inline=False)
-                else:
-                    embed.add_field(name="Detalhes", value=details, inline=False)
-            
-            # Adicionar à fila de alta prioridade
-            await self.message_queue.put((
-                (channel, None, embed, file),
-                "high"
-            ))
-            
-        except Exception as e:
-            logger.error(f"Erro ao registrar ação no log: {e}")
-
-    async def notify_roles(self, message: str, is_warning: bool = False):
-        """Envia notificação para os cargos com tratamento de rate limit"""
-        try:
-            channel_id = self.config.get('notification_channel') if is_warning else self.config.get('log_channel')
-            if not channel_id:
-                logger.warning("Canal de notificação não configurado")
-                return
-                
-            channel = self.get_channel(channel_id)
-            if not channel:
-                logger.warning(f"Canal de notificação {channel_id} não encontrado")
-                return
-                
-            # Criar embed para notificações
-            if is_warning:
-                embed = discord.Embed(
-                    title="⚠️ Aviso de Inatividade",
-                    description=message,
-                    color=discord.Color.gold(),
-                    timestamp=datetime.now(self.timezone))
-                priority = "high"
-            else:
-                embed = discord.Embed(
-                    title="ℹ️ Notificação",
-                    description=message,
-                    color=discord.Color.blue(),
-                    timestamp=datetime.now(self.timezone))
-                priority = "normal"
-            
-            await self.message_queue.put((
-                (channel, None, embed, None),
-                priority
-            ))
-            
-        except Exception as e:
-            logger.error(f"Erro ao enviar notificação: {e}")
-            await self.log_action("Erro de Notificação", None, f"Falha ao enviar mensagem: {str(e)}")
-
-    async def send_dm(self, member: discord.Member, message: str):
-        """Envia mensagem direta com tratamento de erros e rate limiting"""
-        try:
-            # Criar embed para DMs
-            embed = discord.Embed(
-                description=message,
-                color=discord.Color.blue(),
-                timestamp=datetime.now(self.timezone))
-            
-            # Adicionar à fila de baixa prioridade para evitar rate limits
-            await self.message_queue.put((
-                (member, None, embed, None),
-                "low"
-            ))
-        except Exception as e:
-            logger.error(f"Erro ao enviar DM para {member}: {e}")
-
-    async def send_warning(self, member: discord.Member, warning_type: str):
-        """Envia aviso de inatividade com mensagem configurável"""
-        try:
-            warnings_config = self.config.get('warnings', {})
-            messages = warnings_config.get('messages', {})
-            
-            if warning_type == 'first' and 'first' in messages:
-                message = messages['first'].format(
-                    days=self.config['warnings']['first_warning'],
-                    monitoring_period=self.config['monitoring_period'])
-            elif warning_type == 'second' and 'second' in messages:
-                message = messages['second']
-            elif warning_type == 'final' and 'final' in messages:
-                message = messages['final'].format(
-                    guild=member.guild.name,
-                    monitoring_period=self.config['monitoring_period'])
-            else:
-                return
-            
-            # Criar embed para avisos
-            if warning_type == 'first':
-                title = "⚠️ Primeiro Aviso"
-                color = discord.Color.gold()
-            elif warning_type == 'second':
-                title = "🔴 Último Aviso"
-                color = discord.Color.red()
-            else:
-                title = "❌ Cargos Removidos"
-                color = discord.Color.dark_red()
-            
-            embed = discord.Embed(
-                title=title,
-                description=message,
-                color=color,
-                timestamp=datetime.now(self.timezone))
-            
-            embed.set_author(name=member.guild.name, icon_url=member.guild.icon.url if member.guild.icon else None)
-            
-            await self.send_dm(member, embed.description)
-            await self.db.log_warning(member.id, member.guild.id, warning_type)
-            await self.log_action(f"Aviso Enviado ({warning_type})", member)
-        except Exception as e:
-            logger.error(f"Erro ao enviar aviso para {member}: {e}")
-
-    async def process_voice_events(self):
-        """Processa eventos de voz em lotes para melhor eficiência"""
-        while True:
-            try:
-                batch = []
-                for _ in range(min(self._batch_processing_size, self.voice_event_queue.qsize())):
-                    batch.append(await self.voice_event_queue.get())
-                
-                await self._process_voice_batch(batch)
-                
-                for _ in batch:
-                    self.voice_event_queue.task_done()
-                    
-                await asyncio.sleep(0.5)  # Aumentado de 0.1 para 0.5 segundos
-                
-            except Exception as e:
-                logger.error(f"Erro no processador de eventos de voz: {e}")
                 await asyncio.sleep(1)
 
     async def _process_voice_batch(self, batch):
@@ -936,6 +685,252 @@ class InactivityBot(commands.Bot):
                         ))
                     except Exception as e:
                         logger.error(f"Erro ao registrar retorno de ausência: {e}")
+
+    async def process_voice_events(self):
+        """Processa eventos de voz em lotes para melhor eficiência"""
+        while True:
+            try:
+                batch = []
+                for _ in range(min(self._batch_processing_size, self.voice_event_queue.qsize())):
+                    batch.append(await self.voice_event_queue.get())
+                
+                await self._process_voice_batch(batch)
+                
+                for _ in batch:
+                    self.voice_event_queue.task_done()
+                    
+                await asyncio.sleep(0.5)  # Aumentado de 0.1 para 0.5 segundos
+                
+            except Exception as e:
+                logger.error(f"Erro no processador de eventos de voz: {e}")
+                await asyncio.sleep(1)
+
+    async def process_commands(self):
+        """Processa comandos da fila de mensagens"""
+        while True:
+            try:
+                item, priority = await self.message_queue.get()
+                if item is None:
+                    await asyncio.sleep(0.1)
+                    continue
+                    
+                # Verificar se o item tem o formato esperado
+                if len(item) == 2:  # Formato mais simples (channel, embed)
+                    channel, embed = item
+                    await self.safe_send(channel, embed=embed)
+                    self.message_queue.task_done(priority)
+                    continue
+                    
+                # Formato completo de comando
+                interaction, command, args, kwargs = item
+                
+                if self.rate_limited:
+                    now = datetime.now()
+                    if self.last_rate_limit and (now - self.last_rate_limit).seconds < 60:
+                        try:
+                            await interaction.followup.send(
+                                "⚠️ O bot está sendo limitado pelo Discord. Por favor, tente novamente mais tarde.")
+                        except Exception as e:
+                            logger.error(f"Erro ao enviar mensagem de rate limit: {e}")
+                        self.message_queue.task_done(priority)
+                        continue
+                    else:
+                        self.rate_limited = False
+                
+                await asyncio.sleep(self.rate_limit_delay)
+                
+                try:
+                    await command(interaction, *args, **kwargs)
+                    self.rate_limit_delay = max(self.rate_limit_delay * 0.9, 0.5)
+                    
+                except discord.errors.HTTPException as e:
+                    if e.status == 429:
+                        self.rate_limited = True
+                        self.last_rate_limit = datetime.now()
+                        retry_after = float(e.response.headers.get('Retry-After', 60))
+                        logger.error(f"Rate limit atingido. Tentar novamente após {retry_after} segundos")
+                        
+                        self.rate_limit_delay = min(self.rate_limit_delay * 2, self.max_rate_limit_delay)
+                        
+                        await asyncio.sleep(retry_after)
+                        self.rate_limited = False
+                        
+                        await asyncio.sleep(self.rate_limit_delay)
+                        await self.message_queue.put(item, priority)
+                    else:
+                        raise
+                except Exception as e:
+                    logger.error(f"Erro ao executar comando: {e}")
+                    try:
+                        await interaction.followup.send(
+                            "❌ Ocorreu um erro ao processar o comando.")
+                    except Exception as e:
+                        logger.error(f"Erro ao enviar mensagem de erro: {e}")
+                
+                self.message_queue.task_done(priority)
+                
+            except Exception as e:
+                logger.error(f"Erro no processador de comandos: {e}")
+                await asyncio.sleep(1)
+
+    async def log_action(self, action: str, member: Optional[discord.Member] = None, details: str = None, file: discord.File = None, embed: discord.Embed = None):
+        """Registra uma ação no canal de logs com tratamento de rate limit"""
+        try:
+            channel = self.get_channel(self.config.get('log_channel', 1376013013206827161))
+            if not channel:
+                logger.warning("Canal de logs não encontrado")
+                return
+                
+            # Se um embed foi fornecido, usá-lo diretamente
+            if embed is not None:
+                await self.message_queue.put((
+                    (channel, None, embed, file),  # Usando o formato de 4 elementos
+                    "high"
+                ))
+                return
+                
+            # Definir cor baseada no tipo de ação
+            if "Áudio Desativado" in action:
+                color = discord.Color.orange()
+                icon = "🔇"
+            elif "Áudio Reativado" in action:
+                color = discord.Color.green()
+                icon = "🔊"
+            elif "Erro" in action:
+                color = discord.Color.red()
+                icon = "❌"
+            elif "Aviso" in action:
+                color = discord.Color.gold()
+                icon = "⚠️"
+            else:
+                color = discord.Color.blue()
+                icon = "ℹ️"
+                
+            embed = discord.Embed(
+                title=f"{icon} {action}",
+                color=color,
+                timestamp=datetime.now(self.timezone))
+            
+            if member is not None:
+                embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
+                embed.add_field(name="Usuário", value=member.mention, inline=True)
+                embed.add_field(name="ID", value=f"`{member.id}`", inline=True)
+            
+            if details:
+                # Formatar detalhes para melhor legibilidade
+                if '\n' in details:
+                    details = details.replace('\n', '\n• ')
+                    embed.add_field(name="Detalhes", value=f"• {details}", inline=False)
+                else:
+                    embed.add_field(name="Detalhes", value=details, inline=False)
+            
+            # Adicionar à fila de alta prioridade
+            await self.message_queue.put((
+                (channel, None, embed, file),
+                "high"
+            ))
+            
+        except Exception as e:
+            logger.error(f"Erro ao registrar ação no log: {e}")
+
+    async def notify_roles(self, message: str, is_warning: bool = False):
+        """Envia notificação para os cargos com tratamento de rate limit"""
+        try:
+            channel_id = self.config.get('notification_channel') if is_warning else self.config.get('log_channel')
+            if not channel_id:
+                logger.warning("Canal de notificação não configurado")
+                return
+                
+            channel = self.get_channel(channel_id)
+            if not channel:
+                logger.warning(f"Canal de notificação {channel_id} não encontrado")
+                return
+                
+            # Criar embed para notificações
+            if is_warning:
+                embed = discord.Embed(
+                    title="⚠️ Aviso de Inatividade",
+                    description=message,
+                    color=discord.Color.gold(),
+                    timestamp=datetime.now(self.timezone))
+                priority = "high"
+            else:
+                embed = discord.Embed(
+                    title="ℹ️ Notificação",
+                    description=message,
+                    color=discord.Color.blue(),
+                    timestamp=datetime.now(self.timezone))
+                priority = "normal"
+            
+            await self.message_queue.put((
+                (channel, None, embed, None),  # Usando o formato de 4 elementos
+                priority
+            ))
+            
+        except Exception as e:
+            logger.error(f"Erro ao enviar notificação: {e}")
+            await self.log_action("Erro de Notificação", None, f"Falha ao enviar mensagem: {str(e)}")
+
+    async def send_dm(self, member: discord.Member, message: str):
+        """Envia mensagem direta com tratamento de erros e rate limiting"""
+        try:
+            # Criar embed para DMs
+            embed = discord.Embed(
+                description=message,
+                color=discord.Color.blue(),
+                timestamp=datetime.now(self.timezone))
+            
+            # Adicionar à fila de baixa prioridade para evitar rate limits
+            await self.message_queue.put((
+                (member, None, embed, None),  # Usando o formato de 4 elementos
+                "low"
+            ))
+        except Exception as e:
+            logger.error(f"Erro ao enviar DM para {member}: {e}")
+
+    async def send_warning(self, member: discord.Member, warning_type: str):
+        """Envia aviso de inatividade com mensagem configurável"""
+        try:
+            warnings_config = self.config.get('warnings', {})
+            messages = warnings_config.get('messages', {})
+            
+            if warning_type == 'first' and 'first' in messages:
+                message = messages['first'].format(
+                    days=self.config['warnings']['first_warning'],
+                    monitoring_period=self.config['monitoring_period'])
+            elif warning_type == 'second' and 'second' in messages:
+                message = messages['second']
+            elif warning_type == 'final' and 'final' in messages:
+                message = messages['final'].format(
+                    guild=member.guild.name,
+                    monitoring_period=self.config['monitoring_period'])
+            else:
+                return
+            
+            # Criar embed para avisos
+            if warning_type == 'first':
+                title = "⚠️ Primeiro Aviso"
+                color = discord.Color.gold()
+            elif warning_type == 'second':
+                title = "🔴 Último Aviso"
+                color = discord.Color.red()
+            else:
+                title = "❌ Cargos Removidos"
+                color = discord.Color.dark_red()
+            
+            embed = discord.Embed(
+                title=title,
+                description=message,
+                color=color,
+                timestamp=datetime.now(self.timezone))
+            
+            embed.set_author(name=member.guild.name, icon_url=member.guild.icon.url if member.guild.icon else None)
+            
+            await self.send_dm(member, embed.description)
+            await self.db.log_warning(member.id, member.guild.id, warning_type)
+            await self.log_action(f"Aviso Enviado ({warning_type})", member)
+        except Exception as e:
+            logger.error(f"Erro ao enviar aviso para {member}: {e}")
 
 # Decorador para verificar cargos permitidos
 def allowed_roles_only():
