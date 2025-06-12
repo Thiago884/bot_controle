@@ -76,7 +76,15 @@ class InactivityBot(commands.Bot):
             'low': asyncio.Queue(maxsize=200)
         }
         self.rate_limits = {}
-        self._setup_tasks()
+        # self._setup_tasks() # Remova esta linha
+        
+    async def setup_hook(self):
+        """Configuração inicial do bot"""
+        self.load_config()
+        await self._initialize_db()
+        await self.tree.sync()
+        self._setup_tasks() # Chame _setup_tasks aqui
+        logger.info("Bot inicializado com sucesso")
 
     def _setup_tasks(self):
         """Configura as tarefas em segundo plano"""
@@ -86,13 +94,6 @@ class InactivityBot(commands.Bot):
             'queue_processor': asyncio.create_task(self._process_queues()),
             'audio_checker': asyncio.create_task(self._check_audio_states())
         }
-
-    async def setup_hook(self):
-        """Configuração inicial do bot"""
-        self.load_config()
-        await self._initialize_db()
-        await self.tree.sync()
-        logger.info("Bot inicializado com sucesso")
 
     # Métodos principais simplificados
     async def _initialize_db(self):
@@ -208,14 +209,110 @@ class InactivityBot(commands.Bot):
                 state = "mudo" if current_state else "com áudio"
                 await self._log_action(f"{member} alterou estado para {state}")
 
-    async def _log_action(self, message):
+    async def _log_action(self, message, member=None, embed=None, file=None):
         """Registra uma ação no log"""
         channel = self.get_channel(self.config['log_channel'])
         if channel:
-            await self.queues['high'].put((channel, None, discord.Embed(description=message), None))
+            await self.queues['high'].put((channel, message, embed, file))
+
+    async def send_warning(self, member, warning_type):
+        """Envia um aviso de inatividade ao membro."""
+        warning_message = self.config['warnings']['messages'].get(warning_type)
+        if warning_message:
+            try:
+                await member.send(warning_message)
+                await self.db.log_warning(member.id, member.guild.id, warning_type)
+                logger.info(f"Aviso '{warning_type}' enviado para {member} no servidor {member.guild.name}")
+            except discord.Forbidden:
+                logger.warning(f"Não foi possível enviar DM para {member} (DMs desativadas).")
+            except Exception as e:
+                logger.error(f"Erro ao enviar aviso para {member}: {e}")
+
+    async def log_action(self, action_type: str, member: Optional[discord.Member], message: str, embed: Optional[discord.Embed] = None, file: Optional[discord.File] = None):
+        """Registra uma ação em um canal de log configurado."""
+        log_channel_id = self.config.get('log_channel')
+        if log_channel_id:
+            log_channel = self.get_channel(log_channel_id)
+            if log_channel:
+                full_message = f"**{action_type}**\nUsuário: {member.mention if member else 'N/A'}\n{message}"
+                try:
+                    await self.queues['normal'].put((log_channel, full_message, embed, file))
+                except asyncio.QueueFull:
+                    logger.warning("Fila de log cheia, descartando mensagem.")
+            else:
+                logger.warning(f"Canal de log com ID {log_channel_id} não encontrado.")
+        else:
+            logger.info(f"Ação: {action_type}, Usuário: {member}, Mensagem: {message}")
+
+    async def notify_roles(self, message: str):
+        """Notifica os cargos configurados no canal de notificação."""
+        notification_channel_id = self.config.get('notification_channel')
+        if notification_channel_id:
+            notification_channel = self.get_channel(notification_channel_id)
+            if notification_channel:
+                try:
+                    await self.queues['normal'].put((notification_channel, message, None, None))
+                except asyncio.QueueFull:
+                    logger.warning("Fila de notificação cheia, descartando mensagem.")
+            else:
+                logger.warning(f"Canal de notificação com ID {notification_channel_id} não encontrado.")
+
+    async def get_cached_user_data(self, user_id: int, guild_id: int) -> Optional[dict]:
+        """Obtém dados do usuário do cache."""
+        # Implementação de cache simples (pode ser aprimorada com Redis/memcached)
+        return self._user_cache.get((user_id, guild_id))
+
+    async def set_cached_user_data(self, user_id: int, guild_id: int, data: dict):
+        """Define dados do usuário no cache."""
+        # Implementação de cache simples
+        if not hasattr(self, '_user_cache'):
+            self._user_cache = {}
+        self._user_cache[(user_id, guild_id)] = data
+
+    async def invalidate_cache(self, cache_type: str):
+        """Invalida o cache de um tipo específico."""
+        if cache_type == 'user_data':
+            if hasattr(self, '_user_cache'):
+                self._user_cache = {}
+                logger.info("Cache de dados de usuário invalidado.")
+
+    async def check_rate_limit(self, action: str) -> int:
+        """Verifica e gerencia o rate limit para uma ação específica."""
+        # Implementação de rate limit simples
+        current_time = time.time()
+        
+        if action not in self.rate_limits:
+            self.rate_limits[action] = {'last_reset': current_time, 'count': 0, 'limit': 5, 'period': 10, 'retries': 0}
+        
+        stats = self.rate_limits[action]
+
+        # Resetar o contador se o período de tempo passou
+        if current_time - stats['last_reset'] > stats['period']:
+            stats['count'] = 0
+            stats['last_reset'] = current_time
+            stats['retries'] = 0
+
+        # Incrementar o contador
+        stats['count'] += 1
+
+        # Verificar se o limite foi excedido
+        if stats['count'] > stats['limit']:
+            stats['retries'] += 1
+            if stats['retries'] > 3: # Limite de retries antes de parar
+                logger.warning(f"Rate limit para '{action}' excedido e limite de retries atingido. Parando.")
+                return -1 # Sinaliza para parar a operação
+            
+            wait_time = stats['period'] - (current_time - stats['last_reset']) + 1 # Espera até o próximo período
+            logger.warning(f"Rate limit para '{action}' excedido. Esperando {wait_time:.2f} segundos.")
+            return int(wait_time)
+        return 0 # Não há rate limit ou não excedido
 
 # Criar instância do bot antes de definir os eventos
 bot = InactivityBot()
+
+# Importar e configurar as tarefas agendadas
+from tasks import setup_tasks
+setup_tasks()
 
 # Eventos do bot
 @bot.event
@@ -226,9 +323,12 @@ async def on_ready():
 @bot.event
 async def on_voice_state_update(member, before, after):
     try:
+        # Adiciona o evento à fila de voz para processamento assíncrono
         await bot.queues['voice'].put((member, before, after))
     except asyncio.QueueFull:
-        logger.warning("Fila de eventos de voz cheia")
+        logger.warning("Fila de eventos de voz cheia. Descartando evento para evitar sobrecarga.")
+    except Exception as e:
+        logger.error(f"Erro ao enfileirar evento de voz: {e}")
 
 # Inicialização do bot
 async def main():
