@@ -127,15 +127,15 @@ class InactivityBot(commands.Bot):
         self.timezone = pytz.timezone('America/Sao_Paulo')
         self.db = None
         self.active_sessions = {}
-        self.voice_event_queue = asyncio.Queue(maxsize=1000)
+        self.voice_event_queue = asyncio.Queue(maxsize=500)  # Reduzido de 1000 para 500
         self.message_queue = PriorityQueue()
         self.voice_event_processor_task = None
         self.queue_processor_task = None
         self.command_processor_task = None
         self.rate_limited = False
         self.last_rate_limit = None
-        self.rate_limit_delay = 1.0
-        self.max_rate_limit_delay = 5.0
+        self.rate_limit_delay = 2.0  # Aumentado de 1.0 para 2.0 segundos
+        self.max_rate_limit_delay = 10.0  # Aumentado de 5.0 para 10.0 segundos
         self.rate_limit_retry_after = 1.0
         self.last_rate_limit_time = None
         self.rate_limit_count = 0
@@ -190,12 +190,10 @@ class InactivityBot(commands.Bot):
                             if audio_key in self.active_sessions:
                                 current_audio_state = member.voice.self_deaf
                                 
-                                # Se o áudio está desativado e não estávamos rastreando
                                 if current_audio_state and not self.active_sessions[audio_key]['audio_disabled']:
                                     self.active_sessions[audio_key]['audio_disabled'] = True
                                     self.active_sessions[audio_key]['audio_off_time'] = datetime.utcnow()
                                     
-                                    # Log detalhado
                                     time_in_voice = (datetime.utcnow() - self.active_sessions[audio_key]['start_time']).total_seconds()
                                     embed = discord.Embed(
                                         title="🔇 Áudio Desativado (Verificação Periódica)",
@@ -212,7 +210,6 @@ class InactivityBot(commands.Bot):
                                         "high"
                                     ))
                                 
-                                # Se o áudio está ativado mas estava marcado como desativado
                                 elif not current_audio_state and self.active_sessions[audio_key]['audio_disabled']:
                                     self.active_sessions[audio_key]['audio_disabled'] = False
                                     if 'audio_off_time' in self.active_sessions[audio_key]:
@@ -221,7 +218,6 @@ class InactivityBot(commands.Bot):
                                             self.active_sessions[audio_key].get('total_audio_off_time', 0) + audio_off_duration
                                         del self.active_sessions[audio_key]['audio_off_time']
                                         
-                                        # Log detalhado
                                         total_time = (datetime.utcnow() - self.active_sessions[audio_key]['start_time']).total_seconds()
                                         embed = discord.Embed(
                                             title="🔊 Áudio Reativado (Verificação Periódica)",
@@ -308,9 +304,11 @@ class InactivityBot(commands.Bot):
                 queue_status = self.message_queue.qsize()
                 queue_status['voice_events'] = self.voice_event_queue.qsize()
                 
-                if queue_status['voice_events'] > 500:
+                logger.info(f"Status das filas: {queue_status}")
+                
+                if queue_status['voice_events'] > 300:
                     logger.warning(f"Fila de eventos de voz grande: {queue_status['voice_events']}")
-                if queue_status['normal'] > 200:
+                if queue_status['normal'] > 100:
                     logger.warning(f"Fila de comandos grande: {queue_status['normal']}")
                 
                 if hasattr(self, 'db') and self.db:
@@ -578,7 +576,7 @@ class InactivityBot(commands.Bot):
             
             # Adicionar à fila de alta prioridade
             await self.message_queue.put((
-                (channel, None, embed, None),
+                (channel, None, embed, file),
                 "high"
             ))
             
@@ -697,7 +695,7 @@ class InactivityBot(commands.Bot):
                 for _ in batch:
                     self.voice_event_queue.task_done()
                     
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.5)  # Aumentado de 0.1 para 0.5 segundos
                 
             except Exception as e:
                 logger.error(f"Erro no processador de eventos de voz: {e}")

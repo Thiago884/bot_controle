@@ -29,73 +29,19 @@ class DatabaseBackup:
             self.backup_enabled = False
 
     async def create_backup(self):
-        """Cria backup do banco de dados usando mysqldump se disponível, ou fallback para método manual"""
+        """Cria backup do banco de dados usando método manual"""
         if not self.backup_enabled:
             logger.info("Backups locais estão desabilitados - pulando criação de backup")
             return False
             
         try:
-            # Tentar usar mysqldump primeiro (mais eficiente)
-            success = await self._create_backup_mysqldump()
-            if success:
-                return True
-                
-            # Fallback para método manual se mysqldump falhar
             return await self._create_backup_manual()
         except Exception as e:
             logger.error(f"Erro ao criar backup: {e}", exc_info=True)
             return False
 
-    async def _create_backup_mysqldump(self):
-        """Tenta criar backup usando mysqldump"""
-        try:
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            backup_file = os.path.join(self.backup_dir, f'backup_{timestamp}.sql')
-            zip_file = f'{backup_file}.zip'
-            
-            dump_cmd = (
-                f"mysqldump -h {os.getenv('DB_HOST')} "
-                f"-u {os.getenv('DB_USER')} "
-                f"-p{os.getenv('DB_PASS')} "
-                f"{os.getenv('DB_NAME')}"
-            )
-            
-            proc = await asyncio.create_subprocess_shell(
-                dump_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            
-            stdout, stderr = await proc.communicate()
-            
-            if proc.returncode != 0:
-                raise Exception(f"mysqldump failed: {stderr.decode()}")
-            
-            # Salvar backup
-            with open(backup_file, 'wb') as f:
-                f.write(stdout)
-            
-            # Compactar
-            with zipfile.ZipFile(zip_file, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                zipf.write(backup_file, os.path.basename(backup_file))
-            
-            # Remover arquivo SQL temporário
-            try:
-                os.remove(backup_file)
-            except Exception as e:
-                logger.warning(f"Erro ao remover arquivo SQL temporário: {e}")
-            
-            # Limpar backups antigos (manter últimos 5)
-            self._cleanup_old_backups(keep=5)
-            
-            logger.info(f"Backup criado com sucesso via mysqldump: {zip_file}")
-            return True
-        except Exception as e:
-            logger.warning(f"Falha ao usar mysqldump, tentando método manual: {e}")
-            return False
-
     async def _create_backup_manual(self):
-        """Método manual de backup para fallback"""
+        """Método manual de backup"""
         try:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             backup_file = os.path.join(self.backup_dir, f'backup_{timestamp}.sql')
@@ -149,7 +95,7 @@ class DatabaseBackup:
             # Limpar backups antigos
             self._cleanup_old_backups(keep=5)
             
-            logger.info(f"Backup criado com sucesso (método manual): {zip_file}")
+            logger.info(f"Backup criado com sucesso: {zip_file}")
             return True
         except Exception as e:
             logger.error(f"Erro no método manual de backup: {e}")
