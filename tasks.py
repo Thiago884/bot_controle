@@ -1,8 +1,8 @@
+from discord.ext import tasks
 from datetime import datetime, timedelta, time
 import asyncio
 import logging
 import discord
-from discord.ext import tasks
 from io import BytesIO
 from typing import Optional
 from utils import generate_activity_graph
@@ -11,13 +11,18 @@ from datetime import time
 
 logger = logging.getLogger('inactivity_bot')
 
-# Remove the global 'bot' import and pass it as an argument where needed.
+# Classe para armazenar a instância do bot
+class TaskBot:
+    def __init__(self, bot=None):
+        self.bot = bot
+
+# Instância global para armazenar o bot
+task_bot = TaskBot()
 
 @tasks.loop(hours=24)
 async def inactivity_check():
     """Verifica a inatividade dos membros e remove cargos se necessário"""
-    # Access bot instance from the loop's context
-    current_bot = inactivity_check.get_task_or_bot()
+    current_bot = task_bot.bot
     await current_bot.wait_until_ready()
     
     # Verificar rate limit antes de começar
@@ -221,7 +226,7 @@ async def get_voice_sessions_with_cache(bot_instance, user_id: int, guild_id: in
 @tasks.loop(hours=24)
 async def check_warnings():
     """Verifica e envia avisos de inatividade para membros"""
-    current_bot = check_warnings.get_task_or_bot()
+    current_bot = task_bot.bot
     await current_bot.wait_until_ready()
     
     # Verificar rate limit antes de começar
@@ -338,7 +343,7 @@ async def process_warning_batch(bot_instance, members, guild, first_warning_days
 @tasks.loop(hours=24)
 async def cleanup_members():
     """Remove membros inativos que estão sem cargos há muito tempo"""
-    current_bot = cleanup_members.get_task_or_bot()
+    current_bot = task_bot.bot
     await current_bot.wait_until_ready()
     
     # Verificar rate limit antes de começar
@@ -426,7 +431,7 @@ async def process_kick_batch(bot_instance, members, guild, cutoff_date, members_
 @tasks.loop(hours=24)
 async def database_backup():
     """Executa backup diário do banco de dados"""
-    current_bot = database_backup.get_task_or_bot()
+    current_bot = task_bot.bot
     await current_bot.wait_until_ready()
     
     # Verificar rate limit antes de começar
@@ -456,7 +461,7 @@ async def database_backup():
 @tasks.loop(hours=24)
 async def cleanup_old_data():
     """Limpa dados antigos do banco de dados"""
-    current_bot = cleanup_old_data.get_task_or_bot()
+    current_bot = task_bot.bot
     await current_bot.wait_until_ready()
     
     # Verificar rate limit antes de começar
@@ -510,13 +515,11 @@ async def cleanup_old_data():
 @tasks.loop(minutes=5)
 async def monitor_api_limits():
     """Monitora os limites da API do Discord em tempo real"""
-    current_bot = monitor_api_limits.get_task_or_bot()
+    current_bot = task_bot.bot
     await current_bot.wait_until_ready()
     
     try:
         # Obter estatísticas atuais
-        # Assuming bot.rate_limit_lock and bot.rate_limit_stats are properly initialized in bot class
-        # Add these attributes to your InactivityBot class if they don't exist
         if not hasattr(current_bot, 'rate_limit_lock'):
             current_bot.rate_limit_lock = asyncio.Lock()
             current_bot.rate_limit_stats = {'global': {'count': 0, 'max_retries': 5}, 'endpoints': {}}
@@ -550,7 +553,7 @@ async def monitor_api_limits():
                     f"⚠️ **ALERTA**: Endpoint {endpoint} com {stats['count']}/{stats['max_retries']} hits"
                 )
         
-        # Enviar para canal de logs se houver problemas ou a cada 12 relatórios (1 hora)
+        # Enviar para canal de logs se houver problemas ou a cada 12 relatóros (1 hora)
         if warning_lines or monitor_api_limits.current_loop % 12 == 0:
             embed = discord.Embed(
                 title="Monitor de Rate Limits",
@@ -641,36 +644,29 @@ async def _execute_force_check(bot_instance, member: discord.Member):
         logger.error(f"Erro na verificação forçada para {member}: {e}")
         raise
 
-# tasks.py (parte corrigida)
 def setup_tasks(bot_instance):
     """Configura e inicia todas as tarefas agendadas"""
-    # Importar datetime no escopo da função para evitar confusão
-    from datetime import time
+    # Armazena a instância do bot
+    task_bot.bot = bot_instance
     
-    # Pass the bot instance to the tasks
+    # Configuração dos horários das tarefas
     inactivity_check.change_interval(time=time(hour=3, minute=0))  # 3 AM
     inactivity_check.add_exception_type(Exception) # Add exception type for safety
-    inactivity_check.set_task_or_bot(bot_instance) # Set the bot instance for the task
 
     check_warnings.change_interval(time=time(hour=6, minute=0))    # 6 AM
     check_warnings.add_exception_type(Exception)
-    check_warnings.set_task_or_bot(bot_instance)
 
     cleanup_members.change_interval(time=time(hour=9, minute=0))   # 9 AM
     cleanup_members.add_exception_type(Exception)
-    cleanup_members.set_task_or_bot(bot_instance)
 
     database_backup.change_interval(time=time(hour=0, minute=0))   # Midnight
     database_backup.add_exception_type(Exception)
-    database_backup.set_task_or_bot(bot_instance)
 
     cleanup_old_data.change_interval(time=time(hour=1, minute=0))  # 1 AM
     cleanup_old_data.add_exception_type(Exception)
-    cleanup_old_data.set_task_or_bot(bot_instance)
 
     monitor_api_limits.change_interval(minutes=5)
     monitor_api_limits.add_exception_type(Exception)
-    monitor_api_limits.set_task_or_bot(bot_instance)
     
     # Iniciar todas as tarefas
     inactivity_check.start()
