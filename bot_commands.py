@@ -998,8 +998,7 @@ async def voice_debug(interaction: discord.Interaction):
             title="🔊 Diagnóstico de Voz - Detalhado",
             description=f"**{len(voice_data)}** membros em canais de voz",
             color=discord.Color.blue(),
-            timestamp=datetime.now(bot.timezone)
-        )
+            timestamp=datetime.now(bot.timezone))
         
         if voice_data:
             # Ordenar por maior tempo em chamada
@@ -1051,11 +1050,10 @@ async def voice_debug(interaction: discord.Interaction):
                 inline=False
             )
         
-        # Adicionar informações do sistema
+        # Adicionar informações do sistema (removida a região)
         embed.add_field(
             name="⚙️ Sistema",
             value=(
-                f"Região: {guild.region}\n"
                 f"AFK Channel: {guild.afk_channel.name if guild.afk_channel else 'Nenhum'}\n"
                 f"AFK Timeout: {guild.afk_timeout} segundos"
             ),

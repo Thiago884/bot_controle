@@ -425,29 +425,32 @@ class InactivityBot(commands.Bot):
                     await asyncio.sleep(0.1)
                     continue
                     
-                # Verificar o tipo de item
-                if isinstance(item, tuple):
-                    # Formato: (destination, content, embed, file)
-                    if len(item) == 4:
-                        destination, content, embed, file = item
-                        if isinstance(destination, (discord.TextChannel, discord.User, discord.Member)):
-                            await self.safe_send(destination, content, embed, file)
+                try:
+                    # Verificar o tipo de item
+                    if isinstance(item, tuple):
+                        # Formato: (destination, content, embed, file)
+                        if len(item) == 4:
+                            destination, content, embed, file = item
+                            if isinstance(destination, (discord.TextChannel, discord.User, discord.Member)):
+                                await self.safe_send(destination, content, embed, file)
+                            else:
+                                logger.warning(f"Destino inválido para mensagem: {type(destination)}")
+                        # Formato simplificado: (destination, embed)
+                        elif len(item) == 2:
+                            destination, embed = item
+                            if isinstance(destination, (discord.TextChannel, discord.User, discord.Member)):
+                                await self.safe_send(destination, embed=embed)
+                            else:
+                                logger.warning(f"Destino inválido para mensagem: {type(destination)}")
                         else:
-                            logger.warning(f"Destino inválido para mensagem: {type(destination)}")
-                    # Formato simplificado: (destination, embed)
-                    elif len(item) == 2:
-                        destination, embed = item
-                        if isinstance(destination, (discord.TextChannel, discord.User, discord.Member)):
-                            await self.safe_send(destination, embed=embed)
-                        else:
-                            logger.warning(f"Destino inválido para mensagem: {type(destination)}")
+                            logger.warning(f"Item da fila em formato desconhecido: {item}")
+                    elif isinstance(item, (discord.TextChannel, discord.User, discord.Member)):
+                        # Se for um objeto de canal ou usuário diretamente
+                        await self.safe_send(item)
                     else:
-                        logger.warning(f"Item da fila em formato desconhecido: {item}")
-                elif isinstance(item, (discord.TextChannel, discord.User, discord.Member)):
-                    # Se for um objeto de canal ou usuário diretamente
-                    await self.safe_send(item)
-                else:
-                    logger.warning(f"Item da fila não é um destino válido: {type(item)}")
+                        logger.warning(f"Item da fila não é um destino válido: {type(item)}")
+                except Exception as e:
+                    logger.error(f"Erro ao processar item da fila: {e}")
                     
                 self.message_queue.task_done(priority)
                     
@@ -747,8 +750,10 @@ class InactivityBot(commands.Bot):
             # Se um embed foi fornecido, usá-lo diretamente
             if embed is not None:
                 await self.message_queue.put((
-                    (channel, None, embed, file),
-                    "high"
+                    channel,
+                    None,
+                    embed,
+                    file
                 ))
                 return
                 
@@ -789,8 +794,10 @@ class InactivityBot(commands.Bot):
             
             # Adicionar à fila de alta prioridade
             await self.message_queue.put((
-                (channel, None, embed, file),
-                "high"
+                channel,
+                None,
+                embed,
+                file
             ))
             
         except Exception as e:
@@ -826,8 +833,10 @@ class InactivityBot(commands.Bot):
                 priority = "normal"
             
             await self.message_queue.put((
-                (channel, None, embed, None),
-                priority
+                channel,
+                None,
+                embed,
+                None
             ))
             
         except Exception as e:
@@ -845,8 +854,10 @@ class InactivityBot(commands.Bot):
             
             # Adicionar à fila de baixa prioridade para evitar rate limits
             await self.message_queue.put((
-                (member, None, embed, None),
-                "low"
+                member,
+                None,
+                embed,
+                None
             ))
         except Exception as e:
             logger.error(f"Erro ao enviar DM para {member}: {e}")
