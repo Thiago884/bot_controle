@@ -1,7 +1,7 @@
 import discord
 from discord import app_commands
 from discord.ext import commands
-from typing import Optional, List, Literal, Union
+from typing import Optional, List, Literal, Union, Dict
 from datetime import datetime, timedelta
 import logging
 from main import bot, allowed_roles_only
@@ -681,11 +681,20 @@ async def show_config(interaction: discord.Interaction):
         await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="user_activity", description="Verifica as estatísticas de atividade de um usuário")
+@app_commands.describe(
+    member="Membro para verificar a atividade",
+    days="Período em dias para análise (padrão: 14)"
+)
 @allowed_roles_only()
-async def user_activity(interaction: discord.Interaction, member: discord.Member):
+async def user_activity(interaction: discord.Interaction, member: discord.Member, days: int = 14):
     """Verifica as estatísticas completas de atividade de um usuário"""
     try:
         await interaction.response.defer(thinking=True)
+        
+        # Validar período
+        if days < 1 or days > 365:
+            await interaction.followup.send("⚠️ O período deve ser entre 1 e 365 dias.", ephemeral=True)
+            return
         
         # Coletar dados básicos
         user_data = await bot.db.get_user_activity(member.id, member.guild.id)
@@ -695,9 +704,9 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
         last_warning = await bot.db.get_last_warning(member.id, member.guild.id)
         last_check = await bot.db.get_last_period_check(member.id, member.guild.id)
         
-        # Coletar dados históricos (últimos 14 dias)
+        # Coletar dados históricos para o período especificado
         end_date = datetime.now(bot.timezone)
-        start_date = end_date - timedelta(days=14)
+        start_date = end_date - timedelta(days=days)
         voice_sessions = await bot.db.get_voice_sessions(member.id, member.guild.id, start_date, end_date)
         
         # Calcular dias ativos
@@ -706,9 +715,18 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
             day = session['join_time'].replace(tzinfo=bot.timezone).date()
             active_days.add(day)
         
+        # Calcular métricas adicionais
+        total_minutes = total_time / 60 if total_time else 0
+        avg_session_duration = total_minutes / sessions if sessions else 0
+        
+        # Configurações de requisitos
+        required_min = bot.config['required_minutes']
+        required_days = bot.config['required_days']
+        monitoring_period = bot.config['monitoring_period']
+        
         # Criar embed principal
         embed = discord.Embed(
-            title=f"📊 Atividade de {member.display_name}",
+            title=f"📊 Atividade de {member.display_name} (últimos {days} dias)",
             color=discord.Color.blue(),
             timestamp=datetime.now(bot.timezone)
         )
@@ -720,35 +738,101 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
             name="📈 Estatísticas Gerais",
             value=(
                 f"**Sessões em Call:** {sessions}\n"
-                f"**Tempo Total:** {total_time} minutos\n"
-                f"**Dias Ativos (14 dias):** {len(active_days)}\n"
+                f"**Tempo Total:** {total_minutes:.1f} minutos\n"
+                f"**Duração Média:** {avg_session_duration:.1f} minutos\n"
+                f"**Dias Ativos:** {len(active_days)}\n"
                 f"**Último Join:** {last_join.strftime('%d/%m/%Y %H:%M') if last_join else 'N/A'}"
             ),
             inline=True
         )
         
-        # Seção de verificações
+        # Seção de requisitos do servidor
+        embed.add_field(
+            name="📋 Requisitos do Servidor",
+            value=(
+                f"**Minutos necessários:** {required_min} min\n"
+                f"**Dias necessários:** {required_days} dias\n"
+                f"**Período de monitoramento:** {monitoring_period} dias"
+            ),
+            inline=True
+        )
+        
+        # Seção de status atual
         if last_check:
             period_start = last_check['period_start'].replace(tzinfo=bot.timezone)
             period_end = last_check['period_end'].replace(tzinfo=bot.timezone)
             days_remaining = (period_end - datetime.now(bot.timezone)).days
             
+            status_emoji = "✅" if last_check['meets_requirements'] else "⚠️"
+            status_text = "Cumprindo" if last_check['meets_requirements'] else "Não cumprindo"
+            
             embed.add_field(
                 name="🔄 Status Atual",
                 value=(
+                    f"{status_emoji} **{status_text}** os requisitos\n"
                     f"**Período:** {period_start.strftime('%d/%m/%Y')} a {period_end.strftime('%d/%m/%Y')}\n"
-                    f"**Dias Restantes:** {days_remaining}\n"
-                    f"**Status:** {'✅ Cumprindo' if last_check['meets_requirements'] else '⚠️ Não cumprindo'}"
+                    f"**Dias Restantes:** {days_remaining}"
                 ),
                 inline=True
             )
+            
+            # Calcular dias válidos para o período atual
+            valid_days = set()
+            current_sessions = await bot.db.get_voice_sessions(member.id, member.guild.id, period_start, period_end)
+            for session in current_sessions:
+                if session['duration'] >= required_min * 60:
+                    day = session['join_time'].replace(tzinfo=bot.timezone).date()
+                    valid_days.add(day)
+            
+            # Barra de progresso
+            progress = min(1.0, len(valid_days) / required_days)
+            progress_bar = "[" + "█" * int(progress * 10) + " " * (10 - int(progress * 10)) + "]"
+            progress_text = f"{progress*100:.0f}% ({len(valid_days)}/{required_days} dias)"
+            
+            embed.add_field(
+                name="📊 Progresso",
+                value=f"{progress_bar}\n{progress_text}",
+                inline=False
+            )
         
         # Seção de avisos
-        if last_warning:
+        all_warnings = []
+        try:
+            async with bot.db.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute('''
+                        SELECT warning_type, warning_date 
+                        FROM user_warnings 
+                        WHERE user_id = %s AND guild_id = %s
+                        ORDER BY warning_date DESC
+                        LIMIT 3
+                    ''', (member.id, member.guild.id))
+                    all_warnings = await cursor.fetchall()
+        except Exception as e:
+            logger.error(f"Erro ao obter avisos: {e}")
+
+        if all_warnings:
+            warnings_text = "\n".join(
+                f"• {warn['warning_type'].capitalize()} - {warn['warning_date'].strftime('%d/%m/%Y %H:%M')}"
+                for warn in all_warnings
+            )
             embed.add_field(
-                name="⚠️ Último Aviso",
-                value=f"{last_warning[0].capitalize()} - {last_warning[1].strftime('%d/%m/%Y %H:%M')}",
+                name="⚠️ Histórico de Avisos",
+                value=warnings_text,
                 inline=False
+            )
+        
+        # Seção de cargos monitorados
+        tracked_roles = [
+            role for role in member.roles 
+            if role.id in bot.config['tracked_roles']
+        ]
+        
+        if tracked_roles:
+            embed.add_field(
+                name="🎖️ Cargos Monitorados",
+                value="\n".join(role.mention for role in tracked_roles),
+                inline=True
             )
         
         # Se houver sessões recentes, adicionar gráfico
@@ -799,7 +883,7 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
                 await cursor.execute('''
                     SELECT user_id, SUM(duration) as total_time, COUNT(DISTINCT DATE(join_time)) as active_days
                     FROM voice_sessions
-                    WHERE guild_id = %s AND join_time >= %s AND leave_time <= %s
+                    WHERE guild_id = %s AND join_time >= %s AND join_time <= %s
                     GROUP BY user_id
                     ORDER BY total_time DESC
                     LIMIT %s
