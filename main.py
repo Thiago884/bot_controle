@@ -173,7 +173,6 @@ class InactivityBot(commands.Bot):
             setup_tasks()
             
             self.voice_event_processor_task = asyncio.create_task(self.process_voice_events())
-            self.command_processor_task = asyncio.create_task(self.process_commands())
             self.queue_processor_task = asyncio.create_task(self.process_queues())
             self.pool_monitor_task = asyncio.create_task(self.monitor_db_pool())
             self.health_check_task = asyncio.create_task(self.periodic_health_check())
@@ -711,70 +710,6 @@ class InactivityBot(commands.Bot):
                 
             except Exception as e:
                 logger.error(f"Erro no processador de eventos de voz: {e}")
-                await asyncio.sleep(1)
-
-    async def process_commands(self):
-        """Processa comandos da fila de mensagens"""
-        while True:
-            try:
-                item, priority = await self.message_queue.get()
-                if item is None:
-                    await asyncio.sleep(0.1)
-                    continue
-                    
-                # Verificar se é um comando ou uma mensagem
-                if isinstance(item, tuple) and len(item) == 4:
-                    interaction, command, args, kwargs = item
-                    
-                    if self.rate_limited:
-                        now = datetime.now()
-                        if self.last_rate_limit and (now - self.last_rate_limit).seconds < 60:
-                            try:
-                                await interaction.followup.send(
-                                    "⚠️ O bot está sendo limitado pelo Discord. Por favor, tente novamente mais tarde.")
-                            except Exception as e:
-                                logger.error(f"Erro ao enviar mensagem de rate limit: {e}")
-                            self.message_queue.task_done(priority)
-                            continue
-                        else:
-                            self.rate_limited = False
-                    
-                    await asyncio.sleep(self.rate_limit_delay)
-                    
-                    try:
-                        await command(interaction, *args, **kwargs)
-                        self.rate_limit_delay = max(self.rate_limit_delay * 0.9, 0.5)
-                        
-                    except discord.errors.HTTPException as e:
-                        if e.status == 429:
-                            self.rate_limited = True
-                            self.last_rate_limit = datetime.now()
-                            retry_after = float(e.response.headers.get('Retry-After', 60))
-                            logger.error(f"Rate limit atingido. Tentar novamente após {retry_after} segundos")
-                            
-                            self.rate_limit_delay = min(self.rate_limit_delay * 2, self.max_rate_limit_delay)
-                            
-                            await asyncio.sleep(retry_after)
-                            self.rate_limited = False
-                            
-                            await asyncio.sleep(self.rate_limit_delay)
-                            await self.message_queue.put(item, priority)
-                        else:
-                            raise
-                    except Exception as e:
-                        logger.error(f"Erro ao executar comando: {e}")
-                        try:
-                            await interaction.followup.send(
-                                "❌ Ocorreu um erro ao processar o comando.")
-                        except Exception as e:
-                            logger.error(f"Erro ao enviar mensagem de erro: {e}")
-                else:
-                    logger.warning(f"Item de comando em formato inválido: {item}")
-                    
-                self.message_queue.task_done(priority)
-                
-            except Exception as e:
-                logger.error(f"Erro no processador de comandos: {e}")
                 await asyncio.sleep(1)
 
     async def log_action(self, action: str, member: Optional[discord.Member] = None, details: str = None, file: discord.File = None, embed: discord.Embed = None):
