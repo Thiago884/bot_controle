@@ -6,6 +6,8 @@ from typing import List, Dict, Optional
 import logging
 import asyncio
 import time
+from datetime import datetime
+import numpy as np
 
 logger = logging.getLogger('inactivity_bot')
 
@@ -46,14 +48,15 @@ async def generate_activity_graph(member: discord.Member, sessions: List[Dict]) 
         dates = []
         durations = []
         for session in sessions:
-            dates.append(session['join_time'].date())
+            join_time = session['join_time'].replace(tzinfo=None)  # Remover timezone para evitar problemas
+            dates.append(join_time)
             durations.append(session['duration'] / 60)  # Converter para minutos
 
         # Agrupar por data
-        unique_dates = sorted(list(set(dates)))
+        unique_dates = sorted(list({d.date() for d in dates}))
         date_to_duration = {date: 0 for date in unique_dates}
         
-        for date, duration in zip(dates, durations):
+        for date, duration in zip([d.date() for d in dates], durations):
             date_to_duration[date] += duration
 
         # Configurar o gráfico com tamanho otimizado
@@ -74,8 +77,17 @@ async def generate_activity_graph(member: discord.Member, sessions: List[Dict]) 
                         f'{int(height)}m',
                         ha='center', va='bottom', fontsize=8)
 
+        # Adicionar linhas para marcar os dias da semana
+        for i, date in enumerate(unique_dates):
+            if date.weekday() == 4:  # Sexta-feira
+                plt.axvline(x=i, color='orange', linestyle='--', alpha=0.3, linewidth=1)
+            elif date.weekday() == 5:  # Sábado
+                plt.axvline(x=i, color='red', linestyle=':', alpha=0.3, linewidth=1)
+            elif date.weekday() == 6:  # Domingo
+                plt.axvline(x=i, color='red', linestyle='-.', alpha=0.3, linewidth=1)
+
         # Configurar título e labels
-        plt.title(f'Atividade de Voz - {member.display_name}\nPeríodo: {unique_dates[0]} a {unique_dates[-1]}', 
+        plt.title(f'Atividade de Voz - {member.display_name}\nPeríodo: {unique_dates[0].strftime("%d/%m/%Y")} a {unique_dates[-1].strftime("%d/%m/%Y")}', 
                  fontsize=10, pad=10)
         plt.xlabel('Data', fontsize=9)
         plt.ylabel('Minutos em Voz', fontsize=9)
@@ -83,6 +95,12 @@ async def generate_activity_graph(member: discord.Member, sessions: List[Dict]) 
         # Rotacionar labels do eixo X para melhor legibilidade
         plt.xticks(rotation=45, ha='right', fontsize=8)
         plt.yticks(fontsize=8)
+        
+        # Adicionar legenda para os dias da semana
+        weekend_patch = plt.Line2D([0], [0], color='orange', linestyle='--', label='Sexta')
+        saturday_patch = plt.Line2D([0], [0], color='red', linestyle=':', label='Sábado')
+        sunday_patch = plt.Line2D([0], [0], color='red', linestyle='-.', label='Domingo')
+        plt.legend(handles=[weekend_patch, saturday_patch, sunday_patch], fontsize=8, loc='upper right')
         
         # Ajustar layout para evitar cortes
         plt.tight_layout()
