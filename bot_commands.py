@@ -883,7 +883,7 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
             await interaction.response.send_message(
                 "⚠️ O limite deve ser entre 3 e 10 usuários.", ephemeral=True)
             return
-            
+                
         await interaction.response.defer(thinking=True)
         
         end_date = datetime.now(bot.timezone)
@@ -893,10 +893,15 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
         async with bot.db.pool.acquire() as conn:
             async with conn.cursor() as cursor:
                 await cursor.execute('''
-                    SELECT user_id, SUM(duration) as total_time, COUNT(DISTINCT DATE(join_time)) as active_days
+                    SELECT user_id, SUM(duration) as total_time, 
+                           COUNT(DISTINCT DATE(join_time)) as active_days,
+                           COUNT(*) as session_count
                     FROM voice_sessions
-                    WHERE guild_id = %s AND join_time >= %s AND join_time <= %s
+                    WHERE guild_id = %s
+                    AND join_time >= %s 
+                    AND join_time <= %s
                     GROUP BY user_id
+                    HAVING total_time > 0
                     ORDER BY total_time DESC
                     LIMIT %s
                 ''', (interaction.guild.id, start_date, end_date, limit))
@@ -911,12 +916,29 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
                 hours = row['total_time'] / 3600
                 ranking.append(
                     f"**{idx}.** {member.mention} - "
-                    f"{hours:.1f} horas em {row['active_days']} dias"
+                    f"{hours:.1f} horas em {row['active_days']} dias "
+                    f"({row['session_count']} sessões)"
                 )
         
         if not ranking:
-            await interaction.followup.send(
-                "ℹ️ Nenhum dado de atividade encontrado para o período selecionado.")
+            # Verificar se há alguma sessão no período
+            async with bot.db.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute('''
+                        SELECT COUNT(*) as total_sessions
+                        FROM voice_sessions
+                        WHERE guild_id = %s
+                        AND join_time >= %s
+                        AND join_time <= %s
+                    ''', (interaction.guild.id, start_date, end_date))
+                    check = await cursor.fetchone()
+            
+            if check and check['total_sessions'] > 0:
+                await interaction.followup.send(
+                    "ℹ️ Há atividade registrada, mas insuficiente para criar um ranking.")
+            else:
+                await interaction.followup.send(
+                    f"ℹ️ Nenhuma sessão de voz registrada nos últimos {days} dias.")
             return
         
         embed = discord.Embed(
@@ -925,14 +947,14 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
             color=discord.Color.gold(),
             timestamp=datetime.now(bot.timezone))
         
-        embed.set_footer(text=f"Top {limit} usuários mais ativos")
+        embed.set_footer(text=f"Top {limit} usuários mais ativos | Requisitos: {bot.config['required_minutes']}min em {bot.config['required_days']} dias")
         
         await interaction.followup.send(embed=embed)
         
     except Exception as e:
         logger.error(f"Erro ao gerar ranking de atividade: {e}")
         await interaction.followup.send(
-            "❌ Ocorreu um erro ao gerar o ranking de atividade.", ephemeral=True)
+            "❌ Ocorreu um erro ao gerar o ranking. Verifique os logs para detalhes.", ephemeral=True)
 
 @bot.tree.command(name="force_check", description="Força uma verificação imediata de inatividade para um usuário")
 @app_commands.checks.cooldown(1, 30.0, key=lambda i: (i.guild_id, i.user.id))  # 30 segundos de cooldown
