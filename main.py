@@ -504,12 +504,14 @@ class InactivityBot(commands.Bot):
                     await self._handle_voice_leave(member, before)
                 
                 # Movido entre canais
-                elif before.channel is not None and after.channel is not None:
+                elif before.channel is not None and after.channel is not None and before.channel != after.channel:
                     await self._handle_voice_move(member, before, after, absence_channel_id)
                 
-                # Mudança de estado de áudio
-                elif before.channel and after.channel and before.channel == after.channel:
-                    await self._handle_audio_change(member, before, after)
+                # Mudança de estado de áudio (mesmo canal)
+                elif before.channel is not None and after.channel is not None and before.channel == after.channel:
+                    # Verifica apenas deaf/self_deaf (ignora mute/self_mute)
+                    if (before.self_deaf != after.self_deaf) or (before.deaf != after.deaf):
+                        await self._handle_audio_change(member, before, after)
 
             except Exception as e:
                 logger.error(f"Erro ao processar evento de voz para {member}: {e}")
@@ -664,57 +666,61 @@ class InactivityBot(commands.Bot):
                 logger.error(f"Erro ao registrar retorno de ausência: {e}")
 
     async def _handle_audio_change(self, member, before, after):
-        """Processa mudança de estado de áudio"""
+        """Processa mudança de estado de áudio (ignora mute)"""
         audio_key = (member.id, member.guild.id)
-        if audio_key in self.active_sessions:
-            # Áudio foi desativado
-            if (after.self_deaf or after.deaf) and not (before.self_deaf or before.deaf):
-                self.active_sessions[audio_key]['audio_disabled'] = True
-                self.active_sessions[audio_key]['audio_off_time'] = datetime.utcnow()
+        if audio_key not in self.active_sessions:
+            return
+
+        # Verifica apenas deaf/self_deaf (ignora mute/self_mute)
+        audio_was_on = not (before.self_deaf or before.deaf)
+        audio_is_off = after.self_deaf or after.deaf
+
+        # Áudio foi DESATIVADO (antes estava ligado, agora está mudo)
+        if audio_was_on and audio_is_off:
+            self.active_sessions[audio_key]['audio_disabled'] = True
+            self.active_sessions[audio_key]['audio_off_time'] = datetime.utcnow()
+            
+            time_in_voice = (datetime.utcnow() - self.active_sessions[audio_key]['start_time']).total_seconds()
+            embed = discord.Embed(
+                title="🔇 Áudio Desativado",
+                color=discord.Color.orange(),
+                timestamp=datetime.now(self.timezone))
+            embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
+            embed.add_field(name="Usuário", value=member.mention, inline=True)
+            embed.add_field(name="Canal", value=after.channel.name, inline=True)
+            embed.add_field(name="Tempo em voz", 
+                          value=f"{int(time_in_voice//60)} minutos {int(time_in_voice%60)} segundos", 
+                          inline=False)
+            embed.set_footer(text=f"ID: {member.id}")
+            
+            await self.log_action(None, None, embed=embed)
+        
+        # Áudio foi REATIVADO (antes estava mudo, agora está ligado)
+        elif not audio_was_on and not audio_is_off:
+            self.active_sessions[audio_key]['audio_disabled'] = False
+            if 'audio_off_time' in self.active_sessions[audio_key]:
+                audio_off_duration = (datetime.utcnow() - self.active_sessions[audio_key]['audio_off_time']).total_seconds()
+                self.active_sessions[audio_key]['total_audio_off_time'] = \
+                    self.active_sessions[audio_key].get('total_audio_off_time', 0) + audio_off_duration
+                del self.active_sessions[audio_key]['audio_off_time']
                 
-                # Log detalhado
-                time_in_voice = (datetime.utcnow() - self.active_sessions[audio_key]['start_time']).total_seconds()
+                total_time = (datetime.utcnow() - self.active_sessions[audio_key]['start_time']).total_seconds()
                 embed = discord.Embed(
-                    title="🔇 Áudio Desativado",
-                    color=discord.Color.orange(),
+                    title="🔊 Áudio Reativado",
+                    color=discord.Color.green(),
                     timestamp=datetime.now(self.timezone))
                 embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
                 embed.add_field(name="Usuário", value=member.mention, inline=True)
                 embed.add_field(name="Canal", value=after.channel.name, inline=True)
-                embed.add_field(name="Tempo em voz", 
-                              value=f"{int(time_in_voice//60)} minutos {int(time_in_voice%60)} segundos", 
-                              inline=False)
+                embed.add_field(name="Tempo sem áudio", 
+                              value=f"{int(audio_off_duration//60)} minutos {int(audio_off_duration%60)} segundos", 
+                              inline=True)
+                embed.add_field(name="Tempo total em voz", 
+                              value=f"{int(total_time//60)} minutos {int(total_time%60)} segundos", 
+                              inline=True)
                 embed.set_footer(text=f"ID: {member.id}")
                 
                 await self.log_action(None, None, embed=embed)
-            
-            # Áudio foi reativado
-            elif not (after.self_deaf or after.deaf) and (before.self_deaf or before.deaf):
-                self.active_sessions[audio_key]['audio_disabled'] = False
-                if 'audio_off_time' in self.active_sessions[audio_key]:
-                    audio_off_duration = (datetime.utcnow() - self.active_sessions[audio_key]['audio_off_time']).total_seconds()
-                    self.active_sessions[audio_key]['total_audio_off_time'] = \
-                        self.active_sessions[audio_key].get('total_audio_off_time', 0) + audio_off_duration
-                    del self.active_sessions[audio_key]['audio_off_time']
-                    
-                    # Log detalhado
-                    total_time = (datetime.utcnow() - self.active_sessions[audio_key]['start_time']).total_seconds()
-                    embed = discord.Embed(
-                        title="🔊 Áudio Reativado",
-                        color=discord.Color.green(),
-                        timestamp=datetime.now(self.timezone))
-                    embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
-                    embed.add_field(name="Usuário", value=member.mention, inline=True)
-                    embed.add_field(name="Canal", value=after.channel.name, inline=True)
-                    embed.add_field(name="Tempo sem áudio", 
-                                  value=f"{int(audio_off_duration//60)} minutos {int(audio_off_duration%60)} segundos", 
-                                  inline=True)
-                    embed.add_field(name="Tempo total em voz", 
-                                  value=f"{int(total_time//60)} minutos {int(total_time%60)} segundos", 
-                                  inline=True)
-                    embed.set_footer(text=f"ID: {member.id}")
-                    
-                    await self.log_action(None, None, embed=embed)
 
     async def process_voice_events(self):
         """Processa eventos de voz em lotes para melhor eficiência"""
