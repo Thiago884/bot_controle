@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import logging
 from main import bot, allowed_roles_only
 import asyncio
+from utils import generate_activity_report
 
 logger = logging.getLogger('inactivity_bot')
 
@@ -679,13 +680,14 @@ async def show_config(interaction: discord.Interaction):
         )
         await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="check_user", description="Verifica a atividade de um usuário")
+@bot.tree.command(name="user_activity", description="Verifica as estatísticas de atividade de um usuário")
 @allowed_roles_only()
-async def check_user(interaction: discord.Interaction, member: discord.Member):
-    """Verifica as estatísticas de atividade de um usuário específico"""
+async def user_activity(interaction: discord.Interaction, member: discord.Member):
+    """Verifica as estatísticas completas de atividade de um usuário"""
     try:
-        logger.info(f"Comando check_user acionado por {interaction.user} para o membro {member.name}")
+        await interaction.response.defer(thinking=True)
         
+        # Coletar dados básicos
         user_data = await bot.db.get_user_activity(member.id, member.guild.id)
         last_join = user_data.get('last_voice_join')
         sessions = user_data.get('voice_sessions', 0)
@@ -693,186 +695,148 @@ async def check_user(interaction: discord.Interaction, member: discord.Member):
         last_warning = await bot.db.get_last_warning(member.id, member.guild.id)
         last_check = await bot.db.get_last_period_check(member.id, member.guild.id)
         
-        embed = discord.Embed(
-            title=f"📊 Atividade de {member.display_name}",
-            color=discord.Color.green(),
-            timestamp=datetime.now(bot.timezone)
-        )
-
-        embed.set_thumbnail(url=member.display_avatar.url)
-
-        embed.add_field(name="Último Join na Call", value=last_join or "N/A", inline=False)
-        embed.add_field(name="Sessões em Call", value=str(sessions), inline=True)
-        embed.add_field(name="Tempo Total em Call", value=f"{total_time} minutos", inline=True)
-        embed.add_field(name="Último Aviso", value=last_warning or "Nenhum", inline=False)
-        embed.add_field(name="Última Verificação", value=last_check or "Nenhuma", inline=False)
-
-        await interaction.response.send_message(embed=embed)
-
-    except Exception as e:
-        logger.error(f"Erro ao executar check_user: {e}")
-        await interaction.response.send_message(
-            "❌ Ocorreu um erro ao verificar a atividade do usuário.", ephemeral=True)
-
-@bot.tree.command(name="check_user_history", description="Relatório completo de atividade do usuário")
-@app_commands.checks.cooldown(1, 300.0, key=lambda i: (i.guild_id, i.user.id))  # 5 minutos de cooldown
-@allowed_roles_only()
-async def check_user_history(interaction: discord.Interaction, member: discord.Member):
-    """Gera um relatório completo da atividade de um usuário"""
-    try:
-        await interaction.response.defer(thinking=True)
-        
-        # Verificar se o bot está rate limited
-        if bot.rate_limited:
-            await interaction.followup.send(
-                "⚠️ O bot está temporariamente limitado pelo Discord. Por favor, tente novamente mais tarde.")
-            return
-            
-        # Adicionar delays maiores entre as etapas
-        await asyncio.sleep(5)  # Aumentado para 5 segundos
-        
-        # Reduzir o período de consulta de 30 para 14 dias para diminuir a carga
+        # Coletar dados históricos (últimos 14 dias)
         end_date = datetime.now(bot.timezone)
         start_date = end_date - timedelta(days=14)
+        voice_sessions = await bot.db.get_voice_sessions(member.id, member.guild.id, start_date, end_date)
         
-        try:
-            # Coletar dados com delays entre consultas
-            user_data = await bot.db.get_user_activity(member.id, member.guild.id)
-            await asyncio.sleep(2)  # Aumentado para 2 segundos
+        # Calcular dias ativos
+        active_days = set()
+        for session in voice_sessions:
+            day = session['join_time'].replace(tzinfo=bot.timezone).date()
+            active_days.add(day)
+        
+        # Criar embed principal
+        embed = discord.Embed(
+            title=f"📊 Atividade de {member.display_name}",
+            color=discord.Color.blue(),
+            timestamp=datetime.now(bot.timezone)
+        )
+        
+        embed.set_thumbnail(url=member.display_avatar.url)
+        
+        # Seção de estatísticas básicas
+        embed.add_field(
+            name="📈 Estatísticas Gerais",
+            value=(
+                f"**Sessões em Call:** {sessions}\n"
+                f"**Tempo Total:** {total_time} minutos\n"
+                f"**Dias Ativos (14 dias):** {len(active_days)}\n"
+                f"**Último Join:** {last_join.strftime('%d/%m/%Y %H:%M') if last_join else 'N/A'}"
+            ),
+            inline=True
+        )
+        
+        # Seção de verificações
+        if last_check:
+            period_start = last_check['period_start'].replace(tzinfo=bot.timezone)
+            period_end = last_check['period_end'].replace(tzinfo=bot.timezone)
+            days_remaining = (period_end - datetime.now(bot.timezone)).days
             
-            voice_sessions = await bot.db.get_voice_sessions(member.id, member.guild.id, start_date, end_date)
-            await asyncio.sleep(2)  # Aumentado para 2 segundos
-            
-            # Coletar apenas os dados essenciais com mais delays
-            async with bot.db.pool.acquire() as conn:
-                async with conn.cursor() as cursor:
-                    await cursor.execute('''
-                        SELECT warning_type, warning_date 
-                        FROM user_warnings 
-                        WHERE user_id = %s AND guild_id = %s
-                        ORDER BY warning_date DESC
-                        LIMIT 3
-                    ''', (member.id, member.guild.id))
-                    all_warnings = await cursor.fetchall()
-                    
-                    await asyncio.sleep(1)  # Aumentado para 1 segundo
-                    
-                    await cursor.execute('''
-                        SELECT role_id, removal_date 
-                        FROM removed_roles 
-                        WHERE user_id = %s AND guild_id = %s
-                        ORDER BY removal_date DESC
-                        LIMIT 3
-                    ''', (member.id, member.guild.id))
-                    removed_roles = await cursor.fetchall()
-                    
-                    await asyncio.sleep(1)  # Aumentado para 1 segundo
-                    
-                    await cursor.execute('''
-                        SELECT period_start, period_end, meets_requirements
-                        FROM checked_periods
-                        WHERE user_id = %s AND guild_id = %s
-                        ORDER BY period_start DESC
-                        LIMIT 1
-                    ''', (member.id, member.guild.id))
-                    period_checks = await cursor.fetchone()
-            
-            # Criar embed simplificado
-            embed = discord.Embed(
-                title=f"📊 Relatório de Atividade - {member.display_name}",
-                color=discord.Color.blue(),
-                description=f"Período: {start_date.strftime('%d/%m/%Y')} a {end_date.strftime('%d/%m/%Y')}"
-            )
-            
-            embed.set_thumbnail(url=member.display_avatar.url)
-            
-            # Adicionar campos básicos
-            total_time = sum(s['duration'] for s in voice_sessions) / 60  # em minutos
             embed.add_field(
-                name="📈 Estatísticas",
-                value=f"• Sessões: {len(voice_sessions)}\n• Tempo total: {int(total_time)} minutos",
+                name="🔄 Status Atual",
+                value=(
+                    f"**Período:** {period_start.strftime('%d/%m/%Y')} a {period_end.strftime('%d/%m/%Y')}\n"
+                    f"**Dias Restantes:** {days_remaining}\n"
+                    f"**Status:** {'✅ Cumprindo' if last_check['meets_requirements'] else '⚠️ Não cumprindo'}"
+                ),
                 inline=True
             )
-            
-            if period_checks:
-                period_start = period_checks['period_start'].replace(tzinfo=bot.timezone)
-                period_end = period_checks['period_end'].replace(tzinfo=bot.timezone)
-                days_remaining = (period_end - datetime.now(bot.timezone)).days
-                
-                embed.add_field(
-                    name="🔄 Status Atual",
-                    value=(
-                        f"• Período: {period_start.strftime('%d/%m/%Y')} a {period_end.strftime('%d/%m/%Y')}\n"
-                        f"• Dias restantes: {days_remaining}\n"
-                        f"• Status: {'✅ Cumprindo' if period_checks['meets_requirements'] else '⚠️ Não cumprindo'}"
-                    ),
-                    inline=True
-                )
-            
-            # Adicionar avisos se houver
-            if all_warnings:
-                warnings_str = "\n".join(
-                    f"• {w['warning_type']} - {w['warning_date'].strftime('%d/%m/%Y')}"
-                    for w in all_warnings
-                )
-                embed.add_field(name="⚠️ Avisos", value=warnings_str, inline=False)
-            
-            # Adicionar cargos removidos se houver
-            if removed_roles:
-                roles_str = "\n".join(
-                    f"• <@&{r['role_id']}> - {r['removal_date'].strftime('%d/%m/%Y')}"
-                    for r in removed_roles
-                )
-                embed.add_field(name="🔴 Cargos Removidos", value=roles_str, inline=False)
-            
-            # Enviar apenas o embed sem o gráfico
-            await interaction.followup.send(embed=embed)
-                    
-        except Exception as e:
-            logger.error(f"Erro ao gerar relatório: {e}")
-            await interaction.followup.send(
-                "❌ Ocorreu um erro ao gerar o relatório completo. Por favor, tente novamente mais tarde.")
-            
+        
+        # Seção de avisos
+        if last_warning:
+            embed.add_field(
+                name="⚠️ Último Aviso",
+                value=f"{last_warning[0].capitalize()} - {last_warning[1].strftime('%d/%m/%Y %H:%M')}",
+                inline=False
+            )
+        
+        # Se houver sessões recentes, adicionar gráfico
+        if voice_sessions:
+            try:
+                report_file = await generate_activity_report(member, voice_sessions)
+                if report_file:
+                    await interaction.followup.send(embed=embed, file=report_file)
+                    return
+            except Exception as e:
+                logger.error(f"Erro ao gerar gráfico: {e}")
+        
+        await interaction.followup.send(embed=embed)
+        
     except Exception as e:
-        logger.error(f"Erro no comando check_user_history: {e}")
-        try:
-            await interaction.followup.send(
-                "❌ Ocorreu um erro ao processar sua requisição.")
-        except:
-            pass
+        logger.error(f"Erro ao verificar atividade do usuário: {e}")
+        await interaction.followup.send(
+            "❌ Ocorreu um erro ao verificar a atividade do usuário.", ephemeral=True)
 
-@check_user_history.error
-async def check_user_history_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    """Trata erros específicos do comando check_user_history"""
-    if isinstance(error, app_commands.CommandOnCooldown):
-        remaining = int(error.retry_after)
-        hours, remainder = divmod(remaining, 3600)
-        minutes, seconds = divmod(remainder, 60)
-        
-        time_str = ""
-        if hours > 0:
-            time_str += f"{hours}h "
-        if minutes > 0:
-            time_str += f"{minutes}m "
-        time_str += f"{seconds}s"
-        
-        try:
+@bot.tree.command(name="activity_ranking", description="Mostra o ranking dos usuários mais ativos")
+@app_commands.describe(
+    days="Período em dias para análise (3-30)",
+    limit="Número de usuários para mostrar (3-10)"
+)
+@allowed_roles_only()
+async def activity_ranking(interaction: discord.Interaction, days: int = 7, limit: int = 5):
+    """Mostra os usuários mais ativos no servidor"""
+    try:
+        # Validar parâmetros
+        if days < 3 or days > 30:
             await interaction.response.send_message(
-                f"⏳ Este comando está em cooldown. Tente novamente em {time_str}.",
-                ephemeral=True
-            )
-        except:
-            pass
+                "⚠️ O período deve ser entre 3 e 30 dias.", ephemeral=True)
+            return
             
-    elif isinstance(error, Exception):
-        logger.error(f"Erro não tratado em check_user_history: {error}")
-        try:
+        if limit < 3 or limit > 10:
             await interaction.response.send_message(
-                "❌ Ocorreu um erro inesperado. Por favor, tente novamente mais tarde.",
-                ephemeral=True
-            )
-        except:
-            pass
+                "⚠️ O limite deve ser entre 3 e 10 usuários.", ephemeral=True)
+            return
+            
+        await interaction.response.defer(thinking=True)
+        
+        end_date = datetime.now(bot.timezone)
+        start_date = end_date - timedelta(days=days)
+        
+        # Obter ranking do banco de dados
+        async with bot.db.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute('''
+                    SELECT user_id, SUM(duration) as total_time, COUNT(DISTINCT DATE(join_time)) as active_days
+                    FROM voice_sessions
+                    WHERE guild_id = %s AND join_time >= %s AND leave_time <= %s
+                    GROUP BY user_id
+                    ORDER BY total_time DESC
+                    LIMIT %s
+                ''', (interaction.guild.id, start_date, end_date, limit))
+                
+                results = await cursor.fetchall()
+        
+        # Processar resultados
+        ranking = []
+        for idx, row in enumerate(results, 1):
+            member = interaction.guild.get_member(row['user_id'])
+            if member:
+                hours = row['total_time'] / 3600
+                ranking.append(
+                    f"**{idx}.** {member.mention} - "
+                    f"{hours:.1f} horas em {row['active_days']} dias"
+                )
+        
+        if not ranking:
+            await interaction.followup.send(
+                "ℹ️ Nenhum dado de atividade encontrado para o período selecionado.")
+            return
+        
+        embed = discord.Embed(
+            title=f"🏆 Ranking de Atividade (últimos {days} dias)",
+            description="\n".join(ranking),
+            color=discord.Color.gold(),
+            timestamp=datetime.now(bot.timezone))
+        
+        embed.set_footer(text=f"Top {limit} usuários mais ativos")
+        
+        await interaction.followup.send(embed=embed)
+        
+    except Exception as e:
+        logger.error(f"Erro ao gerar ranking de atividade: {e}")
+        await interaction.followup.send(
+            "❌ Ocorreu um erro ao gerar o ranking de atividade.", ephemeral=True)
 
 @bot.tree.command(name="force_check", description="Força uma verificação imediata de inatividade para um usuário")
 @app_commands.checks.cooldown(1, 30.0, key=lambda i: (i.guild_id, i.user.id))  # 30 segundos de cooldown
@@ -882,9 +846,6 @@ async def force_check(interaction: discord.Interaction, member: discord.Member):
     """Força uma verificação imediata de inatividade para um usuário específico"""
     try:
         await interaction.response.defer(thinking=True)
-        
-        # Adicionar um pequeno delay antes de processar para evitar rate limits
-        await asyncio.sleep(1)
         
         from tasks import _execute_force_check
         result = await _execute_force_check(member)
@@ -898,8 +859,7 @@ async def force_check(interaction: discord.Interaction, member: discord.Member):
                 f"Sessões no período: {result['sessions_count']}"
             )
         
-        # Usar o sistema de filas do bot para enviar a resposta
-        await bot.high_priority_queue.put((interaction, message, None, None, "high"))
+        await interaction.followup.send(message)
         
         await bot.log_action(
             "Verificação Forçada",
@@ -909,12 +869,8 @@ async def force_check(interaction: discord.Interaction, member: discord.Member):
         )
     except Exception as e:
         logger.error(f"Erro ao forçar verificação: {e}")
-        try:
-            await interaction.followup.send(
-                "❌ Ocorreu um erro ao forçar a verificação. Por favor, tente novamente.")
-        except discord.errors.HTTPException as e:
-            if e.status == 429:
-                logger.error("Rate limit ao tentar enviar mensagem de erro")
+        await interaction.followup.send(
+            "❌ Ocorreu um erro ao forçar a verificação. Por favor, tente novamente.")
 
 @force_check.error
 async def force_check_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
@@ -955,120 +911,3 @@ async def cleanup_data(interaction: discord.Interaction, days: int = 60):
         logger.error(f"Erro ao limpar dados antigos: {e}")
         await interaction.followup.send(
             "❌ Ocorreu um erro ao limpar os dados. Por favor, tente novamente.")
-
-@bot.tree.command(name="voice_debug", description="Mostra informações de diagnóstico de voz")
-@allowed_roles_only()
-async def voice_debug(interaction: discord.Interaction):
-    """Comando para diagnóstico do sistema de voz"""
-    try:
-        await interaction.response.defer(thinking=True)
-        guild = interaction.guild
-        
-        # Coletar dados de voz com tratamento de exceções
-        voice_data = []
-        for voice_channel in guild.voice_channels:
-            try:
-                if not voice_channel.members:
-                    continue
-                    
-                for member in voice_channel.members:
-                    try:
-                        voice_state = member.voice
-                        if not voice_state:
-                            continue
-                            
-                        voice_data.append({
-                            'user': f"{member.display_name} ({member.id})",
-                            'channel': f"{voice_channel.name} ({voice_channel.id})",
-                            'deaf': voice_state.deaf or voice_state.self_deaf,
-                            'mute': voice_state.mute or voice_state.self_mute,
-                            'streaming': voice_state.self_stream or voice_state.self_video,
-                            'since': voice_state.joined_at.replace(tzinfo=bot.timezone) if voice_state.joined_at else None,
-                            'duration': (datetime.now(bot.timezone) - voice_state.joined_at.replace(tzinfo=bot.timezone)).total_seconds() / 60 if voice_state.joined_at else 0
-                        })
-                    except Exception as member_error:
-                        logger.error(f"Erro ao processar membro {member.id}: {member_error}")
-                        continue
-            except Exception as channel_error:
-                logger.error(f"Erro ao processar canal {voice_channel.id}: {channel_error}")
-                continue
-        
-        # Criar embed com os dados coletados
-        embed = discord.Embed(
-            title="🔊 Diagnóstico de Voz - Detalhado",
-            description=f"**{len(voice_data)}** membros em canais de voz",
-            color=discord.Color.blue(),
-            timestamp=datetime.now(bot.timezone))
-        
-        if voice_data:
-            # Ordenar por maior tempo em chamada
-            voice_data.sort(key=lambda x: x['duration'], reverse=True)
-            
-            # Adicionar estatísticas gerais
-            total_time = sum(v['duration'] for v in voice_data)
-            avg_time = total_time / len(voice_data) if voice_data else 0
-            deaf_count = sum(1 for v in voice_data if v['deaf'])
-            mute_count = sum(1 for v in voice_data if v['mute'])
-            
-            embed.add_field(
-                name="📊 Estatísticas Gerais",
-                value=(
-                    f"• Tempo total em chamada: {total_time:.1f} minutos\n"
-                    f"• Tempo médio: {avg_time:.1f} minutos\n"
-                    f"• Membros silenciados: {deaf_count}\n"
-                    f"• Membros mutados: {mute_count}\n"
-                    f"• Membros transmitindo: {sum(1 for v in voice_data if v['streaming'])}"
-                ),
-                inline=False
-            )
-            
-            # Adicionar detalhes dos membros (limitado a 5 para evitar sobrecarga)
-            for i, vm in enumerate(voice_data[:5]):
-                status_icons = []
-                if vm['deaf']: status_icons.append("🔇")
-                if vm['mute']: status_icons.append("🤐")
-                if vm['streaming']: status_icons.append("🎥")
-                if not status_icons: status_icons.append("🔊")
-                
-                embed.add_field(
-                    name=f"{i+1}. {vm['user']}",
-                    value=(
-                        f"Canal: {vm['channel']}\n"
-                        f"Estado: {' '.join(status_icons)}\n"
-                        f"Tempo: {vm['duration']:.1f} minutos\n"
-                        f"Desde: {vm['since'].strftime('%d/%m %H:%M') if vm['since'] else 'N/A'}"
-                    ),
-                    inline=False
-                )
-            
-            if len(voice_data) > 5:
-                embed.set_footer(text=f"Mostrando 5 de {len(voice_data)} membros | Use /check_user para detalhes individuais")
-        else:
-            embed.add_field(
-                name="ℹ️ Nenhuma atividade",
-                value="Não há membros em canais de voz no momento",
-                inline=False
-            )
-        
-        # Adicionar informações do sistema (removida a região)
-        embed.add_field(
-            name="⚙️ Sistema",
-            value=(
-                f"AFK Channel: {guild.afk_channel.name if guild.afk_channel else 'Nenhum'}\n"
-                f"AFK Timeout: {guild.afk_timeout} segundos"
-            ),
-            inline=False
-        )
-        
-        await interaction.followup.send(embed=embed)
-        logger.info(f"Diagnóstico de voz gerado para {guild.name} por {interaction.user}")
-        
-    except Exception as e:
-        logger.error(f"Erro no comando voice_debug: {e}", exc_info=True)
-        try:
-            await interaction.followup.send(
-                "❌ Ocorreu um erro ao verificar os canais de voz. Verifique os logs para detalhes.",
-                ephemeral=True
-            )
-        except Exception as followup_error:
-            logger.error(f"Erro ao enviar mensagem de erro: {followup_error}")
