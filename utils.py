@@ -2,7 +2,7 @@
 import matplotlib.pyplot as plt
 from io import BytesIO
 import discord
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 import logging
 import asyncio
 import time
