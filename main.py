@@ -78,9 +78,8 @@ DEFAULT_CONFIG = {
             "first": "⚠️ **Aviso de Inatividade** ⚠️\nVocê está prestes a perder seus cargos por inatividade. Entre em um canal de voz por pelo menos 15 minutos em 2 dias diferentes nos próximos {days} dias para evitar isso.",
             "second": "🔴 **Último Aviso** 🔴\nVocê perderá seus cargos AMANHÃ por inatividade se não cumprir os requisitos de atividade em voz.",
             "final": "❌ **Cargos Removidos** ❌\nVocê perdeu seus cargos no servidor {guild} por inatividade. Você não cumpriu os requisitos de atividade de voz (15 minutos em 2 dias diferentes dentro de {monitoring_period} dias)."
-        }
     }
-}
+}}
 
 class PriorityQueue:
     def __init__(self):
@@ -449,8 +448,12 @@ class InactivityBot(commands.Bot):
                     else:
                         logger.warning(f"Item da fila em formato desconhecido: {item}")
                 else:
-                    logger.warning(f"Item da fila não é uma tupla: {type(item)}")
-                    
+                    # Se não for uma tupla, verificar se é um objeto de mensagem válido
+                    if isinstance(item, (discord.TextChannel, discord.User, discord.Member)):
+                        await self.safe_send(item)
+                    else:
+                        logger.warning(f"Item da fila não é um destino válido: {type(item)}")
+                        
                 self.message_queue.task_done(priority)
                     
             except Exception as e:
@@ -580,7 +583,11 @@ class InactivityBot(commands.Bot):
                     ))
                 except Exception as e:
                     logger.error(f"Erro ao registrar entrada em voz: {e}")
-                    await self.log_action("Erro DB - Entrada em voz", member, str(e))
+                    await self.log_action(
+                        "Erro DB - Entrada em voz",
+                        member,
+                        str(e)
+                    )
             
             elif before.channel is not None and after.channel is None:
                 session_data = self.active_sessions.get(audio_key)
@@ -599,7 +606,11 @@ class InactivityBot(commands.Bot):
                             await self.db.log_voice_leave(member.id, member.guild.id, int(effective_time))
                         except Exception as e:
                             logger.error(f"Erro ao registrar saída de voz: {e}")
-                            await self.log_action("Erro DB - Saída de voz", member, str(e))
+                            await self.log_action(
+                                "Erro DB - Saída de voz",
+                                member,
+                                str(e)
+                            )
                     
                     # Log detalhado
                     embed = discord.Embed(
