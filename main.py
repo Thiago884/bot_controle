@@ -127,15 +127,15 @@ class InactivityBot(commands.Bot):
         self.timezone = pytz.timezone('America/Sao_Paulo')
         self.db = None
         self.active_sessions = {}
-        self.voice_event_queue = asyncio.Queue(maxsize=500)  # Reduzido de 1000 para 500
+        self.voice_event_queue = asyncio.Queue(maxsize=500)
         self.message_queue = PriorityQueue()
         self.voice_event_processor_task = None
         self.queue_processor_task = None
         self.command_processor_task = None
         self.rate_limited = False
         self.last_rate_limit = None
-        self.rate_limit_delay = 2.0  # Aumentado de 1.0 para 2.0 segundos
-        self.max_rate_limit_delay = 10.0  # Aumentado de 5.0 para 10.0 segundos
+        self.rate_limit_delay = 2.0
+        self.max_rate_limit_delay = 10.0
         self.rate_limit_retry_after = 1.0
         self.last_rate_limit_time = None
         self.rate_limit_count = 0
@@ -433,12 +433,20 @@ class InactivityBot(commands.Bot):
                     
                 # Verificar o tipo de item
                 if isinstance(item, tuple):
-                    if len(item) == 4:  # Formato completo (channel, content, embed, file)
-                        channel, content, embed, file = item
-                        await self.safe_send(channel, content, embed, file)
-                    elif len(item) == 2:  # Formato simplificado (channel, embed)
-                        channel, embed = item
-                        await self.safe_send(channel, embed=embed)
+                    # Formato: (destination, content, embed, file)
+                    if len(item) == 4:
+                        destination, content, embed, file = item
+                        if isinstance(destination, (discord.TextChannel, discord.User, discord.Member)):
+                            await self.safe_send(destination, content, embed, file)
+                        else:
+                            logger.warning(f"Destino inválido para mensagem: {type(destination)}")
+                    # Formato simplificado: (destination, embed)
+                    elif len(item) == 2:
+                        destination, embed = item
+                        if isinstance(destination, (discord.TextChannel, discord.User, discord.Member)):
+                            await self.safe_send(destination, embed=embed)
+                        else:
+                            logger.warning(f"Destino inválido para mensagem: {type(destination)}")
                     else:
                         logger.warning(f"Item da fila em formato desconhecido: {item}")
                 else:
@@ -699,7 +707,7 @@ class InactivityBot(commands.Bot):
                 for _ in batch:
                     self.voice_event_queue.task_done()
                     
-                await asyncio.sleep(0.5)  # Aumentado de 0.1 para 0.5 segundos
+                await asyncio.sleep(0.5)
                 
             except Exception as e:
                 logger.error(f"Erro no processador de eventos de voz: {e}")
@@ -714,59 +722,55 @@ class InactivityBot(commands.Bot):
                     await asyncio.sleep(0.1)
                     continue
                     
-                # Verificar se o item tem o formato esperado
-                if len(item) == 2:  # Formato mais simples (channel, embed)
-                    channel, embed = item
-                    await self.safe_send(channel, embed=embed)
-                    self.message_queue.task_done(priority)
-                    continue
+                # Verificar se é um comando ou uma mensagem
+                if isinstance(item, tuple) and len(item) == 4:
+                    interaction, command, args, kwargs = item
                     
-                # Formato completo de comando
-                interaction, command, args, kwargs = item
-                
-                if self.rate_limited:
-                    now = datetime.now()
-                    if self.last_rate_limit and (now - self.last_rate_limit).seconds < 60:
+                    if self.rate_limited:
+                        now = datetime.now()
+                        if self.last_rate_limit and (now - self.last_rate_limit).seconds < 60:
+                            try:
+                                await interaction.followup.send(
+                                    "⚠️ O bot está sendo limitado pelo Discord. Por favor, tente novamente mais tarde.")
+                            except Exception as e:
+                                logger.error(f"Erro ao enviar mensagem de rate limit: {e}")
+                            self.message_queue.task_done(priority)
+                            continue
+                        else:
+                            self.rate_limited = False
+                    
+                    await asyncio.sleep(self.rate_limit_delay)
+                    
+                    try:
+                        await command(interaction, *args, **kwargs)
+                        self.rate_limit_delay = max(self.rate_limit_delay * 0.9, 0.5)
+                        
+                    except discord.errors.HTTPException as e:
+                        if e.status == 429:
+                            self.rate_limited = True
+                            self.last_rate_limit = datetime.now()
+                            retry_after = float(e.response.headers.get('Retry-After', 60))
+                            logger.error(f"Rate limit atingido. Tentar novamente após {retry_after} segundos")
+                            
+                            self.rate_limit_delay = min(self.rate_limit_delay * 2, self.max_rate_limit_delay)
+                            
+                            await asyncio.sleep(retry_after)
+                            self.rate_limited = False
+                            
+                            await asyncio.sleep(self.rate_limit_delay)
+                            await self.message_queue.put(item, priority)
+                        else:
+                            raise
+                    except Exception as e:
+                        logger.error(f"Erro ao executar comando: {e}")
                         try:
                             await interaction.followup.send(
-                                "⚠️ O bot está sendo limitado pelo Discord. Por favor, tente novamente mais tarde.")
+                                "❌ Ocorreu um erro ao processar o comando.")
                         except Exception as e:
-                            logger.error(f"Erro ao enviar mensagem de rate limit: {e}")
-                        self.message_queue.task_done(priority)
-                        continue
-                    else:
-                        self.rate_limited = False
-                
-                await asyncio.sleep(self.rate_limit_delay)
-                
-                try:
-                    await command(interaction, *args, **kwargs)
-                    self.rate_limit_delay = max(self.rate_limit_delay * 0.9, 0.5)
+                            logger.error(f"Erro ao enviar mensagem de erro: {e}")
+                else:
+                    logger.warning(f"Item de comando em formato inválido: {item}")
                     
-                except discord.errors.HTTPException as e:
-                    if e.status == 429:
-                        self.rate_limited = True
-                        self.last_rate_limit = datetime.now()
-                        retry_after = float(e.response.headers.get('Retry-After', 60))
-                        logger.error(f"Rate limit atingido. Tentar novamente após {retry_after} segundos")
-                        
-                        self.rate_limit_delay = min(self.rate_limit_delay * 2, self.max_rate_limit_delay)
-                        
-                        await asyncio.sleep(retry_after)
-                        self.rate_limited = False
-                        
-                        await asyncio.sleep(self.rate_limit_delay)
-                        await self.message_queue.put(item, priority)
-                    else:
-                        raise
-                except Exception as e:
-                    logger.error(f"Erro ao executar comando: {e}")
-                    try:
-                        await interaction.followup.send(
-                            "❌ Ocorreu um erro ao processar o comando.")
-                    except Exception as e:
-                        logger.error(f"Erro ao enviar mensagem de erro: {e}")
-                
                 self.message_queue.task_done(priority)
                 
             except Exception as e:
@@ -784,7 +788,7 @@ class InactivityBot(commands.Bot):
             # Se um embed foi fornecido, usá-lo diretamente
             if embed is not None:
                 await self.message_queue.put((
-                    (channel, None, embed, file),  # Usando o formato de 4 elementos
+                    (channel, None, embed, file),
                     "high"
                 ))
                 return
@@ -863,7 +867,7 @@ class InactivityBot(commands.Bot):
                 priority = "normal"
             
             await self.message_queue.put((
-                (channel, None, embed, None),  # Usando o formato de 4 elementos
+                (channel, None, embed, None),
                 priority
             ))
             
@@ -882,7 +886,7 @@ class InactivityBot(commands.Bot):
             
             # Adicionar à fila de baixa prioridade para evitar rate limits
             await self.message_queue.put((
-                (member, None, embed, None),  # Usando o formato de 4 elementos
+                (member, None, embed, None),
                 "low"
             ))
         except Exception as e:
