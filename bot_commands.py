@@ -955,3 +955,122 @@ async def cleanup_data(interaction: discord.Interaction, days: int = 60):
         logger.error(f"Erro ao limpar dados antigos: {e}")
         await interaction.followup.send(
             "❌ Ocorreu um erro ao limpar os dados. Por favor, tente novamente.")
+
+@bot.tree.command(name="voice_debug", description="Mostra informações de diagnóstico de voz")
+@allowed_roles_only()
+async def voice_debug(interaction: discord.Interaction):
+    """Comando para diagnóstico do sistema de voz"""
+    try:
+        await interaction.response.defer(thinking=True)
+        guild = interaction.guild
+        
+        # Coletar dados de voz com tratamento de exceções
+        voice_data = []
+        for voice_channel in guild.voice_channels:
+            try:
+                if not voice_channel.members:
+                    continue
+                    
+                for member in voice_channel.members:
+                    try:
+                        voice_state = member.voice
+                        if not voice_state:
+                            continue
+                            
+                        voice_data.append({
+                            'user': f"{member.display_name} ({member.id})",
+                            'channel': f"{voice_channel.name} ({voice_channel.id})",
+                            'deaf': voice_state.deaf or voice_state.self_deaf,
+                            'mute': voice_state.mute or voice_state.self_mute,
+                            'streaming': voice_state.self_stream or voice_state.self_video,
+                            'since': voice_state.joined_at.replace(tzinfo=bot.timezone) if voice_state.joined_at else None,
+                            'duration': (datetime.now(bot.timezone) - voice_state.joined_at.replace(tzinfo=bot.timezone)).total_seconds() / 60 if voice_state.joined_at else 0
+                        })
+                    except Exception as member_error:
+                        logger.error(f"Erro ao processar membro {member.id}: {member_error}")
+                        continue
+            except Exception as channel_error:
+                logger.error(f"Erro ao processar canal {voice_channel.id}: {channel_error}")
+                continue
+        
+        # Criar embed com os dados coletados
+        embed = discord.Embed(
+            title="🔊 Diagnóstico de Voz - Detalhado",
+            description=f"**{len(voice_data)}** membros em canais de voz",
+            color=discord.Color.blue(),
+            timestamp=datetime.now(bot.timezone)
+        )
+        
+        if voice_data:
+            # Ordenar por maior tempo em chamada
+            voice_data.sort(key=lambda x: x['duration'], reverse=True)
+            
+            # Adicionar estatísticas gerais
+            total_time = sum(v['duration'] for v in voice_data)
+            avg_time = total_time / len(voice_data) if voice_data else 0
+            deaf_count = sum(1 for v in voice_data if v['deaf'])
+            mute_count = sum(1 for v in voice_data if v['mute'])
+            
+            embed.add_field(
+                name="📊 Estatísticas Gerais",
+                value=(
+                    f"• Tempo total em chamada: {total_time:.1f} minutos\n"
+                    f"• Tempo médio: {avg_time:.1f} minutos\n"
+                    f"• Membros silenciados: {deaf_count}\n"
+                    f"• Membros mutados: {mute_count}\n"
+                    f"• Membros transmitindo: {sum(1 for v in voice_data if v['streaming'])}"
+                ),
+                inline=False
+            )
+            
+            # Adicionar detalhes dos membros (limitado a 5 para evitar sobrecarga)
+            for i, vm in enumerate(voice_data[:5]):
+                status_icons = []
+                if vm['deaf']: status_icons.append("🔇")
+                if vm['mute']: status_icons.append("🤐")
+                if vm['streaming']: status_icons.append("🎥")
+                if not status_icons: status_icons.append("🔊")
+                
+                embed.add_field(
+                    name=f"{i+1}. {vm['user']}",
+                    value=(
+                        f"Canal: {vm['channel']}\n"
+                        f"Estado: {' '.join(status_icons)}\n"
+                        f"Tempo: {vm['duration']:.1f} minutos\n"
+                        f"Desde: {vm['since'].strftime('%d/%m %H:%M') if vm['since'] else 'N/A'}"
+                    ),
+                    inline=False
+                )
+            
+            if len(voice_data) > 5:
+                embed.set_footer(text=f"Mostrando 5 de {len(voice_data)} membros | Use /check_user para detalhes individuais")
+        else:
+            embed.add_field(
+                name="ℹ️ Nenhuma atividade",
+                value="Não há membros em canais de voz no momento",
+                inline=False
+            )
+        
+        # Adicionar informações do sistema
+        embed.add_field(
+            name="⚙️ Sistema",
+            value=(
+                f"Região: {guild.region}\n"
+                f"AFK Channel: {guild.afk_channel.name if guild.afk_channel else 'Nenhum'}\n"
+                f"AFK Timeout: {guild.afk_timeout} segundos"
+            ),
+            inline=False
+        )
+        
+        await interaction.followup.send(embed=embed)
+        logger.info(f"Diagnóstico de voz gerado para {guild.name} por {interaction.user}")
+        
+    except Exception as e:
+        logger.error(f"Erro no comando voice_debug: {e}", exc_info=True)
+        try:
+            await interaction.followup.send(
+                "❌ Ocorreu um erro ao verificar os canais de voz. Verifique os logs para detalhes.",
+                ephemeral=True
+            )
+        except Exception as followup_error:
+            logger.error(f"Erro ao enviar mensagem de erro: {followup_error}")
