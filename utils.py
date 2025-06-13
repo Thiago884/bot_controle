@@ -6,7 +6,7 @@ from typing import List, Dict, Optional
 import logging
 import asyncio
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 import numpy as np
 
 logger = logging.getLogger('inactivity_bot')
@@ -14,6 +14,30 @@ logger = logging.getLogger('inactivity_bot')
 # Configurações de rate limit para geração de gráficos
 GRAPH_GENERATION_LIMIT = 5  # Máximo de gráficos por minuto
 last_graph_times = []
+
+def calculate_most_active_days(sessions: List[Dict], days: int) -> List[Tuple[str, int, int]]:
+    """Calcula os dias mais ativos com tempo total e média por sessão"""
+    weekdays = ['Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado', 'Domingo']
+    day_stats = {day: {'total_min': 0, 'count': 0} for day in weekdays}
+    
+    for session in sessions:
+        join_time = session['join_time'].replace(tzinfo=None)
+        day_name = weekdays[join_time.weekday()]
+        duration_min = session['duration'] // 60
+        day_stats[day_name]['total_min'] += duration_min
+        day_stats[day_name]['count'] += 1
+    
+    # Calcular média por dia e filtrar dias com atividade
+    active_days = []
+    for day, stats in day_stats.items():
+        if stats['total_min'] > 0:
+            avg = stats['total_min'] / stats['count'] if stats['count'] > 0 else 0
+            active_days.append((day, stats['total_min'], int(avg)))
+    
+    # Ordenar por tempo total (decrescente)
+    active_days.sort(key=lambda x: x[1], reverse=True)
+    
+    return active_days
 
 async def generate_activity_graph(member: discord.Member, sessions: List[Dict]) -> Optional[BytesIO]:
     """Gera um gráfico de atividade do usuário e retorna como BytesIO com proteção contra rate limits"""
@@ -38,79 +62,76 @@ async def generate_activity_graph(member: discord.Member, sessions: List[Dict]) 
         # Registrar a tentativa de geração
         last_graph_times.append(current_time)
         
-        # Limitar a quantidade de dados processados para evitar sobrecarga
-        max_sessions = 100  # Número máximo de sessões a serem plotadas
-        if len(sessions) > max_sessions:
-            sessions = sessions[-max_sessions:]  # Pegar as sessões mais recentes
-            logger.info(f"Limitando gráfico às {max_sessions} sessões mais recentes para {member.display_name}")
+        # Limitar aos últimos 30 dias
+        cutoff_date = datetime.now() - timedelta(days=30)
+        sessions = [s for s in sessions if s['join_time'].replace(tzinfo=None) >= cutoff_date]
+        
+        if not sessions:
+            return None
 
         # Preparar dados para o gráfico
         dates = []
         durations = []
         for session in sessions:
-            join_time = session['join_time'].replace(tzinfo=None)  # Remover timezone para evitar problemas
+            join_time = session['join_time'].replace(tzinfo=None)
             dates.append(join_time)
             durations.append(session['duration'] / 60)  # Converter para minutos
 
-        # Agrupar por data
-        unique_dates = sorted(list({d.date() for d in dates}))
-        date_to_duration = {date: 0 for date in unique_dates}
+        # Agrupar por dia da semana
+        weekdays = ['Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado', 'Domingo']
+        weekday_durations = {day: 0 for day in weekdays}
         
-        for date, duration in zip([d.date() for d in dates], durations):
-            date_to_duration[date] += duration
+        for date, duration in zip(dates, durations):
+            weekday = date.weekday()
+            weekday_durations[weekdays[weekday]] += duration
 
-        # Configurar o gráfico com tamanho otimizado
+        # Configurar o gráfico
         plt.figure(figsize=(10, 5))
-        
-        # Usar estilo mais leve
         plt.style.use('seaborn-v0_8')
         
-        # Gerar o gráfico de barras
-        bars = plt.bar(unique_dates, [date_to_duration[d] for d in unique_dates], 
-                      color='skyblue', width=0.8)
+        # Ordenar os dias da semana corretamente
+        ordered_days = weekdays
+        ordered_values = [weekday_durations[day] for day in ordered_days]
         
-        # Adicionar valores nas barras (apenas se houver espaço)
+        # Gerar gráfico de barras
+        bars = plt.bar(ordered_days, ordered_values, color='#5865F2', width=0.7)
+        
+        # Adicionar valores nas barras
         for bar in bars:
             height = bar.get_height()
-            if height > 0 and height < max(date_to_duration.values()) * 0.8:  # Só coloca texto se não sobrepor
+            if height > 0:
                 plt.text(bar.get_x() + bar.get_width()/2., height,
-                        f'{int(height)}m',
-                        ha='center', va='bottom', fontsize=8)
+                        f'{int(height)} min',
+                        ha='center', va='bottom', fontsize=9)
 
-        # Adicionar linhas para marcar os dias da semana
-        for i, date in enumerate(unique_dates):
-            if date.weekday() == 4:  # Sexta-feira
-                plt.axvline(x=i, color='orange', linestyle='--', alpha=0.3, linewidth=1)
-            elif date.weekday() == 5:  # Sábado
-                plt.axvline(x=i, color='red', linestyle=':', alpha=0.3, linewidth=1)
-            elif date.weekday() == 6:  # Domingo
-                plt.axvline(x=i, color='red', linestyle='-.', alpha=0.3, linewidth=1)
+        # Destacar fins de semana
+        for i, day in enumerate(ordered_days):
+            if day in ['Sexta', 'Sábado', 'Domingo']:
+                bars[i].set_color('#ED4245')  # Cor diferente para fins de semana
 
         # Configurar título e labels
-        plt.title(f'Atividade de Voz - {member.display_name}\nPeríodo: {unique_dates[0].strftime("%d/%m/%Y")} a {unique_dates[-1].strftime("%d/%m/%Y")}', 
-                 fontsize=10, pad=10)
-        plt.xlabel('Data', fontsize=9)
-        plt.ylabel('Minutos em Voz', fontsize=9)
+        plt.title(f'Atividade de Voz - {member.display_name}\nÚltimos 30 dias', 
+                 fontsize=12, pad=12)
+        plt.xlabel('Dia da Semana', fontsize=10)
+        plt.ylabel('Minutos em Voz', fontsize=10)
         
-        # Rotacionar labels do eixo X para melhor legibilidade
-        plt.xticks(rotation=45, ha='right', fontsize=8)
-        plt.yticks(fontsize=8)
+        # Ajustar eixos
+        plt.xticks(fontsize=9)
+        plt.yticks(fontsize=9)
+        plt.ylim(0, max(ordered_values) * 1.2 if max(ordered_values) > 0 else 100)
         
-        # Adicionar legenda para os dias da semana
-        weekend_patch = plt.Line2D([0], [0], color='orange', linestyle='--', label='Sexta')
-        saturday_patch = plt.Line2D([0], [0], color='red', linestyle=':', label='Sábado')
-        sunday_patch = plt.Line2D([0], [0], color='red', linestyle='-.', label='Domingo')
-        plt.legend(handles=[weekend_patch, saturday_patch, sunday_patch], fontsize=8, loc='upper right')
+        # Adicionar grid
+        plt.grid(axis='y', alpha=0.4)
         
-        # Ajustar layout para evitar cortes
+        # Ajustar layout
         plt.tight_layout()
 
-        # Salvar em buffer com qualidade balanceada
+        # Salvar em buffer
         buffer = BytesIO()
         plt.savefig(buffer, format='png', dpi=100, bbox_inches='tight')
         buffer.seek(0)
         
-        # Fechar a figura para liberar memória
+        # Fechar a figura
         plt.close()
         
         return buffer
@@ -119,7 +140,6 @@ async def generate_activity_graph(member: discord.Member, sessions: List[Dict]) 
         logger.error(f"Erro ao gerar gráfico de atividade: {e}", exc_info=True)
         return None
     finally:
-        # Garantir que a figura seja fechada mesmo em caso de erro
         if 'plt' in locals():
             plt.close('all')
 

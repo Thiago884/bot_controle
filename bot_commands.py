@@ -6,7 +6,8 @@ from datetime import datetime, timedelta
 import logging
 from main import bot, allowed_roles_only
 import asyncio
-from utils import generate_activity_report
+from utils import generate_activity_report, calculate_most_active_days
+import numpy as np
 
 logger = logging.getLogger('inactivity_bot')
 
@@ -709,7 +710,7 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
         start_date = end_date - timedelta(days=days)
         voice_sessions = await bot.db.get_voice_sessions(member.id, member.guild.id, start_date, end_date)
         
-        # Calcular dias ativos
+        # Calcular dias ativos e mais ativos
         active_days = set()
         for session in voice_sessions:
             day = session['join_time'].replace(tzinfo=bot.timezone).date()
@@ -719,6 +720,17 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
         total_minutes = total_time / 60 if total_time else 0
         avg_session_duration = total_minutes / sessions if sessions else 0
         
+        # Calcular dias mais ativos dentro do período
+        most_active_days = calculate_most_active_days(voice_sessions, days)
+        
+        # Formatar a lista de dias mais ativos
+        active_days_text = "Nenhum dia com atividade significativa"
+        if most_active_days:
+            active_days_text = "\n".join(
+                f"• {day}: {total} min (⌀ {avg} min/sessão)" 
+                for day, total, avg in most_active_days[:3]  # Mostrar top 3 dias
+            )
+
         # Configurações de requisitos
         required_min = bot.config['required_minutes']
         required_days = bot.config['required_days']
@@ -737,11 +749,11 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
         embed.add_field(
             name="📈 Estatísticas Gerais",
             value=(
-                f"**Sessões em Call:** {sessions}\n"
-                f"**Tempo Total:** {total_minutes:.1f} minutos\n"
-                f"**Duração Média:** {avg_session_duration:.1f} minutos\n"
-                f"**Dias Ativos:** {len(active_days)}\n"
-                f"**Último Join:** {last_join.strftime('%d/%m/%Y %H:%M') if last_join else 'N/A'}"
+                f"**Sessões:** {len(voice_sessions)}\n"
+                f"**Tempo Total:** {int(total_minutes)} min\n"
+                f"**Duração Média:** {int(avg_session_duration)} min/sessão\n"
+                f"**Dias Mais Ativos:**\n{active_days_text}\n"
+                f"**Última Atividade:** {max(s['join_time'] for s in voice_sessions).strftime('%d/%m %H:%M') if voice_sessions else 'N/D'}"
             ),
             inline=True
         )
