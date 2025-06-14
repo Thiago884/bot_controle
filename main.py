@@ -269,6 +269,50 @@ class InactivityBot(commands.Bot):
                 return False
         return False
 
+    async def safe_send(self, channel, content=None, embed=None, file=None, retry_count=0):
+        if self.rate_limited:
+            if self.last_rate_limit_time and (datetime.now() - self.last_rate_limit_time).total_seconds() < 60:
+                logger.warning("Ignorando envio devido a rate limit recente")
+                return False
+            self.rate_limited = False
+
+        try:
+            if not await self.can_send_message():
+                await asyncio.sleep(self.rate_limit_delay)
+                return await self.safe_send(channel, content, embed, file, retry_count)
+
+            message = await channel.send(content=content, embed=embed, file=file)
+            
+            # Verificar se a mensagem tem o atributo _http antes de acessá-lo
+            if hasattr(message, '_http') and hasattr(message._http, 'response') and hasattr(message._http.response, 'headers'):
+                headers = message._http.response.headers
+                if 'X-RateLimit-Limit' in headers:
+                    bucket = 'messages' if 'messages' in str(message._http.route) else 'global'
+                    self.rate_limit_buckets[bucket].update({
+                        'limit': int(headers['X-RateLimit-Limit']),
+                        'remaining': int(headers['X-RateLimit-Remaining']),
+                        'reset_at': float(headers['X-RateLimit-Reset']),
+                        'last_update': time.time()
+                    })
+            
+            self.rate_limit_count = 0
+            return True
+        except discord.errors.HTTPException as e:
+            if e.status == 429:
+                await self._handle_rate_limit(e)
+                self.rate_limited = True
+                self.last_rate_limit_time = datetime.now()
+                retry_after = float(e.response.headers.get('Retry-After', 5))
+                
+                if retry_count < self.max_rate_limit_retries:
+                    logger.warning(f"Rate limit atingido. Tentando novamente em {retry_after} segundos (tentativa {retry_count + 1})")
+                    await asyncio.sleep(retry_after)
+                    return await self.safe_send(channel, content, embed, file, retry_count + 1)
+                
+                logger.error(f"Rate limit persistente após {self.max_rate_limit_retries} tentativas")
+                return False
+            raise
+
     async def setup_hook(self):
         if not self._setup_complete:
             self._setup_complete = True
@@ -488,48 +532,6 @@ class InactivityBot(commands.Bot):
             self._last_config_save = datetime.now()
         except Exception as e:
             logger.error(f"Erro ao salvar configuração: {e}")
-            raise
-
-    async def safe_send(self, channel, content=None, embed=None, file=None, retry_count=0):
-        if self.rate_limited:
-            if self.last_rate_limit_time and (datetime.now() - self.last_rate_limit_time).total_seconds() < 60:
-                logger.warning("Ignorando envio devido a rate limit recente")
-                return False
-            self.rate_limited = False
-
-        try:
-            if not await self.can_send_message():
-                await asyncio.sleep(self.rate_limit_delay)
-                return await self.safe_send(channel, content, embed, file, retry_count)
-
-            message = await channel.send(content=content, embed=embed, file=file)
-            
-            headers = message._http.response.headers
-            if 'X-RateLimit-Limit' in headers:
-                bucket = 'messages' if 'messages' in str(message._http.route) else 'global'
-                self.rate_limit_buckets[bucket].update({
-                    'limit': int(headers['X-RateLimit-Limit']),
-                    'remaining': int(headers['X-RateLimit-Remaining']),
-                    'reset_at': float(headers['X-RateLimit-Reset']),
-                    'last_update': time.time()
-                })
-            
-            self.rate_limit_count = 0
-            return True
-        except discord.errors.HTTPException as e:
-            if e.status == 429:
-                await self._handle_rate_limit(e)
-                self.rate_limited = True
-                self.last_rate_limit_time = datetime.now()
-                retry_after = float(e.response.headers.get('Retry-After', 5))
-                
-                if retry_count < self.max_rate_limit_retries:
-                    logger.warning(f"Rate limit atingido. Tentando novamente em {retry_after} segundos (tentativa {retry_count + 1})")
-                    await asyncio.sleep(retry_after)
-                    return await self.safe_send(channel, content, embed, file, retry_count + 1)
-                
-                logger.error(f"Rate limit persistente após {self.max_rate_limit_retries} tentativas")
-                return False
             raise
 
     async def process_queues(self):
