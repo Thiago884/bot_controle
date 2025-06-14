@@ -8,6 +8,7 @@ from io import BytesIO
 from typing import Optional, Dict, List
 from utils import generate_activity_graph
 from collections import defaultdict
+import time
 
 logger = logging.getLogger('inactivity_bot')
 
@@ -392,24 +393,48 @@ async def monitor_rate_limits():
     
     try:
         # Verificar uso atual
-        global_usage = 1 - (bot.rate_limit_buckets['global']['remaining'] / bot.rate_limit_buckets['global']['limit'])
+        global_bucket = bot.rate_limit_buckets['global']
+        global_usage = 1 - (global_bucket['remaining'] / global_bucket['limit'])
         
         # Ajustar dinamicamente o tamanho dos lotes
+        previous_batch_size = bot._batch_processing_size
+        
         if global_usage > 0.8:  # Se estiver usando mais de 80% do rate limit
             bot._batch_processing_size = max(5, bot._batch_processing_size - 2)
-            logger.info(f"Reduzindo tamanho do lote para {bot._batch_processing_size} devido a alto uso de rate limits")
         elif global_usage < 0.3:  # Se estiver usando menos de 30%
             bot._batch_processing_size = min(20, bot._batch_processing_size + 2)
-            logger.info(f"Aumentando tamanho do lote para {bot._batch_processing_size} devido a baixo uso de rate limits")
+        
+        # Só enviar notificação se houver mudança significativa ou situação crítica
+        should_notify = False
+        notification_message = ""
+        
+        # Verificar se houve mudança no tamanho do lote
+        if bot._batch_processing_size != previous_batch_size:
+            should_notify = True
+            notification_message += (
+                f"📊 **Ajuste de Rate Limits**\n"
+                f"Tamanho do lote alterado de {previous_batch_size} para {bot._batch_processing_size}\n"
+            )
+        
+        # Verificar se está próximo do limite global
+        if global_usage > 0.7:
+            should_notify = True
+            notification_message += (
+                f"⚠️ **Alerta de Uso Elevado**\n"
+                f"Uso global: {global_usage*100:.1f}%\n"
+                f"Remaining: {global_bucket['remaining']}/{global_bucket['limit']}\n"
+                f"Reset em: {max(0, global_bucket['reset_at'] - time.time()):.0f}s\n"
+            )
+        
+        # Enviar notificação se necessário
+        if should_notify:
+            await bot.log_action(
+                "Monitoramento de Rate Limits",
+                None,
+                notification_message + 
+                f"Delay atual: {bot.rate_limit_delay:.2f}s"
+            )
             
-        # Registrar estatísticas
-        await bot.log_action(
-            "Monitoramento de Rate Limits",
-            None,
-            f"Uso global: {global_usage*100:.1f}%\n"
-            f"Tamanho do lote atual: {bot._batch_processing_size}\n"
-            f"Delay atual: {bot.rate_limit_delay:.2f}s"
-        )
     except Exception as e:
         logger.error(f"Erro no monitoramento de rate limits: {e}")
 
