@@ -343,6 +343,26 @@ class Database:
                         INDEX idx_last_updated (last_updated)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci''')
                     
+                    # Tabela de logs de rate limit
+                    await cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS rate_limit_logs (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        guild_id BIGINT,
+                        bucket VARCHAR(100),
+                        limit_count INT,
+                        remaining INT,
+                        reset_at DATETIME,
+                        scope VARCHAR(50),
+                        endpoint VARCHAR(255),
+                        retry_after FLOAT,
+                        log_date DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        INDEX idx_guild (guild_id),
+                        INDEX idx_bucket (bucket),
+                        INDEX idx_reset (reset_at),
+                        INDEX idx_endpoint (endpoint),
+                        INDEX idx_date (log_date)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci''')
+                    
                     # Reativar warnings
                     await cursor.execute("SET sql_notes = 1;")
                     await conn.commit()
@@ -748,6 +768,10 @@ class Database:
                 await cursor.execute("DELETE FROM kicked_members WHERE kick_date < %s", (cutoff_date,))
                 kicks_deleted = cursor.rowcount
                 
+                # Limpar logs de rate limit antigos
+                await cursor.execute("DELETE FROM rate_limit_logs WHERE log_date < %s", (cutoff_date,))
+                rate_limits_deleted = cursor.rowcount
+                
                 await conn.commit()
                 
                 log_message = (
@@ -755,13 +779,90 @@ class Database:
                     f"Sessões de voz: {voice_deleted}, "
                     f"Avisos: {warnings_deleted}, "
                     f"Cargos removidos: {roles_deleted}, "
-                    f"Expulsões: {kicks_deleted}"
+                    f"Expulsões: {kicks_deleted}, "
+                    f"Rate limits: {rate_limits_deleted}"
                 )
                 logger.info(log_message)
                 return log_message
         except Exception as e:
             logger.error(f"Erro ao limpar dados antigos: {e}")
             raise
+        finally:
+            if conn:
+                self.pool.release(conn)
+
+    async def log_rate_limit(self, guild_id: int, data: dict):
+        """Registra ocorrência de rate limit no banco de dados"""
+        cursor = None
+        conn = None
+        try:
+            # Converter reset timestamp para datetime se existir
+            reset_at = datetime.utcfromtimestamp(data['reset']) if data.get('reset') else None
+            
+            cursor, conn = await self.execute_query('''
+                INSERT INTO rate_limit_logs 
+                (guild_id, bucket, limit_count, remaining, reset_at, scope, endpoint, retry_after)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ''', (
+                guild_id,
+                data.get('bucket'),
+                data.get('limit'),
+                data.get('remaining'),
+                reset_at,
+                data.get('scope'),
+                data.get('endpoint'),
+                data.get('retry_after')
+            ))
+            await conn.commit()
+            logger.info(f"Rate limit registrado para guild {guild_id} no endpoint {data.get('endpoint')}")
+            return True
+        except Exception as e:
+            logger.error(f"Erro ao registrar rate limit: {e}")
+            return False
+        finally:
+            if cursor:
+                await cursor.close()
+            if conn:
+                self.pool.release(conn)
+
+    async def get_rate_limit_history(self, guild_id: int, hours: int = 24) -> List[Dict]:
+        """Obtém histórico de rate limits para uma guild"""
+        cursor = None
+        conn = None
+        try:
+            since = datetime.utcnow() - timedelta(hours=hours)
+            cursor, conn = await self.execute_query('''
+                SELECT bucket, limit_count, remaining, reset_at, scope, endpoint, retry_after, log_date
+                FROM rate_limit_logs
+                WHERE guild_id = %s AND log_date >= %s
+                ORDER BY log_date DESC
+            ''', (guild_id, since))
+            
+            return await cursor.fetchall()
+        except Exception as e:
+            logger.error(f"Erro ao obter histórico de rate limits: {e}")
+            return []
+        finally:
+            if cursor:
+                await cursor.close()
+            if conn:
+                self.pool.release(conn)
+
+    async def cleanup_rate_limit_logs(self, days: int = 7):
+        """Limpa logs de rate limit antigos"""
+        conn = None
+        try:
+            cutoff_date = datetime.utcnow() - timedelta(days=days)
+            conn = await self.pool.acquire()
+            async with conn.cursor() as cursor:
+                await cursor.execute("DELETE FROM rate_limit_logs WHERE log_date < %s", (cutoff_date,))
+                deleted_count = cursor.rowcount
+                await conn.commit()
+                logger.info(f"Removidos {deleted_count} logs de rate limit antigos")
+                return deleted_count
+        except Exception as e:
+            logger.error(f"Erro ao limpar logs de rate limit: {e}")
+            return 0
         finally:
             if conn:
                 self.pool.release(conn)

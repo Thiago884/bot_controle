@@ -13,6 +13,7 @@ from typing import Optional
 from discord.ext import tasks
 import aiomysql
 import random
+from collections import defaultdict
 
 # Configuração do logger
 def setup_logger():
@@ -81,23 +82,34 @@ DEFAULT_CONFIG = {
     }
 }}
 
-class PriorityQueue:
+class SmartPriorityQueue:
     def __init__(self):
         self.queues = {
-            'high': asyncio.Queue(maxsize=100),
-            'normal': asyncio.Queue(maxsize=500),
-            'low': asyncio.Queue(maxsize=200)
+            'critical': asyncio.Queue(maxsize=20),   # Alertas e notificações urgentes
+            'high': asyncio.Queue(maxsize=100),      # Comandos de administração
+            'normal': asyncio.Queue(maxsize=500),    # Mensagens regulares
+            'low': asyncio.Queue(maxsize=1000)       # Logs e estatísticas
         }
+        self.bucket_limits = {
+            'critical': 5,   # Máximo de 5 mensagens por segundo
+            'high': 2,       # Máximo de 2 mensagens por segundo
+            'normal': 1,     # Máximo de 1 mensagem por segundo
+            'low': 0.5       # Máximo de 1 mensagem a cada 2 segundos
+        }
+        self.last_sent = {priority: 0 for priority in self.queues}
+    
+    async def get_next_message(self):
+        # Verificar rate limits por prioridade
+        now = time.time()
+        for priority in ['critical', 'high', 'normal', 'low']:
+            if not self.queues[priority].empty():
+                if now - self.last_sent[priority] >= 1/self.bucket_limits[priority]:
+                    self.last_sent[priority] = now
+                    return await self.queues[priority].get(), priority
+        return None, None
     
     async def put(self, item, priority='normal'):
         await self.queues[priority].put(item)
-    
-    async def get(self):
-        # Processa em ordem de prioridade
-        for priority in ['high', 'normal', 'low']:
-            if not self.queues[priority].empty():
-                return await self.queues[priority].get(), priority
-        return None, None
     
     def task_done(self, priority):
         self.queues[priority].task_done()
@@ -127,7 +139,7 @@ class InactivityBot(commands.Bot):
         self.db = None
         self.active_sessions = {}
         self.voice_event_queue = asyncio.Queue(maxsize=500)
-        self.message_queue = PriorityQueue()
+        self.message_queue = SmartPriorityQueue()
         self.voice_event_processor_task = None
         self.queue_processor_task = None
         self.command_processor_task = None
@@ -150,9 +162,114 @@ class InactivityBot(commands.Bot):
         self._api_request_delay = 1.0
         self.audio_check_task = None
         self.health_check_task = None
+        
+        # Rate limit improvements
+        self.rate_limit_buckets = {
+            'global': {
+                'limit': 50,
+                'remaining': 50,
+                'reset_at': 0,
+                'last_update': 0
+            },
+            'messages': {
+                'limit': 10,
+                'remaining': 10,
+                'reset_at': 0,
+                'last_update': 0
+            }
+        }
+        self.message_cache = {
+            'embeds': defaultdict(dict),
+            'responses': defaultdict(dict)
+        }
+        self.cache_ttl = 300
+
+    async def _handle_rate_limit(self, error):
+        retry_after = float(error.response.headers.get('Retry-After', 1.0))
+        bucket = error.response.headers.get('X-RateLimit-Bucket', 'global')
+        
+        if bucket in self.rate_limit_buckets:
+            self.rate_limit_buckets[bucket]['remaining'] = 0
+            self.rate_limit_buckets[bucket]['reset_at'] = time.time() + retry_after
+            
+        self.rate_limit_delay = min(
+            self.max_rate_limit_delay,
+            max(retry_after, self.rate_limit_delay * 1.5)
+        )
+        
+        details = {
+            'bucket': error.response.headers.get('X-RateLimit-Bucket', 'unknown'),
+            'limit': error.response.headers.get('X-RateLimit-Limit', 'unknown'),
+            'remaining': error.response.headers.get('X-RateLimit-Remaining', 'unknown'),
+            'reset': error.response.headers.get('X-RateLimit-Reset', 'unknown'),
+            'scope': error.response.headers.get('X-RateLimit-Scope', 'global'),
+            'retry_after': retry_after,
+            'endpoint': str(error.response.request_info.url)
+        }
+        
+        await self.log_action(
+            "Rate Limit Detectado",
+            None,
+            "\n".join(f"{k}: {v}" for k, v in details.items())
+        )
+        
+        if details['scope'] == 'global':
+            await self.notify_roles(
+                f"⚠️ **Alerta de Rate Limit Global** ⚠️\n"
+                f"O bot atingiu um rate limit global e pode ter desempenho reduzido.\n"
+                f"Tempo de espera: {retry_after:.1f} segundos",
+                is_warning=True
+            )
+        
+        logger.warning(f"Rate limit atingido no bucket {bucket}. Retry after: {retry_after}s")
+
+    async def can_send_message(self, priority='normal'):
+        now = time.time()
+        
+        global_bucket = self.rate_limit_buckets['global']
+        if global_bucket['remaining'] <= 1 and now < global_bucket['reset_at']:
+            return False
+        
+        queue_status = self.message_queue.qsize()
+        if priority == 'critical' and queue_status['critical'] > 10:
+            return False
+        elif priority == 'high' and queue_status['high'] > 50:
+            return False
+        
+        return True
+
+    async def send_with_fallback(self, destination, content=None, embed=None, file=None):
+        max_retries = 2
+        for attempt in range(max_retries):
+            try:
+                return await self.safe_send(destination, content, embed, file)
+            except discord.errors.HTTPException as e:
+                if e.status == 429 and attempt == max_retries - 1:
+                    logger.warning(f"Rate limit persistente, usando fallback para webhook")
+                    return await self._send_via_webhook(destination, content, embed, file)
+                await asyncio.sleep((attempt + 1) * 2)
+
+    async def _send_via_webhook(self, destination, content=None, embed=None, file=None):
+        if isinstance(destination, discord.TextChannel):
+            try:
+                webhook = await destination.create_webhook(name="RateLimitFallback")
+                try:
+                    await webhook.send(
+                        content=content,
+                        embed=embed,
+                        file=file,
+                        username=self.user.name,
+                        avatar_url=self.user.avatar.url
+                    )
+                finally:
+                    await webhook.delete()
+                return True
+            except Exception as e:
+                logger.error(f"Erro no fallback de webhook: {e}")
+                return False
+        return False
 
     async def setup_hook(self):
-        """Configuração assíncrona que é executada após o login mas antes de conectar ao websocket"""
         if not self._setup_complete:
             self._setup_complete = True
             
@@ -178,7 +295,6 @@ class InactivityBot(commands.Bot):
             self.audio_check_task = asyncio.create_task(self.check_audio_states())
 
     async def check_audio_states(self):
-        """Verifica periodicamente o estado do áudio dos membros em canais de voz"""
         while True:
             try:
                 for guild in self.guilds:
@@ -264,7 +380,6 @@ class InactivityBot(commands.Bot):
                 await asyncio.sleep(sleep_time)
 
     async def monitor_db_pool(self):
-        """Monitora o status do pool de conexões do banco de dados"""
         while True:
             try:
                 if hasattr(self, 'db') and self.db:
@@ -290,7 +405,6 @@ class InactivityBot(commands.Bot):
                 await asyncio.sleep(60)
 
     async def periodic_health_check(self):
-        """Verificação periódica de saúde do bot"""
         while True:
             try:
                 queue_status = self.message_queue.qsize()
@@ -357,7 +471,6 @@ class InactivityBot(commands.Bot):
                 json.dump(self.config, f, indent=4)
 
     async def save_config(self):
-        """Salva a configuração com tratamento de erros e rate limiting"""
         if not hasattr(self, 'config') or not self.config:
             return
             
@@ -378,7 +491,6 @@ class InactivityBot(commands.Bot):
             raise
 
     async def safe_send(self, channel, content=None, embed=None, file=None, retry_count=0):
-        """Método seguro para enviar mensagens com tratamento de rate limits"""
         if self.rate_limited:
             if self.last_rate_limit_time and (datetime.now() - self.last_rate_limit_time).total_seconds() < 60:
                 logger.warning("Ignorando envio devido a rate limit recente")
@@ -386,11 +498,27 @@ class InactivityBot(commands.Bot):
             self.rate_limited = False
 
         try:
-            await channel.send(content=content, embed=embed, file=file)
+            if not await self.can_send_message():
+                await asyncio.sleep(self.rate_limit_delay)
+                return await self.safe_send(channel, content, embed, file, retry_count)
+
+            message = await channel.send(content=content, embed=embed, file=file)
+            
+            headers = message._http.response.headers
+            if 'X-RateLimit-Limit' in headers:
+                bucket = 'messages' if 'messages' in str(message._http.route) else 'global'
+                self.rate_limit_buckets[bucket].update({
+                    'limit': int(headers['X-RateLimit-Limit']),
+                    'remaining': int(headers['X-RateLimit-Remaining']),
+                    'reset_at': float(headers['X-RateLimit-Reset']),
+                    'last_update': time.time()
+                })
+            
             self.rate_limit_count = 0
             return True
         except discord.errors.HTTPException as e:
             if e.status == 429:
+                await self._handle_rate_limit(e)
                 self.rate_limited = True
                 self.last_rate_limit_time = datetime.now()
                 retry_after = float(e.response.headers.get('Retry-After', 5))
@@ -405,10 +533,8 @@ class InactivityBot(commands.Bot):
             raise
 
     async def process_queues(self):
-        """Processa todas as filas de mensagens com prioridades"""
         while True:
             try:
-                # Processar eventos de voz primeiro
                 if not self.voice_event_queue.empty():
                     batch = []
                     for _ in range(min(self._batch_processing_size, self.voice_event_queue.qsize())):
@@ -419,34 +545,29 @@ class InactivityBot(commands.Bot):
                     for _ in batch:
                         self.voice_event_queue.task_done()
                 
-                # Processar mensagens da fila prioritária
-                item, priority = await self.message_queue.get()
+                item, priority = await self.message_queue.get_next_message()
                 if item is None:
                     await asyncio.sleep(0.1)
                     continue
                     
                 try:
-                    # Verificar o tipo de item
                     if isinstance(item, tuple):
-                        # Formato: (destination, content, embed, file)
                         if len(item) == 4:
                             destination, content, embed, file = item
                             if isinstance(destination, (discord.TextChannel, discord.User, discord.Member)):
-                                await self.safe_send(destination, content, embed, file)
+                                await self.send_with_fallback(destination, content, embed, file)
                             else:
                                 logger.warning(f"Destino inválido para mensagem: {type(destination)}")
-                        # Formato simplificado: (destination, embed)
                         elif len(item) == 2:
                             destination, embed = item
                             if isinstance(destination, (discord.TextChannel, discord.User, discord.Member)):
-                                await self.safe_send(destination, embed=embed)
+                                await self.send_with_fallback(destination, embed=embed)
                             else:
                                 logger.warning(f"Destino inválido para mensagem: {type(destination)}")
                         else:
                             logger.warning(f"Item da fila em formato desconhecido: {item}")
                     elif isinstance(item, (discord.TextChannel, discord.User, discord.Member)):
-                        # Se for um objeto de canal ou usuário diretamente
-                        await self.safe_send(item)
+                        await self.send_with_fallback(item)
                     else:
                         logger.warning(f"Item da fila não é um destino válido: {type(item)}")
                 except Exception as e:
@@ -459,7 +580,6 @@ class InactivityBot(commands.Bot):
                 await asyncio.sleep(1)
 
     async def _process_voice_batch(self, batch):
-        """Processa um lote de eventos de voz"""
         processed = {}
         
         for event in batch:
@@ -480,7 +600,6 @@ class InactivityBot(commands.Bot):
                 logger.error(f"Erro ao processar eventos para {user_data['member']}: {e}")
 
     async def _process_user_voice_events(self, member, events):
-        """Processa eventos de voz para um único usuário"""
         if not hasattr(self, 'config') or 'absence_channel' not in self.config:
             logger.error("Configuração do canal de ausência não encontrada")
             return
@@ -490,26 +609,20 @@ class InactivityBot(commands.Bot):
         
         for before, after in events:
             try:
-                # Verificar whitelist
                 if member.id in self.config['whitelist']['users'] or \
                    any(role.id in self.config['whitelist']['roles'] for role in member.roles):
                     continue
                 
-                # Entrou em um canal de voz (não ausência)
                 if before.channel is None and after.channel is not None and after.channel.id != absence_channel_id:
                     await self._handle_voice_join(member, after)
                 
-                # Saiu de um canal de voz (não ausência)
                 elif before.channel is not None and after.channel is None and before.channel.id != absence_channel_id:
                     await self._handle_voice_leave(member, before)
                 
-                # Movido entre canais
                 elif before.channel is not None and after.channel is not None and before.channel != after.channel:
                     await self._handle_voice_move(member, before, after, absence_channel_id)
                 
-                # Mudança de estado de áudio (mesmo canal)
                 elif before.channel is not None and after.channel is not None and before.channel == after.channel:
-                    # Verifica apenas deaf/self_deaf (ignora mute/self_mute)
                     if (before.self_deaf != after.self_deaf) or (before.deaf != after.deaf):
                         await self._handle_audio_change(member, before, after)
 
@@ -517,7 +630,6 @@ class InactivityBot(commands.Bot):
                 logger.error(f"Erro ao processar evento de voz para {member}: {e}")
 
     async def _handle_voice_join(self, member, after):
-        """Processa entrada em canal de voz"""
         try:
             await self.db.log_voice_join(member.id, member.guild.id)
             self.active_sessions[(member.id, member.guild.id)] = {
@@ -550,11 +662,9 @@ class InactivityBot(commands.Bot):
             )
 
     async def _handle_voice_leave(self, member, before):
-        """Processa saída de canal de voz"""
         session_data = self.active_sessions.get((member.id, member.guild.id))
         if session_data:
             try:
-                # Calcular tempo total e subtrair o tempo com áudio desativado
                 total_time = (datetime.utcnow() - session_data['start_time']).total_seconds()
                 audio_off_time = session_data.get('total_audio_off_time', 0)
                 effective_time = total_time - audio_off_time
@@ -570,7 +680,6 @@ class InactivityBot(commands.Bot):
                             str(e)
                         )
                 
-                # Log detalhado
                 embed = discord.Embed(
                     title="🚪 Saiu de Voz",
                     color=discord.Color.blue(),
@@ -595,15 +704,12 @@ class InactivityBot(commands.Bot):
                 logger.error(f"Erro ao processar saída de voz: {e}")
 
     async def _handle_voice_move(self, member, before, after, absence_channel_id):
-        """Processa movimento entre canais de voz"""
         audio_key = (member.id, member.guild.id)
         
-        # Movido para o canal de ausência
         if after.channel.id == absence_channel_id:
             session_data = self.active_sessions.get(audio_key)
             if session_data:
                 try:
-                    # Calcular tempo total e subtrair o tempo com áudio desativado
                     total_time = (datetime.utcnow() - session_data['start_time']).total_seconds()
                     audio_off_time = session_data.get('total_audio_off_time', 0)
                     effective_time = total_time - audio_off_time
@@ -614,7 +720,6 @@ class InactivityBot(commands.Bot):
                         except Exception as e:
                             logger.error(f"Erro ao registrar saída de voz (movido para ausência): {e}")
                     
-                    # Log detalhado
                     embed = discord.Embed(
                         title="⏸️ Movido para Ausência",
                         color=discord.Color.light_grey(),
@@ -637,7 +742,6 @@ class InactivityBot(commands.Bot):
                 except KeyError:
                     pass
         
-        # Movido do canal de ausência para outro canal
         elif before.channel.id == absence_channel_id:
             try:
                 await self.db.log_voice_join(member.id, member.guild.id)
@@ -648,7 +752,6 @@ class InactivityBot(commands.Bot):
                     'total_audio_off_time': 0
                 }
                 
-                # Log detalhado
                 embed = discord.Embed(
                     title="▶️ Retornou de Ausência",
                     color=discord.Color.green(),
@@ -666,16 +769,13 @@ class InactivityBot(commands.Bot):
                 logger.error(f"Erro ao registrar retorno de ausência: {e}")
 
     async def _handle_audio_change(self, member, before, after):
-        """Processa mudança de estado de áudio (ignora mute)"""
         audio_key = (member.id, member.guild.id)
         if audio_key not in self.active_sessions:
             return
 
-        # Verifica apenas deaf/self_deaf (ignora mute/self_mute)
         audio_was_on = not (before.self_deaf or before.deaf)
         audio_is_off = after.self_deaf or after.deaf
 
-        # Áudio foi DESATIVADO (antes estava ligado, agora está mudo)
         if audio_was_on and audio_is_off:
             self.active_sessions[audio_key]['audio_disabled'] = True
             self.active_sessions[audio_key]['audio_off_time'] = datetime.utcnow()
@@ -695,7 +795,6 @@ class InactivityBot(commands.Bot):
             
             await self.log_action(None, None, embed=embed)
         
-        # Áudio foi REATIVADO (antes estava mudo, agora está ligado)
         elif not audio_was_on and not audio_is_off:
             self.active_sessions[audio_key]['audio_disabled'] = False
             if 'audio_off_time' in self.active_sessions[audio_key]:
@@ -723,7 +822,6 @@ class InactivityBot(commands.Bot):
                 await self.log_action(None, None, embed=embed)
 
     async def process_voice_events(self):
-        """Processa eventos de voz em lotes para melhor eficiência"""
         while True:
             try:
                 batch = []
@@ -742,7 +840,6 @@ class InactivityBot(commands.Bot):
                 await asyncio.sleep(1)
 
     async def log_action(self, action: str, member: Optional[discord.Member] = None, details: str = None, file: discord.File = None, embed: discord.Embed = None):
-        """Registra uma ação no canal de logs com tratamento de rate limit"""
         try:
             if not hasattr(self, 'config') or 'log_channel' not in self.config or not self.config['log_channel']:
                 logger.warning("Canal de logs não configurado")
@@ -753,17 +850,15 @@ class InactivityBot(commands.Bot):
                 logger.warning("Canal de logs não encontrado")
                 return
                 
-            # Se um embed foi fornecido, usá-lo diretamente
             if embed is not None:
                 await self.message_queue.put((
                     channel,
                     None,
                     embed,
                     file
-                ))
+                ), priority='high')
                 return
                 
-            # Definir cor baseada no tipo de ação
             if "Áudio Desativado" in str(action):
                 color = discord.Color.orange()
                 icon = "🔇"
@@ -791,26 +886,23 @@ class InactivityBot(commands.Bot):
                 embed.add_field(name="ID", value=f"`{member.id}`", inline=True)
             
             if details:
-                # Formatar detalhes para melhor legibilidade
                 if '\n' in details:
                     details = details.replace('\n', '\n• ')
                     embed.add_field(name="Detalhes", value=f"• {details}", inline=False)
                 else:
                     embed.add_field(name="Detalhes", value=details, inline=False)
             
-            # Adicionar à fila de alta prioridade
             await self.message_queue.put((
                 channel,
                 None,
                 embed,
                 file
-            ))
+            ), priority='high')
             
         except Exception as e:
             logger.error(f"Erro ao registrar ação no log: {e}")
 
     async def notify_roles(self, message: str, is_warning: bool = False):
-        """Envia notificação para os cargos com tratamento de rate limit"""
         try:
             channel_id = self.config.get('notification_channel') if is_warning else self.config.get('log_channel')
             if not channel_id:
@@ -822,7 +914,6 @@ class InactivityBot(commands.Bot):
                 logger.warning(f"Canal de notificação {channel_id} não encontrado")
                 return
                 
-            # Criar embed para notificações
             if is_warning:
                 embed = discord.Embed(
                     title="⚠️ Aviso de Inatividade",
@@ -843,33 +934,29 @@ class InactivityBot(commands.Bot):
                 None,
                 embed,
                 None
-            ))
+            ), priority=priority)
             
         except Exception as e:
             logger.error(f"Erro ao enviar notificação: {e}")
             await self.log_action("Erro de Notificação", None, f"Falha ao enviar mensagem: {str(e)}")
 
     async def send_dm(self, member: discord.Member, message: str):
-        """Envia mensagem direta com tratamento de erros e rate limiting"""
         try:
-            # Criar embed para DMs
             embed = discord.Embed(
                 description=message,
                 color=discord.Color.blue(),
                 timestamp=datetime.now(self.timezone))
             
-            # Adicionar à fila de baixa prioridade para evitar rate limits
             await self.message_queue.put((
                 member,
                 None,
                 embed,
                 None
-            ))
+            ), priority='low')
         except Exception as e:
             logger.error(f"Erro ao enviar DM para {member}: {e}")
 
     async def send_warning(self, member: discord.Member, warning_type: str):
-        """Envia aviso de inatividade com mensagem configurável"""
         try:
             warnings_config = self.config.get('warnings', {})
             messages = warnings_config.get('messages', {})
@@ -887,7 +974,6 @@ class InactivityBot(commands.Bot):
             else:
                 return
             
-            # Criar embed para avisos
             if warning_type == 'first':
                 title = "⚠️ Primeiro Aviso"
                 color = discord.Color.gold()
@@ -912,7 +998,6 @@ class InactivityBot(commands.Bot):
         except Exception as e:
             logger.error(f"Erro ao enviar aviso para {member}: {e}")
 
-# Decorador para verificar cargos permitidos
 def allowed_roles_only():
     async def predicate(interaction: discord.Interaction):
         if not bot.config['allowed_roles']:
@@ -945,16 +1030,13 @@ bot = InactivityBot(
 async def on_ready():
     logger.info(f'Bot conectado como {bot.user}')
     
-    # Verificar permissões
     for guild in bot.guilds:
         try:
-            # Verificar permissão para ver canais de voz
             voice_channels = [c for c in guild.channels if isinstance(c, discord.VoiceChannel)]
             if not voice_channels:
                 logger.warning(f"Nenhum canal de voz encontrado em {guild.name}")
                 continue
                 
-            # Verificar permissão no canal de logs
             if bot.config.get('log_channel'):
                 log_channel = bot.get_channel(bot.config['log_channel'])
                 if log_channel:
@@ -962,7 +1044,6 @@ async def on_ready():
                     if not perms.send_messages:
                         logger.error(f"Sem permissão para enviar mensagens no canal de logs em {guild.name}")
             
-            # Verificar permissão no canal de notificações
             if bot.config.get('notification_channel'):
                 notify_channel = bot.get_channel(bot.config['notification_channel'])
                 if notify_channel:
@@ -972,7 +1053,6 @@ async def on_ready():
         except Exception as e:
             logger.error(f"Erro ao verificar permissões em {guild.name}: {e}")
     
-    # Embed de inicialização mais bonito
     embed = discord.Embed(
         title="🤖 Bot de Controle de Atividades Iniciado",
         description=f"Conectado como {bot.user.mention}",
@@ -1004,7 +1084,6 @@ from bot_commands import *
 
 # Iniciar o bot
 if __name__ == "__main__":
-    # Adicionar delay aleatório entre 1-10 segundos para evitar rate limit
     delay = random.uniform(1, 10)
     logger.info(f"Aguardando {delay:.2f} segundos antes de iniciar para evitar rate limit...")
     time.sleep(delay)
