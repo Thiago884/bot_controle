@@ -870,6 +870,7 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
     limit="Número de usuários para mostrar (3-10)"
 )
 @allowed_roles_only()
+@app_commands.checks.cooldown(1, 30.0, key=lambda i: (i.guild_id, i.user.id))  # 30 segundos de cooldown
 async def activity_ranking(interaction: discord.Interaction, days: int = 7, limit: int = 5):
     """Mostra os usuários mais ativos no servidor"""
     try:
@@ -885,6 +886,9 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
             return
                 
         await interaction.response.defer(thinking=True)
+        
+        # Adicionar delay inicial para evitar rate limit
+        await asyncio.sleep(1)
         
         end_date = datetime.now(bot.timezone)
         start_date = end_date - timedelta(days=days)
@@ -955,6 +959,19 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
         logger.error(f"Erro ao gerar ranking de atividade: {e}")
         await interaction.followup.send(
             "❌ Ocorreu um erro ao gerar o ranking. Verifique os logs para detalhes.", ephemeral=True)
+
+@activity_ranking.error
+async def activity_ranking_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    """Trata erros específicos do comando activity_ranking"""
+    if isinstance(error, app_commands.CommandOnCooldown):
+        await interaction.response.send_message(
+            f"⏳ Este comando está em cooldown. Tente novamente em {error.retry_after:.1f} segundos.",
+            ephemeral=True)
+    else:
+        logger.error(f"Erro no comando activity_ranking: {error}")
+        await interaction.response.send_message(
+            "❌ Ocorreu um erro ao executar este comando.",
+            ephemeral=True)
 
 @bot.tree.command(name="force_check", description="Força uma verificação imediata de inatividade para um usuário")
 @app_commands.checks.cooldown(1, 30.0, key=lambda i: (i.guild_id, i.user.id))  # 30 segundos de cooldown
