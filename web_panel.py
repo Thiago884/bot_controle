@@ -1,6 +1,7 @@
 from flask import Flask, jsonify, render_template, request
 from threading import Thread
 from main import bot
+import asyncio
 
 app = Flask(__name__)
 
@@ -13,6 +14,29 @@ def dashboard():
     return render_template('dashboard.html', 
                          bot_name=bot.user.name if bot.user else "Inactivity Bot",
                          guild_count=len(bot.guilds))
+
+@app.route('/monitor')
+def monitor():
+    # Obter status do banco de dados
+    db_status = "Desconhecido"
+    pool_status = {}
+    if hasattr(bot, 'db') and bot.db:
+        try:
+            pool_status = asyncio.run(bot.db.check_pool_status()) or {}
+            db_status = "Operacional" if pool_status else "Erro"
+        except:
+            db_status = "Erro"
+    
+    # Obter status de rate limits
+    rate_limits = {}
+    if hasattr(bot, 'rate_limit_monitor'):
+        rate_limits = bot.rate_limit_monitor.get_status_report()
+    
+    return render_template('monitor.html',
+                         db_status=db_status,
+                         pool_status=pool_status,
+                         rate_limits=rate_limits,
+                         bot_name=bot.user.name if bot.user else "Inactivity Bot")
 
 @app.route('/api/guilds')
 def get_guilds():
@@ -54,6 +78,14 @@ def get_guild_info(guild_id):
             'kick_after_days': bot.config['kick_after_days']
         }
     })
+
+@app.route('/api/rate_limits')
+def get_rate_limits():
+    if not hasattr(bot, 'rate_limit_monitor'):
+        return jsonify({'error': 'Rate limit monitor not initialized'}), 500
+    
+    report = bot.rate_limit_monitor.get_status_report()
+    return jsonify(report)
 
 @app.route('/api/update_config', methods=['POST'])
 def update_config():

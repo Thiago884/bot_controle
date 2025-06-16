@@ -117,7 +117,7 @@ class DatabaseBackup:
 class Database:
     def __init__(self):
         self.pool = None
-        self.semaphore = asyncio.Semaphore(10)  # Limitar concorrência
+        self.semaphore = asyncio.Semaphore(25)  # Aumentado para 25 conexões simultâneas
         self._is_initialized = False
         self.heartbeat_task = None
         self._config_cache = {}  # Cache para configurações
@@ -138,12 +138,12 @@ class Database:
                     user=os.getenv('DB_USER'),
                     password=os.getenv('DB_PASS'),
                     db=os.getenv('DB_NAME'),
-                    minsize=2,  # Conexões mínimas mantidas
-                    maxsize=15,  # Limite abaixo do máximo do HostGator (25)
+                    minsize=5,  # Conexões mínimas mantidas (aumentado de 2 para 5)
+                    maxsize=25,  # Limite máximo da HostGator (aumentado de 15 para 25)
                     connect_timeout=30,
                     autocommit=True,
                     cursorclass=DictCursor,
-                    pool_recycle=50,  # Reciclar conexões antes do timeout de 60s
+                    pool_recycle=300,  # Reciclar conexões a cada 5 minutos
                     echo=False  # Desativar logs de queries para performance
                 )
                 
@@ -184,7 +184,7 @@ class Database:
         """Cria algumas conexões iniciais para aquecer o pool"""
         try:
             warmup_conns = []
-            for _ in range(min(3, self.pool.minsize)):
+            for _ in range(min(5, self.pool.minsize)):  # Ajustado para o novo minsize
                 conn = await self.pool.acquire()
                 warmup_conns.append(conn)
             

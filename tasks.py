@@ -12,6 +12,41 @@ import time
 
 logger = logging.getLogger('inactivity_bot')
 
+class PerformanceMetrics:
+    def __init__(self):
+        self.db_query_times = []
+        self.api_call_times = []
+        self.last_flush = time.time()
+    
+    def record_db_query(self, duration):
+        self.db_query_times.append(duration)
+        self._maybe_flush()
+    
+    def record_api_call(self, duration):
+        self.api_call_times.append(duration)
+        self._maybe_flush()
+    
+    def _maybe_flush(self):
+        if time.time() - self.last_flush > 300:  # 5 minutos
+            self._flush_metrics()
+            self.last_flush = time.time()
+    
+    def _flush_metrics(self):
+        if self.db_query_times:
+            avg_db = sum(self.db_query_times) / len(self.db_query_times)
+            max_db = max(self.db_query_times)
+            logger.info(f"Métricas DB: Avg={avg_db:.3f}s, Max={max_db:.3f}s, Samples={len(self.db_query_times)}")
+            self.db_query_times = []
+        
+        if self.api_call_times:
+            avg_api = sum(self.api_call_times) / len(self.api_call_times)
+            max_api = max(self.api_call_times)
+            logger.info(f"Métricas API: Avg={avg_api:.3f}s, Max={max_api:.3f}s, Samples={len(self.api_call_times)}")
+            self.api_call_times = []
+
+# Instância global
+perf_metrics = PerformanceMetrics()
+
 class TaskMetrics:
     """Class to track and report task performance metrics"""
     def __init__(self):
@@ -114,7 +149,10 @@ async def process_member_inactivity(member: discord.Member, guild: discord.Guild
         processed_members += 1
         
         # Verificar último período verificado
+        start_time = time.time()
         last_check = await bot.db.get_last_period_check(member.id, guild.id)
+        perf_metrics.record_db_query(time.time() - start_time)
+        
         now = datetime.now(bot.timezone)
         
         if last_check:
@@ -127,7 +165,9 @@ async def process_member_inactivity(member: discord.Member, guild: discord.Guild
         period_start = period_end - timedelta(days=monitoring_period)
         
         # Obter sessões de voz no período
+        start_time = time.time()
         sessions = await bot.db.get_voice_sessions(member.id, guild.id, period_start, period_end)
+        perf_metrics.record_db_query(time.time() - start_time)
         
         # Verificar requisitos
         meets_requirements = False
@@ -142,16 +182,24 @@ async def process_member_inactivity(member: discord.Member, guild: discord.Guild
             meets_requirements = len(valid_days) >= required_days
         
         # Registrar verificação
+        start_time = time.time()
         await bot.db.log_period_check(member.id, guild.id, period_start, period_end, meets_requirements)
+        perf_metrics.record_db_query(time.time() - start_time)
         
         # Ações para quem não cumpriu os requisitos
         if not meets_requirements:
             roles_to_remove = [role for role in member.roles if role.id in tracked_roles]
             if roles_to_remove:
                 try:
+                    start_time = time.time()
                     await member.remove_roles(*roles_to_remove)
+                    perf_metrics.record_api_call(time.time() - start_time)
+                    
                     await bot.send_warning(member, 'final')
+                    
+                    start_time = time.time()
                     await bot.db.log_removed_roles(member.id, guild.id, [r.id for r in roles_to_remove])
+                    perf_metrics.record_db_query(time.time() - start_time)
                     
                     # Gerar relatório gráfico
                     report_file = await generate_activity_report(member, sessions)
@@ -238,7 +286,10 @@ async def process_member_warnings(member: discord.Member, guild: discord.Guild,
             return
         
         # Obter última verificação
+        start_time = time.time()
         last_check = await bot.db.get_last_period_check(member.id, guild.id)
+        perf_metrics.record_db_query(time.time() - start_time)
+        
         if not last_check:
             return
         
@@ -247,7 +298,9 @@ async def process_member_warnings(member: discord.Member, guild: discord.Guild,
         days_remaining = (period_end - datetime.now(bot.timezone)).days
         
         # Obter último aviso
+        start_time = time.time()
         last_warning = await bot.db.get_last_warning(member.id, guild.id)
+        perf_metrics.record_db_query(time.time() - start_time)
         
         # Verificar necessidade de avisos
         if days_remaining <= first_warning_days and (
@@ -303,8 +356,14 @@ async def process_member_cleanup(member: discord.Member, guild: discord.Guild,
             joined_at = member.joined_at.replace(tzinfo=bot.timezone) if member.joined_at else None
             if joined_at and joined_at < cutoff_date:
                 try:
+                    start_time = time.time()
                     await member.kick(reason=f"Sem cargos há mais de {kick_after_days} dias")
+                    perf_metrics.record_api_call(time.time() - start_time)
+                    
+                    start_time = time.time()
                     await bot.db.log_kicked_member(member.id, guild.id, f"Sem cargos há mais de {kick_after_days} dias")
+                    perf_metrics.record_db_query(time.time() - start_time)
+                    
                     await bot.log_action(
                         "Membro Expulso",
                         member,
@@ -333,7 +392,10 @@ async def database_backup():
         bot.db_backup = DatabaseBackup(bot.db)
     
     try:
+        start_time = time.time()
         success = await bot.db_backup.create_backup()
+        perf_metrics.record_db_query(time.time() - start_time)
+        
         if success:
             await bot.log_action("Backup do Banco de Dados", None, "Backup diário realizado com sucesso")
             logger.info("Backup do banco de dados concluído com sucesso")
@@ -352,6 +414,7 @@ async def cleanup_old_data():
     try:
         cutoff_date = datetime.utcnow() - timedelta(days=60)  # 2 meses
         
+        start_time = time.time()
         async with bot.db.pool.acquire() as conn:
             async with conn.cursor() as cursor:
                 # Limpar sessões de voz antigas
@@ -381,6 +444,8 @@ async def cleanup_old_data():
                 )
                 logger.info(log_message)
                 await bot.log_action("Limpeza de Dados", None, log_message)
+        
+        perf_metrics.record_db_query(time.time() - start_time)
     except Exception as e:
         logger.error(f"Erro ao limpar dados antigos: {e}")
         await bot.log_action("Erro na Limpeza de Dados", None, f"Falha ao limpar dados antigos: {str(e)}")
@@ -493,7 +558,9 @@ async def _execute_force_check(member: discord.Member):
         period_start = period_end - timedelta(days=monitoring_period)
         
         # Obter sessões de voz no período
+        start_time = time.time()
         sessions = await bot.db.get_voice_sessions(member.id, guild.id, period_start, period_end)
+        perf_metrics.record_db_query(time.time() - start_time)
         
         # Verificar requisitos
         meets_requirements = False
@@ -508,7 +575,9 @@ async def _execute_force_check(member: discord.Member):
             meets_requirements = len(valid_days) >= required_days
         
         # Registrar verificação
+        start_time = time.time()
         await bot.db.log_period_check(member.id, guild.id, period_start, period_end, meets_requirements)
+        perf_metrics.record_db_query(time.time() - start_time)
         
         return {
             'meets_requirements': meets_requirements,

@@ -14,6 +14,7 @@ from discord.ext import tasks
 import aiomysql
 import random
 from collections import defaultdict
+from collections import deque
 
 # Configuração do logger
 def setup_logger():
@@ -54,6 +55,99 @@ logger.addFilter(ContextFilter())
 def log_with_context(message, level=logging.INFO, guild_id=None, user_id=None):
     extra = {'guild_id': guild_id or 'N/A', 'user_id': user_id or 'N/A'}
     logger.log(level, message, extra=extra)
+
+class RateLimitMonitor:
+    def __init__(self):
+        self.buckets = {}
+        self.global_limits = {
+            'limit': 50,
+            'remaining': 50,
+            'reset_at': 0
+        }
+        self.last_updated = 0
+        self.history = deque(maxlen=100)  # Mantém histórico dos últimos 100 eventos
+        self.adaptive_delay = 1.0
+        self.max_delay = 10.0
+        self.cooldown_until = 0
+    
+    def update_from_headers(self, headers):
+        now = time.time()
+        bucket = headers.get('X-RateLimit-Bucket', 'global')
+        limit = int(headers.get('X-RateLimit-Limit', 50))
+        remaining = int(headers.get('X-RateLimit-Remaining', limit))
+        reset_at = float(headers.get('X-RateLimit-Reset', now + 60))
+        
+        if bucket == 'global':
+            self.global_limits = {
+                'limit': limit,
+                'remaining': remaining,
+                'reset_at': reset_at
+            }
+        else:
+            self.buckets[bucket] = {
+                'limit': limit,
+                'remaining': remaining,
+                'reset_at': reset_at,
+                'last_updated': now
+            }
+        
+        self.last_updated = now
+        self.history.append({
+            'time': now,
+            'bucket': bucket,
+            'remaining': remaining,
+            'endpoint': str(headers.get('endpoint', 'unknown'))
+        })
+    
+    def get_remaining(self, bucket='global'):
+        if bucket == 'global':
+            return self.global_limits['remaining']
+        return self.buckets.get(bucket, {}).get('remaining', 50)
+    
+    def should_delay(self):
+        now = time.time()
+        if now < self.cooldown_until:
+            return True
+        
+        # Verificar rate limit global
+        if self.global_limits['remaining'] < 5 and now < self.global_limits['reset_at']:
+            self.adaptive_delay = min(self.max_delay, self.adaptive_delay * 1.5)
+            self.cooldown_until = now + self.adaptive_delay
+            return True
+        
+        # Verificar outros buckets importantes
+        for bucket, data in self.buckets.items():
+            if data['remaining'] < 2 and now < data['reset_at']:
+                self.adaptive_delay = min(self.max_delay, self.adaptive_delay * 1.2)
+                self.cooldown_until = now + self.adaptive_delay
+                return True
+        
+        # Reduzir gradualmente o delay quando não há rate limits
+        if self.adaptive_delay > 1.0:
+            self.adaptive_delay = max(1.0, self.adaptive_delay * 0.9)
+        
+        return False
+    
+    def get_status_report(self):
+        now = time.time()
+        report = {
+            'global': {
+                **self.global_limits,
+                'seconds_until_reset': max(0, self.global_limits['reset_at'] - now)
+            },
+            'adaptive_delay': self.adaptive_delay,
+            'cooldown_until': max(0, self.cooldown_until - now),
+            'buckets': {}
+        }
+        
+        for bucket, data in self.buckets.items():
+            report['buckets'][bucket] = {
+                'limit': data['limit'],
+                'remaining': data['remaining'],
+                'seconds_until_reset': max(0, data['reset_at'] - now)
+            }
+        
+        return report
 
 # Configurações iniciais
 CONFIG_FILE = 'config.json'
@@ -163,6 +257,11 @@ class InactivityBot(commands.Bot):
         self.audio_check_task = None
         self.health_check_task = None
         
+        # Novo monitor de rate limits
+        self.rate_limit_monitor = RateLimitMonitor()
+        self.last_rate_limit_report = 0
+        self.rate_limit_report_interval = 300  # 5 minutos
+        
         # Rate limit improvements
         self.rate_limit_buckets = {
             'global': {
@@ -270,48 +369,61 @@ class InactivityBot(commands.Bot):
         return False
 
     async def safe_send(self, channel, content=None, embed=None, file=None, retry_count=0):
-        if self.rate_limited:
-            if self.last_rate_limit_time and (datetime.now() - self.last_rate_limit_time).total_seconds() < 60:
-                logger.warning("Ignorando envio devido a rate limit recente")
-                return False
-            self.rate_limited = False
-
+        # Verificar rate limits antes de enviar
+        if self.rate_limit_monitor.should_delay():
+            delay = self.rate_limit_monitor.adaptive_delay
+            logger.warning(f"Rate limit detectado, aguardando {delay:.2f} segundos")
+            await asyncio.sleep(delay)
+        
         try:
-            if not await self.can_send_message():
-                await asyncio.sleep(self.rate_limit_delay)
-                return await self.safe_send(channel, content, embed, file, retry_count)
-
             message = await channel.send(content=content, embed=embed, file=file)
             
-            # Verificar se a mensagem tem o atributo _http antes de acessá-lo
-            if hasattr(message, '_http') and hasattr(message._http, 'response') and hasattr(message._http.response, 'headers'):
+            # Atualizar monitor de rate limits
+            if hasattr(message, '_http') and hasattr(message._http, 'response'):
                 headers = message._http.response.headers
-                if 'X-RateLimit-Limit' in headers:
-                    bucket = 'messages' if 'messages' in str(message._http.route) else 'global'
-                    self.rate_limit_buckets[bucket].update({
-                        'limit': int(headers['X-RateLimit-Limit']),
-                        'remaining': int(headers['X-RateLimit-Remaining']),
-                        'reset_at': float(headers['X-RateLimit-Reset']),
-                        'last_update': time.time()
-                    })
+                self.rate_limit_monitor.update_from_headers(headers)
             
-            self.rate_limit_count = 0
+            # Gerar relatório periódico
+            now = time.time()
+            if now - self.last_rate_limit_report > self.rate_limit_report_interval:
+                self.last_rate_limit_report = now
+                report = self.rate_limit_monitor.get_status_report()
+                logger.info(f"Relatório de Rate Limits: {report}")
+                
+                # Enviar alerta se estiver perto do limite
+                if report['global']['remaining'] < 10:
+                    await self.log_action(
+                        "Alerta de Rate Limit",
+                        None,
+                        f"Uso elevado de API: {report['global']['remaining']}/{report['global']['limit']} requisições restantes\n"
+                        f"Reset em: {report['global']['seconds_until_reset']:.0f} segundos\n"
+                        f"Delay adaptativo: {report['adaptive_delay']:.2f}s"
+                    )
+            
             return True
+        
         except discord.errors.HTTPException as e:
-            if e.status == 429:
-                await self._handle_rate_limit(e)
-                self.rate_limited = True
-                self.last_rate_limit_time = datetime.now()
+            if e.status == 429:  # Rate limited
                 retry_after = float(e.response.headers.get('Retry-After', 5))
                 
-                if retry_count < self.max_rate_limit_retries:
-                    logger.warning(f"Rate limit atingido. Tentando novamente em {retry_after} segundos (tentativa {retry_count + 1})")
-                    await asyncio.sleep(retry_after)
-                    return await self.safe_send(channel, content, embed, file, retry_count + 1)
+                # Atualizar monitor com informações do erro
+                self.rate_limit_monitor.update_from_headers(e.response.headers)
+                self.rate_limit_monitor.adaptive_delay = min(
+                    self.rate_limit_monitor.max_delay,
+                    max(retry_after, self.rate_limit_monitor.adaptive_delay * 1.5)
+                )
+                self.rate_limit_monitor.cooldown_until = time.time() + retry_after
                 
-                logger.error(f"Rate limit persistente após {self.max_rate_limit_retries} tentativas")
-                return False
-            raise
+                logger.error(f"Rate limit atingido. Tentativa {retry_count + 1}. Retry after: {retry_after}s")
+                await asyncio.sleep(retry_after)
+                return await self.safe_send(channel, content, embed, file, retry_count + 1)
+            
+            logger.error(f"Erro HTTP ao enviar mensagem: {e}")
+            return False
+        
+        except Exception as e:
+            logger.error(f"Erro ao enviar mensagem: {e}")
+            return False
 
     async def setup_hook(self):
         if not self._setup_complete:
@@ -406,6 +518,12 @@ class InactivityBot(commands.Bot):
                 await self.db.initialize()
                 logger.info("Banco de dados inicializado com sucesso")
                 
+                # Testar a conexão
+                async with self.db.pool.acquire() as conn:
+                    async with conn.cursor() as cursor:
+                        await cursor.execute("SELECT 1")
+                        await cursor.fetchone()
+                
                 await self.db.create_tables()
                 
                 db_config = await self.db.load_config(0)
@@ -414,13 +532,19 @@ class InactivityBot(commands.Bot):
                     await self.save_config()
                     logger.info("Configuração carregada do banco de dados")
                 
+                # Configurar reconexão automática
+                self.db.pool._reconnect_interval = 60  # Tentar reconectar a cada 60 segundos
+                self.db.pool._reconnect_max_attempts = 10  # Máximo de 10 tentativas
+                
                 break
             except Exception as e:
                 logger.error(f"Tentativa {attempt + 1} de conexão ao banco de dados falhou: {e}")
                 if attempt == max_retries - 1:
                     raise
-                sleep_time = initial_delay * (2 ** attempt)
-                logger.info(f"Tentando novamente em {sleep_time} segundos...")
+                
+                # Backoff exponencial com jitter
+                sleep_time = min(initial_delay * (2 ** attempt) + random.uniform(0, 1), 30)
+                logger.info(f"Tentando novamente em {sleep_time:.2f} segundos...")
                 await asyncio.sleep(sleep_time)
 
     async def monitor_db_pool(self):
