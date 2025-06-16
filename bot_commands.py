@@ -693,22 +693,41 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
         await interaction.response.defer(thinking=True)
         
         # Validar período
-        if days < 1 or days > 365:
-            await interaction.followup.send("⚠️ O período deve ser entre 1 e 365 dias.", ephemeral=True)
+        if days < 1 or days > 30:
+            await interaction.followup.send("⚠️ O período deve ser entre 1 e 30 dias.", ephemeral=True)
             return
         
+        # Adicionar delay inicial para evitar rate limit
+        await asyncio.sleep(2)
+        
         # Coletar dados básicos
-        user_data = await bot.db.get_user_activity(member.id, member.guild.id)
+        try:
+            user_data = await bot.db.get_user_activity(member.id, member.guild.id)
+        except Exception as e:
+            logger.error(f"Erro ao obter dados básicos de atividade: {e}")
+            await interaction.followup.send(
+                "❌ Ocorreu um erro ao obter os dados de atividade. Por favor, tente novamente mais tarde.",
+                ephemeral=True)
+            return
+        
+        # Coletar dados históricos com tratamento de rate limit
+        end_date = datetime.now(bot.timezone)
+        start_date = end_date - timedelta(days=days)
+        
+        try:
+            voice_sessions = await bot.db.get_voice_sessions(member.id, member.guild.id, start_date, end_date)
+        except Exception as e:
+            logger.error(f"Erro ao obter sessões de voz: {e}")
+            await interaction.followup.send(
+                "❌ Ocorreu um erro ao obter o histórico de voz. Por favor, tente novamente mais tarde.",
+                ephemeral=True)
+            return
+        
         last_join = user_data.get('last_voice_join')
         sessions = user_data.get('voice_sessions', 0)
         total_time = user_data.get('total_voice_time', 0)
         last_warning = await bot.db.get_last_warning(member.id, member.guild.id)
         last_check = await bot.db.get_last_period_check(member.id, member.guild.id)
-        
-        # Coletar dados históricos para o período especificado
-        end_date = datetime.now(bot.timezone)
-        start_date = end_date - timedelta(days=days)
-        voice_sessions = await bot.db.get_voice_sessions(member.id, member.guild.id, start_date, end_date)
         
         # Calcular dias ativos e mais ativos
         active_days = set()
@@ -847,37 +866,53 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
                 inline=True
             )
         
-        # Se houver sessões recentes, adicionar gráfico
-        if voice_sessions:
-            try:
-                report_file = await generate_activity_report(member, voice_sessions)
-                if report_file:
-                    await interaction.followup.send(embed=embed, file=report_file)
-                    return
-            except Exception as e:
-                logger.error(f"Erro ao gerar gráfico: {e}")
-        
-        await interaction.followup.send(embed=embed)
-        
+        # Enviar resposta com tratamento de rate limit
+        try:
+            if voice_sessions:
+                try:
+                    report_file = await generate_activity_report(member, voice_sessions)
+                    if report_file:
+                        await interaction.followup.send(embed=embed, file=report_file)
+                        return
+                except Exception as e:
+                    logger.error(f"Erro ao gerar gráfico: {e}")
+            
+            await interaction.followup.send(embed=embed)
+            
+        except discord.errors.HTTPException as e:
+            if e.status == 429:
+                retry_after = float(e.response.headers.get('Retry-After', 60))
+                logger.warning(f"Rate limit ao enviar resposta. Tentando novamente em {retry_after} segundos")
+                await asyncio.sleep(retry_after)
+                try:
+                    await interaction.followup.send(embed=embed)
+                except Exception as e:
+                    logger.error(f"Erro ao enviar resposta após rate limit: {e}")
+            else:
+                raise
+                
     except Exception as e:
         logger.error(f"Erro ao verificar atividade do usuário: {e}")
-        await interaction.followup.send(
-            "❌ Ocorreu um erro ao verificar a atividade do usuário.", ephemeral=True)
+        try:
+            await interaction.followup.send(
+                "❌ Ocorreu um erro ao verificar a atividade do usuário.", ephemeral=True)
+        except:
+            pass
 
 @bot.tree.command(name="activity_ranking", description="Mostra o ranking dos usuários mais ativos")
 @app_commands.describe(
-    days="Período em dias para análise (3-30)",
+    days="Período em dias para análise (1-30)",
     limit="Número de usuários para mostrar (3-10)"
 )
 @allowed_roles_only()
-@app_commands.checks.cooldown(1, 60.0, key=lambda i: (i.guild_id, i.user.id))  # Aumentado para 60 segundos de cooldown
+@app_commands.checks.cooldown(1, 60.0, key=lambda i: (i.guild_id, i.user.id))
 async def activity_ranking(interaction: discord.Interaction, days: int = 7, limit: int = 5):
     """Mostra os usuários mais ativos no servidor"""
     try:
         # Validar parâmetros
-        if days < 3 or days > 30:
+        if days < 1 or days > 30:
             await interaction.response.send_message(
-                "⚠️ O período deve ser entre 3 e 30 dias.", ephemeral=True)
+                "⚠️ O período deve ser entre 1 e 30 dias.", ephemeral=True)
             return
             
         if limit < 3 or limit > 10:
@@ -888,7 +923,7 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
         await interaction.response.defer(thinking=True)
         
         # Adicionar delay inicial para evitar rate limit
-        await asyncio.sleep(2)  # Aumentado para 2 segundos
+        await asyncio.sleep(2)
         
         end_date = datetime.now(bot.timezone)
         start_date = end_date - timedelta(days=days)
@@ -989,6 +1024,11 @@ async def activity_ranking_error(interaction: discord.Interaction, error: app_co
         await interaction.response.send_message(
             f"⏳ Este comando está em cooldown. Tente novamente em {error.retry_after:.1f} segundos.",
             ephemeral=True)
+    elif isinstance(error, discord.errors.HTTPException) and error.status == 429:
+        retry_after = float(error.response.headers.get('Retry-After', 60))
+        await interaction.response.send_message(
+            f"⚠️ O bot está sendo limitado pelo Discord. Por favor, tente novamente em {retry_after:.1f} segundos.",
+            ephemeral=True)
     else:
         logger.error(f"Erro no comando activity_ranking: {error}")
         try:
@@ -999,7 +1039,7 @@ async def activity_ranking_error(interaction: discord.Interaction, error: app_co
             pass
 
 @bot.tree.command(name="force_check", description="Força uma verificação imediata de inatividade para um usuário")
-@app_commands.checks.cooldown(1, 30.0, key=lambda i: (i.guild_id, i.user.id))  # 30 segundos de cooldown
+@app_commands.checks.cooldown(1, 30.0, key=lambda i: (i.guild_id, i.user.id))
 @allowed_roles_only()
 @commands.has_permissions(administrator=True)
 async def force_check(interaction: discord.Interaction, member: discord.Member):

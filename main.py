@@ -240,7 +240,7 @@ class InactivityBot(commands.Bot):
         self.rate_limited = False
         self.last_rate_limit = None
         self.rate_limit_delay = 2.0
-        self.max_rate_limit_delay = 10.0
+        self.max_rate_limit_delay = 30.0  # Aumentado de 10 para 30 segundos
         self.rate_limit_retry_after = 1.0
         self.last_rate_limit_time = None
         self.rate_limit_count = 0
@@ -252,8 +252,8 @@ class InactivityBot(commands.Bot):
         self._health_check_interval = 300
         self._last_config_save = None
         self._config_save_interval = 1800
-        self._batch_processing_size = 10
-        self._api_request_delay = 1.0
+        self._batch_processing_size = 5  # Reduzido de 10 para 5
+        self._api_request_delay = 2.0  # Aumentado de 1.0 para 2.0 segundos
         self.audio_check_task = None
         self.health_check_task = None
         
@@ -282,6 +282,26 @@ class InactivityBot(commands.Bot):
             'responses': defaultdict(dict)
         }
         self.cache_ttl = 300
+
+    async def check_rate_limit(self):
+        """Verifica se o bot está sendo rate limited e ajusta o comportamento"""
+        now = time.time()
+        if self.rate_limited and now - self.last_rate_limit > self.rate_limit_retry_after:
+            self.rate_limited = False
+        
+        # Ajustar dinamicamente o delay com base na frequência de rate limits
+        if now - self.last_rate_limit_time < 300:  # Se houve rate limit nos últimos 5 minutos
+            self.rate_limit_count += 1
+            if self.rate_limit_count > 3:
+                self.rate_limit_delay = min(
+                    self.max_rate_limit_delay,
+                    self.rate_limit_delay * 1.5
+                )
+        else:
+            self.rate_limit_count = max(0, self.rate_limit_count - 1)
+            self.rate_limit_delay = max(1.0, self.rate_limit_delay * 0.9)
+        
+        self.last_rate_limit_time = now
 
     async def _handle_rate_limit(self, error):
         retry_after = float(error.response.headers.get('Retry-After', 1.0))
