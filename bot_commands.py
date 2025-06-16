@@ -870,7 +870,7 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
     limit="Número de usuários para mostrar (3-10)"
 )
 @allowed_roles_only()
-@app_commands.checks.cooldown(1, 30.0, key=lambda i: (i.guild_id, i.user.id))  # 30 segundos de cooldown
+@app_commands.checks.cooldown(1, 60.0, key=lambda i: (i.guild_id, i.user.id))  # Aumentado para 60 segundos de cooldown
 async def activity_ranking(interaction: discord.Interaction, days: int = 7, limit: int = 5):
     """Mostra os usuários mais ativos no servidor"""
     try:
@@ -888,7 +888,7 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
         await interaction.response.defer(thinking=True)
         
         # Adicionar delay inicial para evitar rate limit
-        await asyncio.sleep(1)
+        await asyncio.sleep(2)  # Aumentado para 2 segundos
         
         end_date = datetime.now(bot.timezone)
         start_date = end_date - timedelta(days=days)
@@ -912,17 +912,24 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
                 
                 results = await cursor.fetchall()
         
-        # Processar resultados
+        # Processar resultados em lotes com delay
         ranking = []
         for idx, row in enumerate(results, 1):
-            member = interaction.guild.get_member(row['user_id'])
-            if member:
-                hours = row['total_time'] / 3600
-                ranking.append(
-                    f"**{idx}.** {member.mention} - "
-                    f"{hours:.1f} horas em {row['active_days']} dias "
-                    f"({row['session_count']} sessões)"
-                )
+            try:
+                member = interaction.guild.get_member(row['user_id'])
+                if member:
+                    hours = row['total_time'] / 3600
+                    ranking.append(
+                        f"**{idx}.** {member.mention} - "
+                        f"{hours:.1f} horas em {row['active_days']} dias "
+                        f"({row['session_count']} sessões)"
+                    )
+                    # Adicionar pequeno delay entre cada membro
+                    if idx < len(results):
+                        await asyncio.sleep(0.5)
+            except Exception as e:
+                logger.error(f"Erro ao processar membro {row['user_id']}: {e}")
+                continue
         
         if not ranking:
             # Verificar se há alguma sessão no período
@@ -939,10 +946,12 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
             
             if check and check['total_sessions'] > 0:
                 await interaction.followup.send(
-                    "ℹ️ Há atividade registrada, mas insuficiente para criar um ranking.")
+                    "ℹ️ Há atividade registrada, mas insuficiente para criar um ranking.",
+                    ephemeral=True)
             else:
                 await interaction.followup.send(
-                    f"ℹ️ Nenhuma sessão de voz registrada nos últimos {days} dias.")
+                    f"ℹ️ Nenhuma sessão de voz registrada nos últimos {days} dias.",
+                    ephemeral=True)
             return
         
         embed = discord.Embed(
@@ -953,12 +962,25 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
         
         embed.set_footer(text=f"Top {limit} usuários mais ativos | Requisitos: {bot.config['required_minutes']}min em {bot.config['required_days']} dias")
         
-        await interaction.followup.send(embed=embed)
+        try:
+            await interaction.followup.send(embed=embed)
+        except discord.errors.HTTPException as e:
+            if e.status == 429:
+                retry_after = float(e.response.headers.get('Retry-After', 60))
+                logger.warning(f"Rate limit ao enviar ranking. Tentando novamente em {retry_after} segundos")
+                await asyncio.sleep(retry_after)
+                await interaction.followup.send(embed=embed)
+            else:
+                raise
         
     except Exception as e:
         logger.error(f"Erro ao gerar ranking de atividade: {e}")
-        await interaction.followup.send(
-            "❌ Ocorreu um erro ao gerar o ranking. Verifique os logs para detalhes.", ephemeral=True)
+        try:
+            await interaction.followup.send(
+                "❌ Ocorreu um erro ao gerar o ranking. Por favor, tente novamente mais tarde.", 
+                ephemeral=True)
+        except:
+            pass
 
 @activity_ranking.error
 async def activity_ranking_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
@@ -969,9 +991,12 @@ async def activity_ranking_error(interaction: discord.Interaction, error: app_co
             ephemeral=True)
     else:
         logger.error(f"Erro no comando activity_ranking: {error}")
-        await interaction.response.send_message(
-            "❌ Ocorreu um erro ao executar este comando.",
-            ephemeral=True)
+        try:
+            await interaction.response.send_message(
+                "❌ Ocorreu um erro ao executar este comando.",
+                ephemeral=True)
+        except:
+            pass
 
 @bot.tree.command(name="force_check", description="Força uma verificação imediata de inatividade para um usuário")
 @app_commands.checks.cooldown(1, 30.0, key=lambda i: (i.guild_id, i.user.id))  # 30 segundos de cooldown
