@@ -928,7 +928,7 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
         end_date = datetime.now(bot.timezone)
         start_date = end_date - timedelta(days=days)
         
-        # Obter ranking do banco de dados - MODIFICAÇÃO AQUI
+        # Obter ranking do banco de dados
         async with bot.db.pool.acquire() as conn:
             async with conn.cursor() as cursor:
                 await cursor.execute('''
@@ -942,14 +942,12 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
                     AND join_time >= %s 
                     AND join_time <= %s
                     GROUP BY user_id
-                    HAVING total_time >= %s * 60  -- Filtra apenas usuários com pelo menos X minutos
                     ORDER BY total_time DESC
                     LIMIT %s
                 ''', (
                     interaction.guild.id, 
                     start_date, 
                     end_date,
-                    bot.config['required_minutes'],  # Considera o mínimo configurado
                     limit
                 ))
                 
@@ -995,8 +993,7 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
                     title=f"🏆 Ranking de Atividade (últimos {days} dias)",
                     description=(
                         f"ℹ️ Foram registradas {check['total_sessions']} sessões de voz "
-                        f"({check['total_time']/3600:.1f}h total), "
-                        f"mas nenhum usuário atingiu o mínimo de {bot.config['required_minutes']} minutos."
+                        f"({check['total_time']/3600:.1f}h total)."
                     ),
                     color=discord.Color.blue()
                 )
@@ -1015,7 +1012,7 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
             color=discord.Color.gold(),
             timestamp=datetime.now(bot.timezone))
         
-        embed.set_footer(text=f"Top {limit} usuários mais ativos | Mínimo: {bot.config['required_minutes']}min em 1 dia")
+        embed.set_footer(text=f"Top {limit} usuários mais ativos")
         
         try:
             await interaction.followup.send(embed=embed)
