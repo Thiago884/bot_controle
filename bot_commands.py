@@ -928,40 +928,49 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
         end_date = datetime.now(bot.timezone)
         start_date = end_date - timedelta(days=days)
         
-        # Obter ranking do banco de dados
+        # Obter ranking do banco de dados - MODIFICAÇÃO AQUI
         async with bot.db.pool.acquire() as conn:
             async with conn.cursor() as cursor:
                 await cursor.execute('''
-                    SELECT user_id, SUM(duration) as total_time, 
-                           COUNT(DISTINCT DATE(join_time)) as active_days,
-                           COUNT(*) as session_count
+                    SELECT 
+                        user_id, 
+                        SUM(duration) as total_time,
+                        COUNT(DISTINCT DATE(join_time)) as active_days,
+                        COUNT(*) as session_count
                     FROM voice_sessions
                     WHERE guild_id = %s
                     AND join_time >= %s 
                     AND join_time <= %s
                     GROUP BY user_id
-                    HAVING total_time > 0
+                    HAVING total_time >= %s * 60  -- Filtra apenas usuários com pelo menos X minutos
                     ORDER BY total_time DESC
                     LIMIT %s
-                ''', (interaction.guild.id, start_date, end_date, limit))
+                ''', (
+                    interaction.guild.id, 
+                    start_date, 
+                    end_date,
+                    bot.config['required_minutes'],  # Considera o mínimo configurado
+                    limit
+                ))
                 
                 results = await cursor.fetchall()
         
-        # Processar resultados em lotes com delay
+        # Processar resultados
         ranking = []
         for idx, row in enumerate(results, 1):
             try:
                 member = interaction.guild.get_member(row['user_id'])
                 if member:
-                    hours = row['total_time'] / 3600
+                    total_hours = row['total_time'] / 3600
+                    avg_session = row['total_time'] / row['session_count'] / 60 if row['session_count'] > 0 else 0
+                    
                     ranking.append(
                         f"**{idx}.** {member.mention} - "
-                        f"{hours:.1f} horas em {row['active_days']} dias "
-                        f"({row['session_count']} sessões)"
+                        f"**{total_hours:.1f}h** total "
+                        f"({row['active_days']} dias, "
+                        f"{row['session_count']} sessões, "
+                        f"⌀ {avg_session:.1f}min/sessão)"
                     )
-                    # Adicionar pequeno delay entre cada membro
-                    if idx < len(results):
-                        await asyncio.sleep(0.5)
             except Exception as e:
                 logger.error(f"Erro ao processar membro {row['user_id']}: {e}")
                 continue
@@ -971,7 +980,9 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
             async with bot.db.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
                     await cursor.execute('''
-                        SELECT COUNT(*) as total_sessions
+                        SELECT 
+                            COUNT(*) as total_sessions,
+                            SUM(duration) as total_time
                         FROM voice_sessions
                         WHERE guild_id = %s
                         AND join_time >= %s
@@ -982,17 +993,20 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
             if check and check['total_sessions'] > 0:
                 embed = discord.Embed(
                     title=f"🏆 Ranking de Atividade (últimos {days} dias)",
-                    description=f"ℹ️ Foram registradas {check['total_sessions']} sessões de voz, mas insuficientes para criar um ranking.",
+                    description=(
+                        f"ℹ️ Foram registradas {check['total_sessions']} sessões de voz "
+                        f"({check['total_time']/3600:.1f}h total), "
+                        f"mas nenhum usuário atingiu o mínimo de {bot.config['required_minutes']} minutos."
+                    ),
                     color=discord.Color.blue()
                 )
-                await interaction.followup.send(embed=embed)
             else:
                 embed = discord.Embed(
                     title=f"🏆 Ranking de Atividade (últimos {days} dias)",
                     description=f"ℹ️ Nenhuma sessão de voz registrada nos últimos {days} dias.",
                     color=discord.Color.blue()
                 )
-                await interaction.followup.send(embed=embed)
+            await interaction.followup.send(embed=embed)
             return
         
         embed = discord.Embed(
@@ -1001,7 +1015,7 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
             color=discord.Color.gold(),
             timestamp=datetime.now(bot.timezone))
         
-        embed.set_footer(text=f"Top {limit} usuários mais ativos | Requisitos: {bot.config['required_minutes']}min em {bot.config['required_days']} dias")
+        embed.set_footer(text=f"Top {limit} usuários mais ativos | Mínimo: {bot.config['required_minutes']}min em 1 dia")
         
         try:
             await interaction.followup.send(embed=embed)
