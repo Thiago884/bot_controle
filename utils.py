@@ -13,7 +13,34 @@ from collections import deque
 logger = logging.getLogger('inactivity_bot')
 
 # Configurações de rate limit para geração de gráficos
-GRAPH_RATE_LIMIT = deque(maxlen=5)  # Máximo 5 gráficos por minuto
+GRAPH_RATE_LIMIT = {
+    'last_request': 0,
+    'queue': deque(maxlen=5),  # Máximo 5 gráficos por minuto
+    'cooldown': 15  # Segundos mínimos entre requisições
+}
+
+async def check_graph_rate_limit():
+    """Verifica e aplica rate limit para geração de gráficos"""
+    current_time = time.time()
+    elapsed = current_time - GRAPH_RATE_LIMIT['last_request']
+    
+    # Se ainda estiver no cooldown, esperar
+    if elapsed < GRAPH_RATE_LIMIT['cooldown']:
+        wait_time = GRAPH_RATE_LIMIT['cooldown'] - elapsed
+        await asyncio.sleep(wait_time)
+    
+    # Verificar se atingiu o limite de requisições por minuto
+    if len(GRAPH_RATE_LIMIT['queue']) >= GRAPH_RATE_LIMIT['queue'].maxlen:
+        oldest_request = GRAPH_RATE_LIMIT['queue'][0]
+        if current_time - oldest_request < 60:
+            wait_time = 60 - (current_time - oldest_request)
+            logger.warning(f"Rate limit de gráficos atingido. Aguardando {wait_time:.1f} segundos")
+            await asyncio.sleep(wait_time)
+    
+    # Registrar a nova requisição
+    GRAPH_RATE_LIMIT['queue'].append(current_time)
+    GRAPH_RATE_LIMIT['last_request'] = current_time
+    return True
 
 def calculate_most_active_days(sessions: List[Dict], days: int) -> List[Tuple[str, int, int]]:
     """Calcula os dias mais ativos com tempo total e média por sessão"""
@@ -40,30 +67,10 @@ def calculate_most_active_days(sessions: List[Dict], days: int) -> List[Tuple[st
     return active_days
 
 async def generate_activity_graph(member: discord.Member, sessions: List[Dict]) -> Optional[BytesIO]:
-    """Gera um gráfico de atividade do usuário e retorna como BytesIO com proteção contra rate limits"""
-    if not sessions:
-        return None
-
-    # Verificar rate limit
-    current_time = time.time()
-    
-    # Remover registros antigos (último minuto)
-    while GRAPH_RATE_LIMIT and current_time - GRAPH_RATE_LIMIT[0] > 60:
-        GRAPH_RATE_LIMIT.popleft()
-    
-    if len(GRAPH_RATE_LIMIT) >= GRAPH_RATE_LIMIT.maxlen:
-        logger.warning(f"Rate limit de geração de gráficos atingido ({GRAPH_RATE_LIMIT.maxlen}/minuto)")
-        return None
-    
+    """Gera um gráfico de atividade do usuário com controle de rate limit"""
     try:
-        # Registrar a tentativa
-        GRAPH_RATE_LIMIT.append(current_time)
-        
-        # Adicionar delay adicional baseado no último uso
-        if len(GRAPH_RATE_LIMIT) > 1:
-            last_interval = current_time - GRAPH_RATE_LIMIT[-2]
-            if last_interval < 15:  # Se o último gráfico foi gerado há menos de 15 segundos
-                await asyncio.sleep(15 - last_interval)
+        # Verificar e respeitar rate limits
+        await check_graph_rate_limit()
         
         # Limitar aos últimos 30 dias
         cutoff_date = datetime.now() - timedelta(days=30)
@@ -147,23 +154,13 @@ async def generate_activity_graph(member: discord.Member, sessions: List[Dict]) 
             plt.close('all')
 
 async def generate_activity_report(member: discord.Member, sessions: list) -> Optional[discord.File]:
-    """Gera um relatório gráfico de atividade e retorna como discord.File com tratamento de erros"""
+    """Gera um relatório gráfico de atividade com tratamento robusto de erros"""
     try:
         # Verificar rate limit antes de gerar o gráfico
-        current_time = time.time()
-        
-        # Remover registros antigos (último minuto)
-        while GRAPH_RATE_LIMIT and current_time - GRAPH_RATE_LIMIT[0] > 60:
-            GRAPH_RATE_LIMIT.popleft()
-        
-        if len(GRAPH_RATE_LIMIT) >= GRAPH_RATE_LIMIT.maxlen:
+        if not await check_graph_rate_limit():
             logger.warning("Limite de geração de gráficos atingido, ignorando requisição")
             return None
             
-        # Adicionar delay para evitar sobrecarga
-        delay = max(2, 15 - (current_time - GRAPH_RATE_LIMIT[-1]) if GRAPH_RATE_LIMIT else 0)
-        await asyncio.sleep(delay)
-        
         buffer = await generate_activity_graph(member, sessions)
         if buffer:
             return discord.File(buffer, filename='atividade.png')
