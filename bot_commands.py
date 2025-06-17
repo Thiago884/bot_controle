@@ -980,13 +980,19 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
                     check = await cursor.fetchone()
             
             if check and check['total_sessions'] > 0:
-                await interaction.followup.send(
-                    "ℹ️ Há atividade registrada, mas insuficiente para criar um ranking.",
-                    ephemeral=True)
+                embed = discord.Embed(
+                    title=f"🏆 Ranking de Atividade (últimos {days} dias)",
+                    description=f"ℹ️ Foram registradas {check['total_sessions']} sessões de voz, mas insuficientes para criar um ranking.",
+                    color=discord.Color.blue()
+                )
+                await interaction.followup.send(embed=embed)
             else:
-                await interaction.followup.send(
-                    f"ℹ️ Nenhuma sessão de voz registrada nos últimos {days} dias.",
-                    ephemeral=True)
+                embed = discord.Embed(
+                    title=f"🏆 Ranking de Atividade (últimos {days} dias)",
+                    description=f"ℹ️ Nenhuma sessão de voz registrada nos últimos {days} dias.",
+                    color=discord.Color.blue()
+                )
+                await interaction.followup.send(embed=embed)
             return
         
         embed = discord.Embed(
