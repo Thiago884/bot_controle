@@ -66,23 +66,23 @@ def calculate_most_active_days(sessions: List[Dict], days: int) -> List[Tuple[st
     
     return active_days
 
-async def generate_activity_graph(member: discord.Member, sessions: List[Dict]) -> Optional[BytesIO]:
-    """Gera um gráfico de atividade do usuário com controle de rate limit"""
+async def generate_activity_graph(member: discord.Member, sessions: List[Dict], days: int = 14) -> Optional[BytesIO]:
+    """Gera um gráfico de atividade do usuário para o período específico"""
     try:
         # Verificar e respeitar rate limits
         await check_graph_rate_limit()
         
-        # Limitar aos últimos 30 dias
-        cutoff_date = datetime.now() - timedelta(days=30)
-        sessions = [s for s in sessions if s['join_time'].replace(tzinfo=None) >= cutoff_date]
+        # Filtrar sessões para o período solicitado
+        cutoff_date = datetime.now() - timedelta(days=days)
+        filtered_sessions = [s for s in sessions if s['join_time'].replace(tzinfo=None) >= cutoff_date]
         
-        if not sessions:
+        if not filtered_sessions:
             return None
 
         # Preparar dados para o gráfico
         dates = []
         durations = []
-        for session in sessions:
+        for session in filtered_sessions:
             join_time = session['join_time'].replace(tzinfo=None)
             dates.append(join_time)
             durations.append(session['duration'] / 60)  # Converter para minutos
@@ -120,7 +120,7 @@ async def generate_activity_graph(member: discord.Member, sessions: List[Dict]) 
                 bars[i].set_color('#ED4245')  # Cor diferente para fins de semana
 
         # Configurar título e labels
-        plt.title(f'Atividade de Voz - {member.display_name}\nÚltimos 30 dias', 
+        plt.title(f'Atividade de Voz - {member.display_name}\nÚltimos {days} dias', 
                  fontsize=12, pad=12)
         plt.xlabel('Dia da Semana', fontsize=10)
         plt.ylabel('Minutos em Voz', fontsize=10)
@@ -153,7 +153,7 @@ async def generate_activity_graph(member: discord.Member, sessions: List[Dict]) 
         if 'plt' in locals():
             plt.close('all')
 
-async def generate_activity_report(member: discord.Member, sessions: list) -> Optional[discord.File]:
+async def generate_activity_report(member: discord.Member, sessions: list, days: int = 14) -> Optional[discord.File]:
     """Gera um relatório gráfico de atividade com tratamento robusto de erros"""
     try:
         # Verificar rate limit antes de gerar o gráfico
@@ -161,7 +161,7 @@ async def generate_activity_report(member: discord.Member, sessions: list) -> Op
             logger.warning("Limite de geração de gráficos atingido, ignorando requisição")
             return None
             
-        buffer = await generate_activity_graph(member, sessions)
+        buffer = await generate_activity_graph(member, sessions, days)
         if buffer:
             return discord.File(buffer, filename='atividade.png')
         return None

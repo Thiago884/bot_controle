@@ -11,87 +11,6 @@ import numpy as np
 
 logger = logging.getLogger('inactivity_bot')
 
-# Comandos de administração para gerenciar cargos permitidos
-@bot.tree.command(name="allow_role", description="Adiciona um cargo à lista de cargos permitidos")
-@commands.has_permissions(administrator=True)
-async def allow_role(interaction: discord.Interaction, role: discord.Role):
-    """Adiciona um cargo à lista de cargos permitidos para usar comandos do bot"""
-    try:
-        logger.info(f"Comando allow_role acionado por {interaction.user} para o cargo {role.name}")
-        
-        if role.id not in bot.config['allowed_roles']:
-            bot.config['allowed_roles'].append(role.id)
-            await bot.save_config()
-            
-            embed = discord.Embed(
-                title="✅ Cargo Permitido Adicionado",
-                description=f"O cargo {role.mention} foi adicionado à lista de permissões.",
-                color=discord.Color.green()
-            )
-            await interaction.response.send_message(embed=embed)
-            
-            await bot.log_action(
-                "Cargo Permitido Adicionado",
-                interaction.user,
-                f"Cargo: {role.name} (ID: {role.id})"
-            )
-            logger.info(f"Cargo {role.name} adicionado à lista de permissões")
-        else:
-            embed = discord.Embed(
-                title="ℹ️ Informação",
-                description="Este cargo já está na lista de permissões.",
-                color=discord.Color.blue()
-            )
-            await interaction.response.send_message(embed=embed)
-    except Exception as e:
-        logger.error(f"Erro ao adicionar cargo permitido: {e}")
-        embed = discord.Embed(
-            title="❌ Erro",
-            description="Ocorreu um erro ao adicionar o cargo. Por favor, tente novamente.",
-            color=discord.Color.red()
-        )
-        await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="disallow_role", description="Remove um cargo da lista de cargos permitidos")
-@commands.has_permissions(administrator=True)
-async def disallow_role(interaction: discord.Interaction, role: discord.Role):
-    """Remove um cargo da lista de cargos permitidos para usar comandos do bot"""
-    try:
-        logger.info(f"Comando disallow_role acionado por {interaction.user} para o cargo {role.name}")
-        
-        if role.id in bot.config['allowed_roles']:
-            bot.config['allowed_roles'].remove(role.id)
-            await bot.save_config()
-            
-            embed = discord.Embed(
-                title="✅ Cargo Permitido Removido",
-                description=f"O cargo {role.mention} foi removido da lista de permissões.",
-                color=discord.Color.green()
-            )
-            await interaction.response.send_message(embed=embed)
-            
-            await bot.log_action(
-                "Cargo Permitido Removido",
-                interaction.user,
-                f"Cargo: {role.name} (ID: {role.id})"
-            )
-            logger.info(f"Cargo {role.name} removido da lista de permissões")
-        else:
-            embed = discord.Embed(
-                title="ℹ️ Informação",
-                description="Este cargo não estava na lista de permissões.",
-                color=discord.Color.blue()
-            )
-            await interaction.response.send_message(embed=embed)
-    except Exception as e:
-        logger.error(f"Erro ao remover cargo permitido: {e}")
-        embed = discord.Embed(
-            title="❌ Erro",
-            description="Ocorreu um erro ao remover o cargo. Por favor, tente novamente.",
-            color=discord.Color.red()
-        )
-        await interaction.response.send_message(embed=embed)
-
 @bot.tree.command(name="list_allowed_roles", description="Lista os cargos com permissão para usar comandos")
 async def list_allowed_roles(interaction: discord.Interaction):
     """Lista todos os cargos que têm permissão para usar comandos do bot"""
@@ -129,7 +48,6 @@ async def list_allowed_roles(interaction: discord.Interaction):
         )
         await interaction.response.send_message(embed=embed)
 
-# Comandos Slash com restrição de cargos permitidos
 @bot.tree.command(name="set_inactivity", description="Define o número de dias do período de monitoramento")
 @allowed_roles_only()
 @commands.has_permissions(administrator=True)
@@ -870,7 +788,7 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
         try:
             if voice_sessions:
                 try:
-                    report_file = await generate_activity_report(member, voice_sessions)
+                    report_file = await generate_activity_report(member, voice_sessions, days)
                     if report_file:
                         await interaction.followup.send(embed=embed, file=report_file)
                         return
@@ -922,13 +840,10 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
                 
         await interaction.response.defer(thinking=True)
         
-        # Adicionar delay inicial para evitar rate limit
-        await asyncio.sleep(2)
-        
         end_date = datetime.now(bot.timezone)
         start_date = end_date - timedelta(days=days)
         
-        # Obter ranking do banco de dados
+        # Obter ranking completo do banco de dados
         async with bot.db.pool.acquire() as conn:
             async with conn.cursor() as cursor:
                 await cursor.execute('''
@@ -936,83 +851,77 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
                         user_id, 
                         SUM(duration) as total_time,
                         COUNT(DISTINCT DATE(join_time)) as active_days,
-                        COUNT(*) as session_count
+                        COUNT(*) as session_count,
+                        AVG(duration) as avg_duration
                     FROM voice_sessions
                     WHERE guild_id = %s
                     AND join_time >= %s 
-                    AND join_time <= %s
+                    AND leave_time <= %s
                     GROUP BY user_id
                     ORDER BY total_time DESC
-                    LIMIT %s
-                ''', (
-                    interaction.guild.id, 
-                    start_date, 
-                    end_date,
-                    limit
-                ))
+                ''', (interaction.guild.id, start_date, end_date))
                 
-                results = await cursor.fetchall()
+                all_results = await cursor.fetchall()
         
         # Processar resultados
-        ranking = []
-        for idx, row in enumerate(results, 1):
-            try:
-                member = interaction.guild.get_member(row['user_id'])
-                if member:
-                    total_hours = row['total_time'] / 3600
-                    avg_session = row['total_time'] / row['session_count'] / 60 if row['session_count'] > 0 else 0
-                    
-                    ranking.append(
-                        f"**{idx}.** {member.mention} - "
-                        f"**{total_hours:.1f}h** total "
-                        f"({row['active_days']} dias, "
-                        f"{row['session_count']} sessões, "
-                        f"⌀ {avg_session:.1f}min/sessão)"
-                    )
-            except Exception as e:
-                logger.error(f"Erro ao processar membro {row['user_id']}: {e}")
-                continue
-        
-        if not ranking:
-            # Verificar se há alguma sessão no período
-            async with bot.db.pool.acquire() as conn:
-                async with conn.cursor() as cursor:
-                    await cursor.execute('''
-                        SELECT 
-                            COUNT(*) as total_sessions,
-                            SUM(duration) as total_time
-                        FROM voice_sessions
-                        WHERE guild_id = %s
-                        AND join_time >= %s
-                        AND join_time <= %s
-                    ''', (interaction.guild.id, start_date, end_date))
-                    check = await cursor.fetchone()
-            
-            if check and check['total_sessions'] > 0:
-                embed = discord.Embed(
-                    title=f"🏆 Ranking de Atividade (últimos {days} dias)",
-                    description=(
-                        f"ℹ️ Foram registradas {check['total_sessions']} sessões de voz "
-                        f"({check['total_time']/3600:.1f}h total)."
-                    ),
-                    color=discord.Color.blue()
-                )
-            else:
-                embed = discord.Embed(
-                    title=f"🏆 Ranking de Atividade (últimos {days} dias)",
-                    description=f"ℹ️ Nenhuma sessão de voz registrada nos últimos {days} dias.",
-                    color=discord.Color.blue()
-                )
+        if not all_results:
+            embed = discord.Embed(
+                title=f"🏆 Ranking de Atividade (últimos {days} dias)",
+                description=f"ℹ️ Nenhuma sessão de voz registrada nos últimos {days} dias.",
+                color=discord.Color.blue()
+            )
             await interaction.followup.send(embed=embed)
             return
         
+        # Pegar apenas os top N resultados
+        top_results = all_results[:limit]
+        
+        # Obter informações dos membros
+        members_info = {}
+        for member in interaction.guild.members:
+            members_info[member.id] = member.display_name
+        
+        # Construir ranking
+        ranking = []
+        for idx, row in enumerate(top_results, 1):
+            member_name = members_info.get(row['user_id'], f"Usuário desconhecido ({row['user_id']})")
+            total_hours = row['total_time'] / 3600
+            avg_session = row['avg_duration'] / 60
+            
+            ranking.append(
+                f"**{idx}.** {member_name} - "
+                f"**{total_hours:.1f}h** total "
+                f"({row['active_days']} dias ativos, "
+                f"{row['session_count']} sessões, "
+                f"⌀ {avg_session:.1f} min/sessão)"
+            )
+        
+        # Calcular estatísticas gerais
+        total_sessions = sum(row['session_count'] for row in all_results)
+        total_time = sum(row['total_time'] for row in all_results)
+        avg_time_per_user = total_time / len(all_results) if all_results else 0
+        
+        # Criar embed
         embed = discord.Embed(
             title=f"🏆 Ranking de Atividade (últimos {days} dias)",
             description="\n".join(ranking),
             color=discord.Color.gold(),
-            timestamp=datetime.now(bot.timezone))
+            timestamp=datetime.now(bot.timezone)
+        )
         
-        embed.set_footer(text=f"Top {limit} usuários mais ativos")
+        # Adicionar estatísticas gerais
+        embed.add_field(
+            name="📊 Estatísticas Gerais",
+            value=(
+                f"**Total de usuários ativos:** {len(all_results)}\n"
+                f"**Total de sessões:** {total_sessions}\n"
+                f"**Tempo total em voz:** {total_time/3600:.1f}h\n"
+                f"**Média por usuário:** {avg_time_per_user/3600:.1f}h"
+            ),
+            inline=False
+        )
+        
+        embed.set_footer(text=f"Top {limit} usuários mais ativos | Período: {days} dias")
         
         try:
             await interaction.followup.send(embed=embed)
@@ -1067,16 +976,94 @@ async def force_check(interaction: discord.Interaction, member: discord.Member):
         from tasks import _execute_force_check
         result = await _execute_force_check(member)
         
+        # Verificar se o usuário tem cargos monitorados
+        tracked_roles = bot.config['tracked_roles']
+        member_tracked_roles = [role for role in member.roles if role.id in tracked_roles]
+        
+        embed = discord.Embed(
+            title=f"Verificação de Atividade - {member.display_name}",
+            color=discord.Color.blue()
+        )
+        
         if result['meets_requirements']:
-            message = f"✅ {member.mention} está cumprindo os requisitos de atividade."
+            embed.description = f"✅ {member.mention} está cumprindo os requisitos de atividade."
+            embed.color = discord.Color.green()
         else:
-            message = (
+            embed.description = (
                 f"⚠️ {member.mention} não está cumprindo os requisitos de atividade.\n"
-                f"Dias válidos: {result['valid_days']}/{result['required_days']}\n"
-                f"Sessões no período: {result['sessions_count']}"
+                f"**Dias válidos:** {result['valid_days']}/{result['required_days']}\n"
+                f"**Sessões no período:** {result['sessions_count']}"
+            )
+            embed.color = discord.Color.orange()
+            
+            # Adicionar informações sobre o período
+            embed.add_field(
+                name="Período Analisado",
+                value=(
+                    f"**Início:** {result['period_start'].strftime('%d/%m/%Y')}\n"
+                    f"**Término:** {result['period_end'].strftime('%d/%m/%Y')}\n"
+                    f"**Dias:** {bot.config['monitoring_period']}"
+                ),
+                inline=True
+            )
+            
+            # Adicionar informações sobre os requisitos
+            embed.add_field(
+                name="Requisitos do Servidor",
+                value=(
+                    f"**Minutos necessários:** {bot.config['required_minutes']}\n"
+                    f"**Dias necessários:** {bot.config['required_days']}"
+                ),
+                inline=True
             )
         
-        await interaction.followup.send(message)
+        # Criar view com botões se o usuário tiver cargos monitorados e não cumprir requisitos
+        view = None
+        if member_tracked_roles and not result['meets_requirements']:
+            view = discord.ui.View()
+            button = discord.ui.Button(
+                style=discord.ButtonStyle.danger,
+                label="Remover Cargos Monitorados",
+                custom_id=f"remove_roles_{member.id}"
+            )
+            
+            async def button_callback(interaction: discord.Interaction):
+                if not any(role.id in bot.config['allowed_roles'] for role in interaction.user.roles):
+                    await interaction.response.send_message(
+                        "❌ Você não tem permissão para executar esta ação.", 
+                        ephemeral=True)
+                    return
+                
+                try:
+                    await member.remove_roles(*member_tracked_roles)
+                    await bot.db.log_removed_roles(member.id, member.guild.id, [r.id for r in member_tracked_roles])
+                    
+                    removed_roles = ", ".join([f"`{role.name}`" for role in member_tracked_roles])
+                    await interaction.response.send_message(
+                        f"✅ Cargos removidos com sucesso: {removed_roles}",
+                        ephemeral=True)
+                    
+                    # Atualizar a mensagem original
+                    embed.color = discord.Color.red()
+                    embed.description = f"🚨 Cargos removidos de {member.mention} por inatividade."
+                    await interaction.message.edit(embed=embed, view=None)
+                    
+                    await bot.log_action(
+                        "Cargo Removido (Forçado)",
+                        interaction.user,
+                        f"Cargos removidos de {member.mention}: {removed_roles}"
+                    )
+                    
+                except Exception as e:
+                    logger.error(f"Erro ao remover cargos: {e}")
+                    await interaction.response.send_message(
+                        "❌ Ocorreu um erro ao remover os cargos.",
+                        ephemeral=True)
+            
+            button.callback = button_callback
+            view.add_item(button)
+        
+        await interaction.followup.send(embed=embed, view=view)
         
         await bot.log_action(
             "Verificação Forçada",

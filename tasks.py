@@ -600,6 +600,9 @@ async def _execute_force_check(member: discord.Member):
                     valid_days.add(day)
             
             meets_requirements = len(valid_days) >= required_days
+        else:
+            # Usuário não tem nenhuma sessão registrada - automaticamente não cumpre
+            meets_requirements = False
         
         # Registrar verificação
         start_time = time.time()
