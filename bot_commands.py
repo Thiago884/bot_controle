@@ -8,6 +8,8 @@ from main import bot, allowed_roles_only
 import asyncio
 from utils import generate_activity_report, calculate_most_active_days
 import numpy as np
+import time
+from tasks import perf_metrics
 
 logger = logging.getLogger('inactivity_bot')
 
@@ -1003,6 +1005,7 @@ async def force_check(interaction: discord.Interaction, member: discord.Member):
         if result['meets_requirements']:
             embed.description = f"✅ {member.mention} está cumprindo os requisitos de atividade."
             embed.color = discord.Color.green()
+            await interaction.followup.send(embed=embed)
         else:
             embed.description = (
                 f"⚠️ {member.mention} não está cumprindo os requisitos de atividade.\n"
@@ -1031,55 +1034,60 @@ async def force_check(interaction: discord.Interaction, member: discord.Member):
                 ),
                 inline=True
             )
-        
-        # Criar view com botões se o usuário tiver cargos monitorados e não cumprir requisitos
-        view = None
-        if manageable_roles and not result['meets_requirements']:
-            view = discord.ui.View()
-            button = discord.ui.Button(
-                style=discord.ButtonStyle.danger,
-                label="Remover Cargos Monitorados",
-                custom_id=f"remove_roles_{member.id}"
-            )
             
-            async def button_callback(interaction: discord.Interaction):
-                if not any(role.id in bot.config['allowed_roles'] for role in interaction.user.roles):
-                    await interaction.response.send_message(
-                        "❌ Você não tem permissão para executar esta ação.", 
-                        ephemeral=True)
-                    return
+            # Criar view com botões se o usuário tiver cargos monitorados e não cumprir requisitos
+            if manageable_roles:
+                view = discord.ui.View()
+                button = discord.ui.Button(
+                    style=discord.ButtonStyle.danger,
+                    label="Remover Cargos Monitorados",
+                    custom_id=f"remove_roles_{member.id}"
+                )
                 
-                try:
-                    await member.remove_roles(*manageable_roles)
-                    await bot.db.log_removed_roles(member.id, member.guild.id, [r.id for r in manageable_roles])
+                async def button_callback(interaction: discord.Interaction):
+                    if not any(role.id in bot.config['allowed_roles'] for role in interaction.user.roles):
+                        await interaction.response.send_message(
+                            "❌ Você não tem permissão para executar esta ação.", 
+                            ephemeral=True)
+                        return
                     
-                    removed_roles = ", ".join([f"`{role.name}`" for role in manageable_roles])
-                    await interaction.response.send_message(
-                        f"✅ Cargos removidos com sucesso: {removed_roles}",
-                        ephemeral=True)
-                    
-                    # Atualizar a mensagem original
-                    embed.color = discord.Color.red()
-                    embed.description = f"🚨 Cargos removidos de {member.mention} por inatividade."
-                    await interaction.message.edit(embed=embed, view=None)
-                    
-                    await bot.log_action(
-                        "Cargo Removido (Forçado)",
-                        interaction.user,
-                        f"Cargos removidos de {member.mention}: {removed_roles}"
-                    )
-                    
-                except Exception as e:
-                    logger.error(f"Erro ao remover cargos: {e}")
-                    await interaction.response.send_message(
-                        "❌ Ocorreu um erro ao remover os cargos.",
-                        ephemeral=True)
+                    try:
+                        start_time = time.time()
+                        await member.remove_roles(*manageable_roles)
+                        perf_metrics.record_api_call(time.time() - start_time)
+                        
+                        start_time = time.time()
+                        await bot.db.log_removed_roles(member.id, member.guild.id, [r.id for r in manageable_roles])
+                        perf_metrics.record_db_query(time.time() - start_time)
+                        
+                        removed_roles = ", ".join([f"`{role.name}`" for role in manageable_roles])
+                        await interaction.response.send_message(
+                            f"✅ Cargos removidos com sucesso: {removed_roles}",
+                            ephemeral=True)
+                        
+                        # Atualizar a mensagem original
+                        embed.color = discord.Color.red()
+                        embed.description = f"🚨 Cargos removidos de {member.mention} por inatividade."
+                        await interaction.message.edit(embed=embed, view=None)
+                        
+                        await bot.log_action(
+                            "Cargo Removido (Forçado)",
+                            interaction.user,
+                            f"Cargos removidos de {member.mention}: {removed_roles}"
+                        )
+                        
+                    except Exception as e:
+                        logger.error(f"Erro ao remover cargos: {e}")
+                        await interaction.response.send_message(
+                            "❌ Ocorreu um erro ao remover os cargos.",
+                            ephemeral=True)
+                
+                button.callback = button_callback
+                view.add_item(button)
+                await interaction.followup.send(embed=embed, view=view)
+            else:
+                await interaction.followup.send(embed=embed)
             
-            button.callback = button_callback
-            view.add_item(button)
-        
-        await interaction.followup.send(embed=embed, view=view)
-        
         await bot.log_action(
             "Verificação Forçada",
             interaction.user,
