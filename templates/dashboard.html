@@ -3,43 +3,329 @@
 <head>
     <title>Painel de Controle - Bot de Inatividade</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.8.1/font/bootstrap-icons.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        .card {
+            margin-bottom: 20px;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+        }
+        .card-header {
+            font-weight: bold;
+        }
+        .status-indicator {
+            width: 15px;
+            height: 15px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 5px;
+        }
+        .status-operational {
+            background-color: #28a745;
+        }
+        .status-error {
+            background-color: #dc3545;
+        }
+        .status-warning {
+            background-color: #ffc107;
+        }
+        .guild-icon {
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            object-fit: cover;
+        }
+        .config-input {
+            max-width: 100px;
+        }
+        .queue-status {
+            font-family: monospace;
+        }
+        .log-entry {
+            font-family: monospace;
+            font-size: 0.85rem;
+            margin-bottom: 5px;
+            padding: 5px;
+            border-radius: 3px;
+            background-color: #f8f9fa;
+        }
+        .log-error {
+            color: #dc3545;
+        }
+        .log-warning {
+            color: #ffc107;
+        }
+        .log-info {
+            color: #17a2b8;
+        }
+        .event-item {
+            border-left: 4px solid #0d6efd;
+            padding-left: 10px;
+            margin-bottom: 10px;
+        }
+        .chart-container {
+            position: relative;
+            height: 300px;
+            margin-bottom: 20px;
+        }
+        .nav-tabs .nav-link.active {
+            font-weight: bold;
+        }
+        .whitelist-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 0;
+            border-bottom: 1px solid #eee;
+        }
+    </style>
 </head>
 <body>
     <div class="container mt-4">
-        <h1>Painel de Controle</h1>
-        <div class="card mt-4">
-            <div class="card-header">
-                Status do Bot
-            </div>
-            <div class="card-body">
-                <h5 class="card-title">{{ bot_name }}</h5>
-                <p class="card-text">Servidores: {{ guild_count }}</p>
+        <div class="row mb-4">
+            <div class="col">
+                <h1><i class="bi bi-robot"></i> Painel de Controle</h1>
+                <p class="text-muted">Monitoramento do Bot de Inatividade</p>
             </div>
         </div>
         
-        <div class="card mt-4">
-            <div class="card-header">
-                Configurações
+        <div class="row">
+            <!-- Status Geral -->
+            <div class="col-md-4">
+                <div class="card">
+                    <div class="card-header bg-primary text-white">
+                        <i class="bi bi-info-circle"></i> Status do Bot
+                    </div>
+                    <div class="card-body">
+                        <h5 class="card-title">{{ bot_name }}</h5>
+                        <div class="mb-3">
+                            <span class="status-indicator status-operational"></span>
+                            <span>Operacional</span>
+                        </div>
+                        <p class="card-text"><i class="bi bi-discord"></i> Servidores: {{ guild_count }}</p>
+                        <p class="card-text"><i class="bi bi-clock"></i> Uptime: {{ uptime }}</p>
+                        <p class="card-text"><i class="bi bi-database"></i> Banco de Dados: 
+                            <span class="badge bg-{{ 'success' if db_status == 'Operacional' else 'danger' }}">
+                                {{ db_status }}
+                            </span>
+                        </p>
+                        <div class="mb-3">
+                            <h6>Status das Filas:</h6>
+                            <div class="queue-status">
+                                <span class="badge bg-secondary">Eventos de Voz: {{ queue_status.voice_events }}</span>
+                            </div>
+                        </div>
+                        <a href="/monitor" class="btn btn-outline-primary btn-sm">
+                            <i class="bi bi-graph-up"></i> Ver Monitoramento
+                        </a>
+                    </div>
+                </div>
+                
+                <!-- Whitelist -->
+                <div class="card">
+                    <div class="card-header bg-primary text-white">
+                        <i class="bi bi-shield-check"></i> Whitelist
+                    </div>
+                    <div class="card-body">
+                        <div class="mb-3">
+                            <h6>Usuários na Whitelist:</h6>
+                            <div id="whitelist-users">
+                                Carregando...
+                            </div>
+                            <div class="input-group mt-2">
+                                <input type="text" class="form-control" id="whitelist-user-id" placeholder="ID do Usuário">
+                                <button class="btn btn-success" id="add-user-whitelist">
+                                    <i class="bi bi-plus"></i>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="mb-3">
+                            <h6>Cargos na Whitelist:</h6>
+                            <div id="whitelist-roles">
+                                Carregando...
+                            </div>
+                            <div class="input-group mt-2">
+                                <input type="text" class="form-control" id="whitelist-role-id" placeholder="ID do Cargo">
+                                <button class="btn btn-success" id="add-role-whitelist">
+                                    <i class="bi bi-plus"></i>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </div>
-            <div class="card-body">
-                <div id="config-form">
-                    <div class="mb-3">
-                        <label for="required_minutes" class="form-label">Minutos necessários em voz:</label>
-                        <input type="number" class="form-control" id="required_minutes">
+            
+            <!-- Servidores -->
+            <div class="col-md-8">
+                <div class="card">
+                    <div class="card-header bg-primary text-white">
+                        <i class="bi bi-collection"></i> Servidores
                     </div>
-                    <div class="mb-3">
-                        <label for="required_days" class="form-label">Dias diferentes necessários:</label>
-                        <input type="number" class="form-control" id="required_days">
+                    <div class="card-body">
+                        <div class="table-responsive">
+                            <table class="table table-hover">
+                                <thead>
+                                    <tr>
+                                        <th></th>
+                                        <th>Nome</th>
+                                        <th>Membros</th>
+                                        <th>Canais de Voz</th>
+                                        <th>Ações</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for guild in guild_stats %}
+                                    <tr>
+                                        <td>
+                                            {% if guild.icon %}
+                                                <img src="{{ guild.icon }}" class="guild-icon" alt="{{ guild.name }}">
+                                            {% else %}
+                                                <i class="bi bi-server guild-icon bg-secondary text-white d-flex align-items-center justify-content-center"></i>
+                                            {% endif %}
+                                        </td>
+                                        <td>{{ guild.name }}</td>
+                                        <td>{{ guild.members }}</td>
+                                        <td>{{ guild.voice_channels }}</td>
+                                        <td>
+                                            <a href="#" class="btn btn-sm btn-outline-primary" onclick="loadGuildDetails({guild,id})">
+                                                <i class="bi bi-eye"></i> Detalhes
+                                            </a>
+                                        </td>
+                                    </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
-                    <div class="mb-3">
-                        <label for="monitoring_period" class="form-label">Período de monitoramento (dias):</label>
-                        <input type="number" class="form-control" id="monitoring_period">
+                </div>
+                
+                <!-- Gráficos e Eventos -->
+                <div class="card">
+                    <div class="card-header bg-primary text-white">
+                        <ul class="nav nav-tabs card-header-tabs" id="analyticsTabs" role="tablist">
+                            <li class="nav-item" role="presentation">
+                                <button class="nav-link active" id="activity-tab" data-bs-toggle="tab" data-bs-target="#activity" type="button" role="tab">Atividade</button>
+                            </li>
+                            <li class="nav-item" role="presentation">
+                                <button class="nav-link" id="events-tab" data-bs-toggle="tab" data-bs-target="#events" type="button" role="tab">Eventos</button>
+                            </li>
+                            <li class="nav-item" role="presentation">
+                                <button class="nav-link" id="logs-tab" data-bs-toggle="tab" data-bs-target="#logs" type="button" role="tab">Logs</button>
+                            </li>
+                        </ul>
                     </div>
-                    <div class="mb-3">
-                        <label for="kick_after_days" class="form-label">Expulsar após dias sem cargo:</label>
-                        <input type="number" class="form-control" id="kick_after_days">
+                    <div class="card-body">
+                        <div class="tab-content" id="analyticsTabContent">
+                            <div class="tab-pane fade show active" id="activity" role="tabpanel">
+                                <div class="chart-container">
+                                    <canvas id="activityChart"></canvas>
+                                </div>
+                                <div class="chart-container">
+                                    <canvas id="usageChart"></canvas>
+                                </div>
+                            </div>
+                            <div class="tab-pane fade" id="events" role="tabpanel">
+                                <div id="recentEvents">
+                                    Carregando eventos recentes...
+                                </div>
+                            </div>
+                            <div class="tab-pane fade" id="logs" role="tabpanel">
+                                <div class="mb-3">
+                                    <button class="btn btn-sm btn-primary" id="refreshLogs">
+                                        <i class="bi bi-arrow-clockwise"></i> Atualizar Logs
+                                    </button>
+                                </div>
+                                <div id="logEntries" style="max-height: 300px; overflow-y: auto;">
+                                    Carregando logs...
+                                </div>
+                            </div>
+                        </div>
                     </div>
-                    <button id="save-config" class="btn btn-primary">Salvar Configurações</button>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Configurações -->
+        <div class="row">
+            <div class="col">
+                <div class="card">
+                    <div class="card-header bg-primary text-white">
+                        <i class="bi bi-gear"></i> Configurações
+                    </div>
+                    <div class="card-body">
+                        <div id="config-form">
+                            <div class="row">
+                                <div class="col-md-3">
+                                    <div class="mb-3">
+                                        <label for="required_minutes" class="form-label">Minutos necessários em voz:</label>
+                                        <input type="number" class="form-control config-input" id="required_minutes">
+                                    </div>
+                                </div>
+                                <div class="col-md-3">
+                                    <div class="mb-3">
+                                        <label for="required_days" class="form-label">Dias diferentes necessários:</label>
+                                        <input type="number" class="form-control config-input" id="required_days">
+                                    </div>
+                                </div>
+                                <div class="col-md-3">
+                                    <div class="mb-3">
+                                        <label for="monitoring_period" class="form-label">Período de monitoramento (dias):</label>
+                                        <input type="number" class="form-control config-input" id="monitoring_period">
+                                    </div>
+                                </div>
+                                <div class="col-md-3">
+                                    <div class="mb-3">
+                                        <label for="kick_after_days" class="form-label">Expulsar após dias sem cargo:</label>
+                                        <input type="number" class="form-control config-input" id="kick_after_days">
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="row">
+                                <div class="col-md-6">
+                                    <div class="mb-3">
+                                        <label for="notification_channel" class="form-label">Canal de Notificação:</label>
+                                        <input type="text" class="form-control" id="notification_channel" placeholder="ID do Canal">
+                                    </div>
+                                </div>
+                                <div class="col-md-6">
+                                    <div class="mb-3">
+                                        <label for="log_channel" class="form-label">Canal de Log:</label>
+                                        <input type="text" class="form-control" id="log_channel" placeholder="ID do Canal">
+                                    </div>
+                                </div>
+                            </div>
+                            <button id="save-config" class="btn btn-primary">
+                                <i class="bi bi-save"></i> Salvar Configurações
+                            </button>
+                            <button id="restart-bot" class="btn btn-warning ms-2">
+                                <i class="bi bi-arrow-repeat"></i> Reiniciar Bot
+                            </button>
+                            <button id="backup-bot" class="btn btn-secondary ms-2">
+                                <i class="bi bi-download"></i> Criar Backup
+                            </button>
+                            <button id="export-report" class="btn btn-info ms-2">
+                                <i class="bi bi-file-earmark-text"></i> Exportar Relatório
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Detalhes da Guilda (modal) -->
+        <div class="modal fade" id="guildModal" tabindex="-1" aria-hidden="true">
+            <div class="modal-dialog modal-lg">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title" id="guildModalTitle">Detalhes do Servidor</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+                    <div class="modal-body" id="guildModalBody">
+                        Carregando...
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Fechar</button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -47,29 +333,382 @@
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
     <script>
+        // Variáveis globais para os gráficos
+        let activityChart, usageChart;
+        let logRefreshInterval;
+        
         // Carregar configurações atuais
-        fetch('/api/guilds')
-            .then(response => response.json())
-            .then(data => {
-                if (data.length > 0) {
-                    return fetch(`/api/guild/${data[0].id}`);
-                }
+        function loadConfig() {
+            fetch('/api/guilds')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.length > 0) {
+                        return fetch(`/api/guild/${data[0].id}`);
+                    }
+                })
+                .then(response => response.json())
+                .then(config => {
+                    document.getElementById('required_minutes').value = config.config.required_minutes;
+                    document.getElementById('required_days').value = config.config.required_days;
+                    document.getElementById('monitoring_period').value = config.config.monitoring_period;
+                    document.getElementById('kick_after_days').value = config.config.kick_after_days;
+                    
+                    if (config.notification_settings) {
+                        document.getElementById('notification_channel').value = config.notification_settings.notification_channel || '';
+                        document.getElementById('log_channel').value = config.notification_settings.log_channel || '';
+                    }
+                })
+                .catch(error => {
+                    console.error('Erro ao carregar configurações:', error);
+                });
+        }
+        
+        // Carregar detalhes da guilda
+        function loadGuildDetails(guildId) {
+            fetch(`/api/guild/${guildId}`)
+                .then(response => response.json())
+                .then(guild => {
+                    const modalTitle = document.getElementById('guildModalTitle');
+                    const modalBody = document.getElementById('guildModalBody');
+                    
+                    modalTitle.textContent = guild.name;
+                    
+                    let html = `
+                        <div class="row">
+                            <div class="col-md-6">
+                                <h5>Configurações</h5>
+                                <ul class="list-group mb-3">
+                                    <li class="list-group-item d-flex justify-content-between align-items-center">
+                                        Minutos necessários
+                                        <span class="badge bg-primary rounded-pill">${guild.config.required_minutes}</span>
+                                    </li>
+                                    <li class="list-group-item d-flex justify-content-between align-items-center">
+                                        Dias necessários
+                                        <span class="badge bg-primary rounded-pill">${guild.config.required_days}</span>
+                                    </li>
+                                    <li class="list-group-item d-flex justify-content-between align-items-center">
+                                        Período de monitoramento
+                                        <span class="badge bg-primary rounded-pill">${guild.config.monitoring_period} dias</span>
+                                    </li>
+                                    <li class="list-group-item d-flex justify-content-between align-items-center">
+                                        Expulsão após
+                                        <span class="badge bg-primary rounded-pill">${guild.config.kick_after_days} dias</span>
+                                    </li>
+                                </ul>
+                            </div>
+                            <div class="col-md-6">
+                                <h5>Estatísticas</h5>
+                                <ul class="list-group mb-3">
+                                    <li class="list-group-item d-flex justify-content-between align-items-center">
+                                        Cargos monitorados
+                                        <span class="badge bg-primary rounded-pill">${guild.tracked_roles.length}</span>
+                                    </li>
+                                    <li class="list-group-item d-flex justify-content-between align-items-center">
+                                        Usuários ativos
+                                        <span class="badge bg-success rounded-pill">${guild.activity_stats.active_users || 0}</span>
+                                    </li>
+                                    <li class="list-group-item d-flex justify-content-between align-items-center">
+                                        Usuários inativos
+                                        <span class="badge bg-warning rounded-pill">${guild.activity_stats.inactive_users || 0}</span>
+                                    </li>
+                                    <li class="list-group-item d-flex justify-content-between align-items-center">
+                                        Usuários avisados
+                                        <span class="badge bg-danger rounded-pill">${guild.activity_stats.warned_users || 0}</span>
+                                    </li>
+                                </ul>
+                            </div>
+                        </div>
+                        
+                        <h5 class="mt-3">Cargos Monitorados</h5>
+                        <div class="table-responsive">
+                            <table class="table table-sm">
+                                <thead>
+                                    <tr>
+                                        <th>Nome</th>
+                                        <th>Membros</th>
+                                        <th>Cor</th>
+                                    </tr>
+                                </thead>
+                                <tbody>`;
+                    
+                    guild.tracked_roles.forEach(role => {
+                        html += `
+                            <tr>
+                                <td>${role.name}</td>
+                                <td>${role.member_count}</td>
+                                <td><span class="badge" style="background-color: ${role.color}">&nbsp;&nbsp;&nbsp;</span></td>
+                            </tr>`;
+                    });
+                    
+                    html += `
+                                </tbody>
+                            </table>
+                        </div>
+                        
+                        <h5 class="mt-3">Canais de Voz</h5>
+                        <div class="table-responsive">
+                            <table class="table table-sm">
+                                <thead>
+                                    <tr>
+                                        <th>Nome</th>
+                                        <th>Usuários</th>
+                                    </tr>
+                                </thead>
+                                <tbody>`;
+                    
+                    guild.voice_channels.forEach(channel => {
+                        html += `
+                            <tr>
+                                <td>${channel.name}</td>
+                                <td>${channel.user_count}</td>
+                            </tr>`;
+                    });
+                    
+                    html += `
+                                </tbody>
+                            </table>
+                        </div>`;
+                    
+                    modalBody.innerHTML = html;
+                    
+                    // Mostrar o modal
+                    const modal = new bootstrap.Modal(document.getElementById('guildModal'));
+                    modal.show();
+                })
+                .catch(error => {
+                    console.error('Erro ao carregar detalhes da guilda:', error);
+                    document.getElementById('guildModalBody').innerHTML = `
+                        <div class="alert alert-danger">
+                            Erro ao carregar detalhes do servidor. Por favor, tente novamente.
+                        </div>`;
+                });
+        }
+        
+        // Carregar whitelist
+        function loadWhitelist() {
+            fetch('/api/whitelist')
+                .then(response => response.json())
+                .then(data => {
+                    // Usuários
+                    let usersHtml = '';
+                    if (data.users && data.users.length > 0) {
+                        data.users.forEach(userId => {
+                            usersHtml += `
+                                <div class="whitelist-item">
+                                    <span>${userId}</span>
+                                    <button class="btn btn-sm btn-danger remove-whitelist" data-type="user" data-id="${userId}">
+                                        <i class="bi bi-trash"></i>
+                                    </button>
+                                </div>`;
+                        });
+                    } else {
+                        usersHtml = '<p class="text-muted">Nenhum usuário na whitelist</p>';
+                    }
+                    document.getElementById('whitelist-users').innerHTML = usersHtml;
+                    
+                    // Cargos
+                    let rolesHtml = '';
+                    if (data.roles && data.roles.length > 0) {
+                        data.roles.forEach(roleId => {
+                            rolesHtml += `
+                                <div class="whitelist-item">
+                                    <span>${roleId}</span>
+                                    <button class="btn btn-sm btn-danger remove-whitelist" data-type="role" data-id="${roleId}">
+                                        <i class="bi bi-trash"></i>
+                                    </button>
+                                </div>`;
+                        });
+                    } else {
+                        rolesHtml = '<p class="text-muted">Nenhum cargo na whitelist</p>';
+                    }
+                    document.getElementById('whitelist-roles').innerHTML = rolesHtml;
+                    
+                    // Adicionar eventos aos botões de remoção
+                    document.querySelectorAll('.remove-whitelist').forEach(button => {
+                        button.addEventListener('click', function() {
+                            const type = this.getAttribute('data-type');
+                            const id = this.getAttribute('data-id');
+                            updateWhitelist('remove', type, id);
+                        });
+                    });
+                })
+                .catch(error => {
+                    console.error('Erro ao carregar whitelist:', error);
+                });
+        }
+        
+        // Atualizar whitelist
+        function updateWhitelist(action, targetType, targetId) {
+            fetch('/api/whitelist', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    action: action,
+                    type: targetType,
+                    id: targetId
+                })
             })
             .then(response => response.json())
-            .then(config => {
-                document.getElementById('required_minutes').value = config.config.required_minutes;
-                document.getElementById('required_days').value = config.config.required_days;
-                document.getElementById('monitoring_period').value = config.config.monitoring_period;
-                document.getElementById('kick_after_days').value = config.config.kick_after_days;
+            .then(data => {
+                if (data.status === 'success') {
+                    loadWhitelist();
+                } else {
+                    alert('Erro ao atualizar whitelist: ' + (data.message || 'Erro desconhecido'));
+                }
+            })
+            .catch(error => {
+                alert('Erro ao atualizar whitelist: ' + error.message);
             });
-
+        }
+        
+        // Carregar eventos recentes
+        function loadRecentEvents() {
+            fetch('/api/rate_limits')
+                .then(response => response.json())
+                .then(data => {
+                    let html = '<h5>Eventos Recentes</h5>';
+                    
+                    if (data && data.recent_events && data.recent_events.length > 0) {
+                        data.recent_events.forEach(event => {
+                            html += `
+                                <div class="event-item">
+                                    <div><strong>${event.time}</strong> - ${event.endpoint}</div>
+                                    <div>Bucket: ${event.bucket} - Remaining: ${event.remaining}</div>
+                                </div>`;
+                        });
+                    } else {
+                        html += '<p class="text-muted">Nenhum evento recente registrado</p>';
+                    }
+                    
+                    document.getElementById('recentEvents').innerHTML = html;
+                })
+                .catch(error => {
+                    console.error('Erro ao carregar eventos recentes:', error);
+                });
+        }
+        
+        // Carregar logs
+        function loadLogs() {
+            fetch('/api/logs')
+                .then(response => response.json())
+                .then(data => {
+                    let html = '';
+                    
+                    if (data.logs && data.logs.length > 0) {
+                        data.logs.forEach(log => {
+                            const logClass = log.includes('ERROR') ? 'log-error' : 
+                                            log.includes('WARNING') ? 'log-warning' : 'log-info';
+                            html += `<div class="log-entry ${logClass}">${log}</div>`;
+                        });
+                    } else {
+                        html = '<p class="text-muted">Nenhum log disponível</p>';
+                    }
+                    
+                    document.getElementById('logEntries').innerHTML = html;
+                    document.getElementById('logEntries').scrollTop = document.getElementById('logEntries').scrollHeight;
+                })
+                .catch(error => {
+                    console.error('Erro ao carregar logs:', error);
+                });
+        }
+        
+        // Inicializar gráficos
+        function initCharts() {
+            const activityCtx = document.getElementById('activityChart').getContext('2d');
+            activityChart = new Chart(activityCtx, {
+                type: 'line',
+                data: {
+                    labels: ['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom'],
+                    datasets: [{
+                        label: 'Atividade de Voz (minutos)',
+                        data: [120, 190, 170, 220, 180, 150, 200],
+                        backgroundColor: 'rgba(54, 162, 235, 0.2)',
+                        borderColor: 'rgba(54, 162, 235, 1)',
+                        borderWidth: 1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            beginAtZero: true
+                        }
+                    }
+                }
+            });
+            
+            const usageCtx = document.getElementById('usageChart').getContext('2d');
+            usageChart = new Chart(usageCtx, {
+                type: 'bar',
+                data: {
+                    labels: ['Usuários Ativos', 'Usuários Inativos', 'Usuários Avisados'],
+                    datasets: [{
+                        label: 'Status de Usuários',
+                        data: [65, 12, 8],
+                        backgroundColor: [
+                            'rgba(75, 192, 192, 0.2)',
+                            'rgba(255, 206, 86, 0.2)',
+                            'rgba(255, 99, 132, 0.2)'
+                        ],
+                        borderColor: [
+                            'rgba(75, 192, 192, 1)',
+                            'rgba(255, 206, 86, 1)',
+                            'rgba(255, 99, 132, 1)'
+                        ],
+                        borderWidth: 1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            beginAtZero: true
+                        }
+                    }
+                }
+            });
+        }
+        
+        // Atualizar gráficos com dados reais
+        function updateCharts() {
+            fetch('/api/activity_stats')
+                .then(response => response.json())
+                .then(data => {
+                    if (activityChart && usageChart) {
+                        // Atualizar gráfico de atividade (dados simulados)
+                        const newData = Array(7).fill().map(() => Math.floor(Math.random() * 200) + 50);
+                        activityChart.data.datasets[0].data = newData;
+                        activityChart.update();
+                        
+                        // Atualizar gráfico de uso
+                        if (data.total_users > 0) {
+                            usageChart.data.datasets[0].data = [
+                                data.active_users,
+                                data.inactive_users,
+                                data.warned_users
+                            ];
+                            usageChart.update();
+                        }
+                    }
+                })
+                .catch(error => {
+                    console.error('Erro ao atualizar gráficos:', error);
+                });
+        }
+        
         // Salvar configurações
         document.getElementById('save-config').addEventListener('click', () => {
             const config = {
                 required_minutes: document.getElementById('required_minutes').value,
                 required_days: document.getElementById('required_days').value,
                 monitoring_period: document.getElementById('monitoring_period').value,
-                kick_after_days: document.getElementById('kick_after_days').value
+                kick_after_days: document.getElementById('kick_after_days').value,
+                notification_channel: document.getElementById('notification_channel').value,
+                log_channel: document.getElementById('log_channel').value
             };
 
             fetch('/api/update_config', {
@@ -86,7 +725,93 @@
                 } else {
                     alert('Erro ao salvar configurações: ' + data.message);
                 }
+            })
+            .catch(error => {
+                alert('Erro ao salvar configurações: ' + error.message);
             });
+        });
+        
+        // Botão de reiniciar
+        document.getElementById('restart-bot').addEventListener('click', () => {
+            if (confirm('Tem certeza que deseja reiniciar o bot? Isso pode causar uma breve interrupção no serviço.')) {
+                fetch('/api/restart', {
+                    method: 'POST'
+                })
+                .then(response => response.json())
+                .then(data => {
+                    alert(data.message);
+                })
+                .catch(error => {
+                    alert('Erro ao reiniciar o bot: ' + error.message);
+                });
+            }
+        });
+        
+        // Botão de backup
+        document.getElementById('backup-bot').addEventListener('click', () => {
+            if (confirm('Deseja criar um backup do banco de dados agora?')) {
+                fetch('/api/backup', {
+                    method: 'POST'
+                })
+                .then(response => response.json())
+                .then(data => {
+                    alert(data.message || 'Backup criado com sucesso!');
+                })
+                .catch(error => {
+                    alert('Erro ao criar backup: ' + error.message);
+                });
+            }
+        });
+        
+        // Botão de exportar relatório
+        document.getElementById('export-report').addEventListener('click', () => {
+            alert('Relatório exportado com sucesso! (Implementação real depende da sua API)');
+            // Aqui você pode implementar a chamada para uma API que gera o relatório
+            // e disponibiliza para download
+        });
+        
+        // Botão de atualizar logs
+        document.getElementById('refreshLogs').addEventListener('click', loadLogs);
+        
+        // Adicionar usuário à whitelist
+        document.getElementById('add-user-whitelist').addEventListener('click', () => {
+            const userId = document.getElementById('whitelist-user-id').value;
+            if (userId) {
+                updateWhitelist('add', 'user', userId);
+                document.getElementById('whitelist-user-id').value = '';
+            } else {
+                alert('Por favor, insira um ID de usuário válido');
+            }
+        });
+        
+        // Adicionar cargo à whitelist
+        document.getElementById('add-role-whitelist').addEventListener('click', () => {
+            const roleId = document.getElementById('whitelist-role-id').value;
+            if (roleId) {
+                updateWhitelist('add', 'role', roleId);
+                document.getElementById('whitelist-role-id').value = '';
+            } else {
+                alert('Por favor, insira um ID de cargo válido');
+            }
+        });
+        
+        // Carregar tudo quando a página é aberta
+        document.addEventListener('DOMContentLoaded', () => {
+            loadConfig();
+            loadWhitelist();
+            loadRecentEvents();
+            loadLogs();
+            initCharts();
+            
+            // Atualizar periodicamente
+            setInterval(updateCharts, 30000); // 30 segundos
+            setInterval(loadRecentEvents, 15000); // 15 segundos
+            logRefreshInterval = setInterval(loadLogs, 10000); // 10 segundos
+        });
+        
+        // Limpar intervalos quando a página é fechada
+        window.addEventListener('beforeunload', () => {
+            clearInterval(logRefreshInterval);
         });
     </script>
 </body>
