@@ -639,12 +639,18 @@
         async function loadConfig() {
             try {
                 const response = await fetch('/api/guilds');
-                if (!response.ok) throw new Error('Erro ao carregar guildas');
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || 'Erro ao carregar guildas');
+                }
                 
                 const guilds = await response.json();
                 if (guilds.length > 0) {
                     const guildResponse = await fetch(`/api/guild/${guilds[0].id}`);
-                    if (!guildResponse.ok) throw new Error('Erro ao carregar configurações');
+                    if (!guildResponse.ok) {
+                        const errorData = await guildResponse.json();
+                        throw new Error(errorData.error || 'Erro ao carregar configurações');
+                    }
                     
                     const config = await guildResponse.json();
                     
@@ -673,7 +679,10 @@
         async function loadGuilds() {
             try {
                 const response = await fetch('/api/guilds');
-                if (!response.ok) throw new Error('Erro ao carregar servidores');
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || 'Erro ao carregar servidores');
+                }
                 
                 const guilds = await response.json();
                 const tbody = document.getElementById('guilds-table-body');
@@ -725,7 +734,10 @@
                 modal.show();
                 
                 const response = await fetch(`/api/guild/${guildId}`);
-                if (!response.ok) throw new Error('Erro ao carregar detalhes');
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || 'Erro ao carregar detalhes');
+                }
                 
                 const guild = await response.json();
                 
@@ -847,7 +859,10 @@
         async function loadWhitelist() {
             try {
                 const response = await fetch('/api/whitelist');
-                if (!response.ok) throw new Error('Erro ao carregar whitelist');
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || 'Erro ao carregar whitelist');
+                }
                 
                 const data = await response.json();
                 
@@ -917,8 +932,8 @@
                 });
                 
                 if (!response.ok) {
-                    const data = await response.json();
-                    throw new Error(data.message || 'Erro desconhecido');
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || 'Erro desconhecido');
                 }
                 
                 await loadWhitelist();
@@ -949,7 +964,10 @@
                     </div>`;
                 
                 const response = await fetch('/api/events');
-                if (!response.ok) throw new Error('Erro ao carregar eventos');
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || 'Erro ao carregar eventos');
+                }
                 
                 const data = await response.json();
                 
@@ -992,7 +1010,10 @@
                     </div>`;
                 
                 const response = await fetch(`/api/logs?lines=${lines}`);
-                if (!response.ok) throw new Error('Erro ao carregar logs');
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || 'Erro ao carregar logs');
+                }
                 
                 const data = await response.json();
                 
@@ -1102,7 +1123,10 @@
         async function updateCharts() {
             try {
                 const response = await fetch('/api/activity_stats');
-                if (!response.ok) throw new Error('Erro ao carregar estatísticas');
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || 'Erro ao carregar estatísticas');
+                }
                 
                 const data = await response.json();
                 
@@ -1124,6 +1148,7 @@
                 }
             } catch (error) {
                 console.error('Erro ao atualizar gráficos:', error);
+                showToast('Erro ao atualizar gráficos: ' + error.message, 'error');
             }
         }
 
@@ -1131,7 +1156,10 @@
         async function loadSystemStatus() {
             try {
                 const response = await fetch('/api/status');
-                if (!response.ok) throw new Error('Erro ao carregar status');
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || 'Erro ao carregar status');
+                }
                 
                 const data = await response.json();
                 
@@ -1211,8 +1239,8 @@
                 });
                 
                 if (!response.ok) {
-                    const data = await response.json();
-                    throw new Error(data.message || 'Erro ao salvar configurações');
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || 'Erro ao salvar configurações');
                 }
                 
                 showToast('Configurações salvas com sucesso!', 'success');
@@ -1238,8 +1266,8 @@
                 });
                 
                 if (!response.ok) {
-                    const data = await response.json();
-                    throw new Error(data.message || 'Erro ao criar backup');
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || 'Erro ao criar backup');
                 }
                 
                 const data = await response.json();
@@ -1264,8 +1292,8 @@
                 });
                 
                 if (!response.ok) {
-                    const data = await response.json();
-                    throw new Error(data.message || 'Erro ao reiniciar o bot');
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || 'Erro ao reiniciar o bot');
                 }
                 
                 const data = await response.json();
@@ -1290,7 +1318,10 @@
         async function loadAllowedRoles() {
             try {
                 const response = await fetch('/api/allowed_roles');
-                if (!response.ok) throw new Error('Erro ao carregar cargos permitidos');
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || 'Erro ao carregar cargos permitidos');
+                }
                 
                 const roles = await response.json();
                 let html = '';
@@ -1347,8 +1378,8 @@
                 });
                 
                 if (!response.ok) {
-                    const data = await response.json();
-                    throw new Error(data.message || 'Erro desconhecido');
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || 'Erro desconhecido');
                 }
                 
                 await loadAllowedRoles();
@@ -1369,7 +1400,10 @@
         async function loadWarningsHistory() {
             try {
                 const response = await fetch('/api/warnings_history?days=30&limit=50');
-                if (!response.ok) throw new Error('Erro ao carregar histórico de avisos');
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || 'Erro ao carregar histórico de avisos');
+                }
                 
                 const warnings = await response.json();
                 let html = '';
@@ -1398,7 +1432,10 @@
         async function loadKicksHistory() {
             try {
                 const response = await fetch('/api/kicks_history?days=30&limit=50');
-                if (!response.ok) throw new Error('Erro ao carregar histórico de expulsões');
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || 'Erro ao carregar histórico de expulsões');
+                }
                 
                 const kicks = await response.json();
                 let html = '';
@@ -1437,6 +1474,11 @@
                         ...data
                     })
                 });
+                
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || 'Erro ao executar comando');
+                }
                 
                 const result = await response.json();
                 

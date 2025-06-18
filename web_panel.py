@@ -242,50 +242,39 @@ def get_guild_info(guild_id):
         if not guild:
             return jsonify({'error': 'Guild not found'}), 404
         
-        tracked_roles = []
+        # Obter membros com cargos monitorados
+        tracked_members = []
         if hasattr(bot, 'config') and 'tracked_roles' in bot.config:
             for role_id in bot.config['tracked_roles']:
                 role = guild.get_role(role_id)
                 if role:
-                    tracked_roles.append({
-                        'id': role.id,
-                        'name': role.name,
-                        'color': str(role.color),
-                        'member_count': len(role.members)
-                    })
+                    for member in role.members:
+                        tracked_members.append(member.id)
         
-        # Estatísticas de atividade simuladas
-        activity_stats = {
-            'active_users': 0,
-            'inactive_users': 0,
-            'warned_users': 0
-        }
-        
-        # Obter canais de voz
-        voice_channels = []
-        for channel in guild.channels:
-            if isinstance(channel, discord.VoiceChannel):
-                voice_channels.append({
-                    'id': channel.id,
-                    'name': channel.name,
-                    'user_count': len(channel.members)
-                })
-        
-        # Obter configurações de notificação
-        notification_settings = {
-            'log_channel': bot.config.get('log_channel'),
-            'notification_channel': bot.config.get('notification_channel'),
-            'absence_channel': bot.config.get('absence_channel')
-        }
+        # Estatísticas básicas (simuladas)
+        active_users = len(set(tracked_members))  # Simulação
+        inactive_users = 0  # Será calculado depois
         
         return jsonify({
             'id': guild.id,
             'name': guild.name,
             'icon': guild.icon.url if guild.icon else None,
-            'tracked_roles': tracked_roles,
-            'activity_stats': activity_stats,
-            'voice_channels': voice_channels,
-            'notification_settings': notification_settings,
+            'tracked_roles': [{
+                'id': role.id,
+                'name': role.name,
+                'color': str(role.color),
+                'member_count': len(role.members)
+            } for role in guild.roles if hasattr(bot, 'config') and 'tracked_roles' in bot.config and role.id in bot.config['tracked_roles']],
+            'activity_stats': {
+                'active_users': active_users,
+                'inactive_users': inactive_users,
+                'warned_users': 0  # Será calculado depois
+            },
+            'voice_channels': [{
+                'id': channel.id,
+                'name': channel.name,
+                'user_count': len(channel.members)
+            } for channel in guild.channels if isinstance(channel, discord.VoiceChannel)],
             'config': {
                 'required_minutes': bot.config.get('required_minutes', 15),
                 'required_days': bot.config.get('required_days', 2),
@@ -601,29 +590,35 @@ def get_warnings_history():
             async with bot.db.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
                     await cursor.execute('''
-                        SELECT u.user_id, u.warning_type, u.warning_date, m.display_name as user_name
-                        FROM user_warnings u
-                        LEFT JOIN (
-                            SELECT user_id, MAX(warning_date) as max_date
-                            FROM user_warnings
-                            WHERE guild_id = %s
-                            GROUP BY user_id
-                        ) latest ON u.user_id = latest.user_id AND u.warning_date = latest.max_date
-                        LEFT JOIN (
-                            SELECT id as user_id, display_name
-                            FROM members
-                            WHERE guild_id = %s
-                        ) m ON u.user_id = m.user_id
-                        WHERE u.guild_id = %s
-                        AND u.warning_date >= DATE_SUB(NOW(), INTERVAL %s DAY)
-                        ORDER BY u.warning_date DESC
+                        SELECT 
+                            user_id, 
+                            warning_type, 
+                            warning_date
+                        FROM user_warnings
+                        WHERE guild_id = %s
+                        AND warning_date >= DATE_SUB(NOW(), INTERVAL %s DAY)
+                        ORDER BY warning_date DESC
                         LIMIT %s
-                    ''', (bot.config['guild_id'], bot.config['guild_id'], bot.config['guild_id'], days, limit))
+                    ''', (bot.config['guild_id'], days, limit))
                     
                     return await cursor.fetchall()
         
         warnings = run_coroutine_in_bot_loop(_get_warnings())
-        return jsonify(warnings)
+        
+        # Adicionar nomes de usuários se possível
+        warnings_with_names = []
+        guild = bot.get_guild(bot.config['guild_id'])
+        
+        for warning in warnings:
+            member = guild.get_member(warning['user_id']) if guild else None
+            warnings_with_names.append({
+                'user_id': warning['user_id'],
+                'user_name': member.display_name if member else str(warning['user_id']),
+                'warning_type': warning['warning_type'],
+                'warning_date': warning['warning_date']
+            })
+        
+        return jsonify(warnings_with_names)
     
     except Exception as e:
         web_logger.error(f"Erro em /api/warnings_history: {e}", exc_info=True)
@@ -640,23 +635,32 @@ def get_kicks_history():
             async with bot.db.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
                     await cursor.execute('''
-                        SELECT k.user_id, k.kick_date, k.reason, m.display_name as user_name
+                        SELECT k.user_id, k.kick_date, k.reason
                         FROM kicked_members k
-                        LEFT JOIN (
-                            SELECT id as user_id, display_name
-                            FROM members
-                            WHERE guild_id = %s
-                        ) m ON k.user_id = m.user_id
                         WHERE k.guild_id = %s
                         AND k.kick_date >= DATE_SUB(NOW(), INTERVAL %s DAY)
                         ORDER BY k.kick_date DESC
                         LIMIT %s
-                    ''', (bot.config['guild_id'], bot.config['guild_id'], days, limit))
+                    ''', (bot.config['guild_id'], days, limit))
                     
                     return await cursor.fetchall()
         
         kicks = run_coroutine_in_bot_loop(_get_kicks())
-        return jsonify(kicks)
+        
+        # Adicionar nomes de usuários se possível
+        kicks_with_names = []
+        guild = bot.get_guild(bot.config['guild_id'])
+        
+        for kick in kicks:
+            member = guild.get_member(kick['user_id']) if guild else None
+            kicks_with_names.append({
+                'user_id': kick['user_id'],
+                'user_name': member.display_name if member else str(kick['user_id']),
+                'kick_date': kick['kick_date'],
+                'reason': kick['reason']
+            })
+        
+        return jsonify(kicks_with_names)
     
     except Exception as e:
         web_logger.error(f"Erro em /api/kicks_history: {e}", exc_info=True)
