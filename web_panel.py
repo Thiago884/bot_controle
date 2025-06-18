@@ -11,6 +11,7 @@ from collections import deque
 import logging
 from logging.handlers import RotatingFileHandler
 from functools import wraps
+import discord # Adicionado: Importa o módulo discord para tipos como discord.VoiceChannel
 
 # Configuração básica do logger para o web panel
 web_logger = logging.getLogger('web_panel')
@@ -39,6 +40,12 @@ def basic_auth_required(f):
         return f(*args, **kwargs)
     return decorated
 
+# Função para executar corrotinas no loop do bot
+# Isso é crucial para evitar RuntimeError com asyncio.run()
+def run_coroutine_in_bot_loop(coro):
+    future = asyncio.run_coroutine_threadsafe(coro, bot.loop)
+    return future.result()
+
 @app.route('/')
 @basic_auth_required
 def home():
@@ -48,31 +55,41 @@ def home():
 @basic_auth_required
 def dashboard():
     try:
+        web_logger.info("Acessando a rota dashboard")
+        
         # Estatísticas básicas do bot
         uptime = (datetime.datetime.now() - bot.start_time) if hasattr(bot, 'start_time') else "N/A"
-        
+        web_logger.info(f"Tempo de atividade: {uptime}")
+
         # Processar informações das guildas
         guild_stats = []
-        for guild in bot.guilds:
-            voice_channels = len([c for c in guild.channels if isinstance(c, discord.VoiceChannel)])
-            guild_stats.append({
-                'id': guild.id,
-                'name': guild.name,
-                'members': guild.member_count,
-                'voice_channels': voice_channels,
-                'icon': guild.icon.url if guild.icon else None
-            })
+        if hasattr(bot, 'guilds') and bot.guilds:
+            for guild in bot.guilds:
+                web_logger.info(f"Processando guilda: {guild.name}")
+                voice_channels = len([c for c in guild.channels if isinstance(c, discord.VoiceChannel)])
+                guild_stats.append({
+                    'id': guild.id,
+                    'name': guild.name,
+                    'members': guild.member_count,
+                    'voice_channels': voice_channels,
+                    'icon': guild.icon.url if guild.icon else None
+                })
+        else:
+            web_logger.warning("Bot.guilds não está disponível ou está vazio.")
         
         # Status do banco de dados
         db_status = "Desconhecido"
         pool_status = {}
         if hasattr(bot, 'db') and bot.db:
             try:
-                pool_status = asyncio.run(bot.db.check_pool_status()) or {}
+                # Usa a nova função para executar a corrotina no loop do bot
+                pool_status = run_coroutine_in_bot_loop(bot.db.check_pool_status()) or {}
                 db_status = "Operacional" if pool_status else "Erro"
             except Exception as e:
                 db_status = f"Erro: {str(e)}"
-                web_logger.error(f"Erro ao verificar status do banco: {e}")
+                web_logger.error(f"Erro ao verificar status do banco: {e}", exc_info=True)
+        else:
+            web_logger.warning("Objeto do banco de dados (bot.db) não está disponível.")
         
         # Status das filas
         queue_status = {
@@ -82,7 +99,12 @@ def dashboard():
         if hasattr(bot, 'voice_event_queue'):
             queue_status['voice_events'] = bot.voice_event_queue.qsize()
         if hasattr(bot, 'message_queue'):
-            queue_status['messages'] = bot.message_queue.qsize()
+            # Se message_queue for uma PriorityQueue do asyncio, qsize pode não ter as chaves
+            # Presumindo que bot.message_queue é uma fila simples ou que qsize retorna um int
+            if isinstance(bot.message_queue, dict): # Ajuste se for um dicionário de filas
+                queue_status['messages'] = {k: v.qsize() for k, v in bot.message_queue.items()}
+            else:
+                queue_status['messages'] = bot.message_queue.qsize()
         
         # Configurações atuais
         current_config = {
@@ -93,8 +115,8 @@ def dashboard():
         }
         
         return render_template('dashboard.html', 
-                            bot_name=bot.user.name if bot.user else "Inactivity Bot",
-                            guild_count=len(bot.guilds),
+                            bot_name=bot.user.name if hasattr(bot, 'user') and bot.user else "Inactivity Bot",
+                            guild_count=len(bot.guilds) if hasattr(bot, 'guilds') else 0,
                             guild_stats=guild_stats,
                             uptime=str(uptime).split('.')[0] if uptime != "N/A" else uptime,
                             db_status=db_status,
@@ -103,22 +125,27 @@ def dashboard():
                             current_config=current_config)
     
     except Exception as e:
-        web_logger.error(f"Erro na rota dashboard: {e}")
+        web_logger.error(f"Erro na rota dashboard: {e}", exc_info=True)
         return render_template('error.html', error_message="Erro ao carregar o dashboard"), 500
 
 @app.route('/monitor')
 @basic_auth_required
 def monitor():
     try:
+        web_logger.info("Acessando a rota monitor")
         # Obter status do banco de dados
         db_status = "Desconhecido"
         pool_status = {}
         if hasattr(bot, 'db') and bot.db:
             try:
-                pool_status = asyncio.run(bot.db.check_pool_status()) or {}
+                # Usa a nova função para executar a corrotina no loop do bot
+                pool_status = run_coroutine_in_bot_loop(bot.db.check_pool_status()) or {}
                 db_status = "Operacional" if pool_status else "Erro"
             except Exception as e:
                 db_status = f"Erro: {str(e)}"
+                web_logger.error(f"Erro ao verificar status do banco no monitor: {e}", exc_info=True)
+        else:
+            web_logger.warning("Objeto do banco de dados (bot.db) não está disponível no monitor.")
         
         # Obter status de rate limits
         rate_limits = {}
@@ -128,7 +155,11 @@ def monitor():
         # Obter estatísticas de uso
         queue_status = {}
         if hasattr(bot, 'message_queue'):
-            queue_status = bot.message_queue.qsize()
+            # Ajuste semelhante ao do dashboard para message_queue
+            if isinstance(bot.message_queue, dict):
+                queue_status = {k: v.qsize() for k, v in bot.message_queue.items()}
+            else:
+                queue_status = bot.message_queue.qsize()
         
         # Processar eventos recentes
         recent_events = []
@@ -145,9 +176,9 @@ def monitor():
         log_lines = []
         try:
             with open('bot.log', 'r') as log_file:
-                log_lines = deque(log_file, 100)  # Últimas 100 linhas
+                log_lines = list(deque(log_file, 100))  # Últimas 100 linhas, convertido para lista
         except Exception as e:
-            web_logger.warning(f"Erro ao ler arquivo de log: {e}")
+            web_logger.warning(f"Erro ao ler arquivo de log bot.log: {e}", exc_info=True)
         
         return render_template('monitor.html',
                             db_status=db_status,
@@ -156,10 +187,10 @@ def monitor():
                             queue_status=queue_status,
                             recent_events=recent_events,
                             log_lines=log_lines,
-                            bot_name=bot.user.name if bot.user else "Inactivity Bot")
+                            bot_name=bot.user.name if hasattr(bot, 'user') and bot.user else "Inactivity Bot")
     
     except Exception as e:
-        web_logger.error(f"Erro na rota monitor: {e}")
+        web_logger.error(f"Erro na rota monitor: {e}", exc_info=True)
         return render_template('error.html', error_message="Erro ao carregar o monitor"), 500
 
 @app.route('/api/guilds')
@@ -167,18 +198,19 @@ def monitor():
 def get_guilds():
     try:
         guilds = []
-        for guild in bot.guilds:
-            voice_channels = len([c for c in guild.channels if isinstance(c, discord.VoiceChannel)])
-            guilds.append({
-                'id': guild.id,
-                'name': guild.name,
-                'member_count': guild.member_count,
-                'icon': guild.icon.url if guild.icon else None,
-                'voice_channels': voice_channels
-            })
+        if hasattr(bot, 'guilds') and bot.guilds:
+            for guild in bot.guilds:
+                voice_channels = len([c for c in guild.channels if isinstance(c, discord.VoiceChannel)])
+                guilds.append({
+                    'id': guild.id,
+                    'name': guild.name,
+                    'member_count': guild.member_count,
+                    'icon': guild.icon.url if guild.icon else None,
+                    'voice_channels': voice_channels
+                })
         return jsonify(guilds)
     except Exception as e:
-        web_logger.error(f"Erro em /api/guilds: {e}")
+        web_logger.error(f"Erro em /api/guilds: {e}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/guild/<int:guild_id>')
@@ -190,15 +222,17 @@ def get_guild_info(guild_id):
             return jsonify({'error': 'Guild not found'}), 404
         
         tracked_roles = []
-        for role_id in bot.config['tracked_roles']:
-            role = guild.get_role(role_id)
-            if role:
-                tracked_roles.append({
-                    'id': role.id,
-                    'name': role.name,
-                    'color': str(role.color),
-                    'member_count': len(role.members)
-                })
+        # Verifique se bot.config e bot.config['tracked_roles'] existem
+        if hasattr(bot, 'config') and 'tracked_roles' in bot.config:
+            for role_id in bot.config['tracked_roles']:
+                role = guild.get_role(role_id)
+                if role:
+                    tracked_roles.append({
+                        'id': role.id,
+                        'name': role.name,
+                        'color': str(role.color),
+                        'member_count': len(role.members)
+                    })
         
         # Adicionar estatísticas de atividade (simuladas - implementação real depende do seu banco de dados)
         activity_stats = {
@@ -233,14 +267,14 @@ def get_guild_info(guild_id):
             'voice_channels': voice_channels,
             'notification_settings': notification_settings,
             'config': {
-                'required_minutes': bot.config['required_minutes'],
-                'required_days': bot.config['required_days'],
-                'monitoring_period': bot.config['monitoring_period'],
-                'kick_after_days': bot.config['kick_after_days']
+                'required_minutes': bot.config.get('required_minutes', 15), # Usar .get para segurança
+                'required_days': bot.config.get('required_days', 2),
+                'monitoring_period': bot.config.get('monitoring_period', 14),
+                'kick_after_days': bot.config.get('kick_after_days', 30)
             }
         })
     except Exception as e:
-        web_logger.error(f"Erro em /api/guild/{guild_id}: {e}")
+        web_logger.error(f"Erro em /api/guild/{guild_id}: {e}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/rate_limits')
@@ -253,7 +287,7 @@ def get_rate_limits():
         report = bot.rate_limit_monitor.get_status_report()
         return jsonify(report)
     except Exception as e:
-        web_logger.error(f"Erro em /api/rate_limits: {e}")
+        web_logger.error(f"Erro em /api/rate_limits: {e}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/update_config', methods=['POST'])
@@ -264,6 +298,10 @@ def update_config():
         if not data:
             return jsonify({'status': 'error', 'message': 'No data provided'}), 400
         
+        # Certifique-se de que bot.config exista
+        if not hasattr(bot, 'config'):
+            return jsonify({'status': 'error', 'message': 'Bot config not initialized'}), 500
+
         if 'required_minutes' in data:
             bot.config['required_minutes'] = int(data['required_minutes'])
         if 'required_days' in data:
@@ -273,18 +311,17 @@ def update_config():
         if 'kick_after_days' in data:
             bot.config['kick_after_days'] = int(data['kick_after_days'])
         
-        asyncio.run(bot.save_config())
+        # Usa a nova função para executar a corrotina no loop do bot
+        run_coroutine_in_bot_loop(bot.save_config())
         return jsonify({'status': 'success'})
     except Exception as e:
-        web_logger.error(f"Erro em /api/update_config: {e}")
+        web_logger.error(f"Erro em /api/update_config: {e}", exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 400
 
 @app.route('/api/restart', methods=['POST'])
 @basic_auth_required
 def restart_bot():
     try:
-        # Em produção, você deve usar um sistema de gerenciamento de processos como systemd ou supervisor
-        # Esta é apenas uma implementação de exemplo
         web_logger.info("Reinicialização do bot solicitada")
         
         # Simular reinicialização
@@ -300,13 +337,17 @@ def restart_bot():
             'message': 'Reinicialização solicitada. O bot deve reiniciar em breve.'
         })
     except Exception as e:
-        web_logger.error(f"Erro em /api/restart: {e}")
+        web_logger.error(f"Erro em /api/restart: {e}", exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/api/whitelist', methods=['GET', 'POST'])
 @basic_auth_required
 def manage_whitelist():
     try:
+        # Certifique-se de que bot.config e bot.config['whitelist'] existam
+        if not hasattr(bot, 'config') or 'whitelist' not in bot.config:
+            return jsonify({'status': 'error', 'message': 'Bot config or whitelist not initialized'}), 500
+
         if request.method == 'GET':
             return jsonify({
                 'users': bot.config['whitelist']['users'],
@@ -334,11 +375,12 @@ def manage_whitelist():
             else:
                 return jsonify({'status': 'error', 'message': 'Invalid action'}), 400
             
-            asyncio.run(bot.save_config())
+            # Usa a nova função para executar a corrotina no loop do bot
+            run_coroutine_in_bot_loop(bot.save_config())
             return jsonify({'status': 'success'})
     
     except Exception as e:
-        web_logger.error(f"Erro em /api/whitelist: {e}")
+        web_logger.error(f"Erro em /api/whitelist: {e}", exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/api/logs')
@@ -347,14 +389,23 @@ def get_logs():
     try:
         lines = request.args.get('lines', default=100, type=int)
         
-        with open('bot.log', 'r') as log_file:
-            log_lines = deque(log_file, lines)
+        # Tenta ler o arquivo bot.log
+        log_lines = []
+        try:
+            with open('bot.log', 'r') as log_file:
+                log_lines = list(deque(log_file, lines)) # Converte para lista para jsonify
+        except FileNotFoundError:
+            web_logger.warning("Arquivo de log 'bot.log' não encontrado.")
+            return jsonify({'logs': ['Arquivo de log "bot.log" não encontrado.']})
+        except Exception as e:
+            web_logger.error(f"Erro ao ler logs de bot.log: {e}", exc_info=True)
+            return jsonify({'error': f"Erro ao ler logs: {str(e)}"}), 500
         
         return jsonify({
-            'logs': list(log_lines)
+            'logs': log_lines
         })
     except Exception as e:
-        web_logger.error(f"Erro em /api/logs: {e}")
+        web_logger.error(f"Erro em /api/logs: {e}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/activity_stats')
@@ -372,7 +423,7 @@ def get_activity_stats():
         
         return jsonify(stats)
     except Exception as e:
-        web_logger.error(f"Erro em /api/activity_stats: {e}")
+        web_logger.error(f"Erro em /api/activity_stats: {e}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/backup', methods=['POST'])
@@ -382,21 +433,22 @@ def create_backup():
         if not hasattr(bot, 'db_backup'):
             return jsonify({'status': 'error', 'message': 'Backup system not initialized'}), 500
         
-        success = asyncio.run(bot.db_backup.create_backup())
+        # Usa a nova função para executar a corrotina no loop do bot
+        success = run_coroutine_in_bot_loop(bot.db_backup.create_backup())
         
         if success:
             return jsonify({'status': 'success', 'message': 'Backup created successfully'})
         else:
             return jsonify({'status': 'error', 'message': 'Failed to create backup'}), 500
     except Exception as e:
-        web_logger.error(f"Erro em /api/backup: {e}")
+        web_logger.error(f"Erro em /api/backup: {e}", exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 def run_flask():
     try:
         app.run(host='0.0.0.0', port=8080, threaded=True)
     except Exception as e:
-        web_logger.critical(f"Erro ao iniciar servidor Flask: {e}")
+        web_logger.critical(f"Erro ao iniciar servidor Flask: {e}", exc_info=True)
         raise
 
 def keep_alive():
@@ -406,5 +458,5 @@ def keep_alive():
         t.start()
         web_logger.info("Web panel iniciado na porta 8080")
     except Exception as e:
-        web_logger.critical(f"Erro ao iniciar thread do web panel: {e}")
+        web_logger.critical(f"Erro ao iniciar thread do web panel: {e}", exc_info=True)
         raise
