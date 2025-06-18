@@ -42,27 +42,42 @@ async def check_graph_rate_limit():
     GRAPH_RATE_LIMIT['last_request'] = current_time
     return True
 
-def calculate_most_active_days(sessions: List[Dict], days: int) -> List[Tuple[str, int, int]]:
-    """Calcula os dias mais ativos com tempo total e média por sessão"""
+def calculate_most_active_days(sessions: List[Dict], days: int) -> List[Tuple[str, str, int, int]]:
+    """Calcula os dias mais ativos com tempo total e média por sessão, incluindo as datas"""
     weekdays = ['Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado', 'Domingo']
-    day_stats = {day: {'total_min': 0, 'count': 0} for day in weekdays}
+    day_stats = {}
     
     for session in sessions:
         join_time = session['join_time'].replace(tzinfo=None)
+        date_str = join_time.strftime('%d/%m/%Y')
         day_name = weekdays[join_time.weekday()]
         duration_min = session['duration'] // 60
-        day_stats[day_name]['total_min'] += duration_min
-        day_stats[day_name]['count'] += 1
+        
+        # Usamos a data como chave para agrupar por dia
+        if date_str not in day_stats:
+            day_stats[date_str] = {
+                'day_name': day_name,
+                'total_min': 0,
+                'count': 0,
+                'date': join_time.date()
+            }
+        
+        day_stats[date_str]['total_min'] += duration_min
+        day_stats[date_str]['count'] += 1
     
-    # Calcular média por dia e filtrar dias com atividade
+    # Converter para lista e calcular média
     active_days = []
-    for day, stats in day_stats.items():
-        if stats['total_min'] > 0:
-            avg = stats['total_min'] / stats['count'] if stats['count'] > 0 else 0
-            active_days.append((day, stats['total_min'], int(avg)))
+    for date_str, stats in day_stats.items():
+        avg = stats['total_min'] / stats['count'] if stats['count'] > 0 else 0
+        active_days.append((
+            stats['day_name'],
+            date_str,
+            stats['total_min'],
+            int(avg)
+        ))
     
-    # Ordenar por tempo total (decrescente)
-    active_days.sort(key=lambda x: x[1], reverse=True)
+    # Ordenar por data (mais recente primeiro)
+    active_days.sort(key=lambda x: x[3], reverse=True)
     
     return active_days
 
@@ -87,24 +102,26 @@ async def generate_activity_graph(member: discord.Member, sessions: List[Dict], 
             dates.append(join_time)
             durations.append(session['duration'] / 60)  # Converter para minutos
 
-        # Agrupar por dia da semana
-        weekdays = ['Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado', 'Domingo']
-        weekday_durations = {day: 0 for day in weekdays}
-        
+        # Agrupar por data
+        date_durations = {}
         for date, duration in zip(dates, durations):
-            weekday = date.weekday()
-            weekday_durations[weekdays[weekday]] += duration
+            date_str = date.strftime('%d/%m')
+            if date_str not in date_durations:
+                date_durations[date_str] = 0
+            date_durations[date_str] += duration
+
+        # Ordenar datas
+        sorted_dates = sorted(date_durations.keys(), 
+                            key=lambda x: datetime.strptime(x, '%d/%m'))
+        
+        sorted_values = [date_durations[date] for date in sorted_dates]
 
         # Configurar o gráfico
-        plt.figure(figsize=(10, 5))
+        plt.figure(figsize=(12, 6))
         plt.style.use('seaborn-v0_8')
         
-        # Ordenar os dias da semana corretamente
-        ordered_days = weekdays
-        ordered_values = [weekday_durations[day] for day in ordered_days]
-        
         # Gerar gráfico de barras
-        bars = plt.bar(ordered_days, ordered_values, color='#5865F2', width=0.7)
+        bars = plt.bar(sorted_dates, sorted_values, color='#5865F2', width=0.7)
         
         # Adicionar valores nas barras
         for bar in bars:
@@ -114,35 +131,29 @@ async def generate_activity_graph(member: discord.Member, sessions: List[Dict], 
                         f'{int(height)} min',
                         ha='center', va='bottom', fontsize=9)
 
-        # Destacar fins de semana
-        for i, day in enumerate(ordered_days):
-            if day in ['Sexta', 'Sábado', 'Domingo']:
-                bars[i].set_color('#ED4245')  # Cor diferente para fins de semana
-
-        # Configurar título e labels
-        plt.title(f'Atividade de Voz - {member.display_name}\nÚltimos {days} dias', 
+        # Configurar título e labels com o período
+        start_date = (datetime.now() - timedelta(days=days)).strftime('%d/%m/%Y')
+        end_date = datetime.now().strftime('%d/%m/%Y')
+        plt.title(f'Atividade de Voz - {member.display_name}\nPeríodo: {start_date} a {end_date} ({days} dias)', 
                  fontsize=12, pad=12)
-        plt.xlabel('Dia da Semana', fontsize=10)
+        plt.xlabel('Data', fontsize=10)
         plt.ylabel('Minutos em Voz', fontsize=10)
         
-        # Ajustar eixos
-        plt.xticks(fontsize=9)
+        # Rotacionar labels do eixo X para melhor legibilidade
+        plt.xticks(rotation=45, fontsize=8)
         plt.yticks(fontsize=9)
-        plt.ylim(0, max(ordered_values) * 1.2 if max(ordered_values) > 0 else 100)
+        plt.ylim(0, max(sorted_values) * 1.2 if max(sorted_values) > 0 else 100)
         
         # Adicionar grid
         plt.grid(axis='y', alpha=0.4)
         
-        # Ajustar layout
+        # Ajustar layout para evitar cortes
         plt.tight_layout()
 
         # Salvar em buffer
         buffer = BytesIO()
         plt.savefig(buffer, format='png', dpi=100, bbox_inches='tight')
         buffer.seek(0)
-        
-        # Fechar a figura
-        plt.close()
         
         return buffer
         

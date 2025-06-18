@@ -620,6 +620,10 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
         # Adicionar delay inicial para evitar rate limit
         await asyncio.sleep(2)
         
+        # Definir período de análise
+        end_date = datetime.now(bot.timezone)
+        start_date = end_date - timedelta(days=days)
+        
         # Coletar dados básicos
         try:
             user_data = await bot.db.get_user_activity(member.id, member.guild.id)
@@ -631,9 +635,6 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
             return
         
         # Coletar dados históricos com tratamento de rate limit
-        end_date = datetime.now(bot.timezone)
-        start_date = end_date - timedelta(days=days)
-        
         try:
             voice_sessions = await bot.db.get_voice_sessions(member.id, member.guild.id, start_date, end_date)
         except Exception as e:
@@ -643,31 +644,21 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
                 ephemeral=True)
             return
         
-        last_join = user_data.get('last_voice_join')
-        sessions = user_data.get('voice_sessions', 0)
-        total_time = user_data.get('total_voice_time', 0)
-        last_warning = await bot.db.get_last_warning(member.id, member.guild.id)
-        last_check = await bot.db.get_last_period_check(member.id, member.guild.id)
+        # Calcular tempo total apenas para o período solicitado
+        total_time = sum(session['duration'] for session in voice_sessions) if voice_sessions else 0
+        total_minutes = total_time / 60
+        sessions_count = len(voice_sessions)
+        avg_session_duration = total_minutes / sessions_count if sessions_count else 0
         
-        # Calcular dias ativos e mais ativos
-        active_days = set()
-        for session in voice_sessions:
-            day = session['join_time'].replace(tzinfo=bot.timezone).date()
-            active_days.add(day)
-        
-        # Calcular métricas adicionais
-        total_minutes = total_time / 60 if total_time else 0
-        avg_session_duration = total_minutes / sessions if sessions else 0
-        
-        # Calcular dias mais ativos dentro do período
+        # Calcular dias mais ativos com datas
         most_active_days = calculate_most_active_days(voice_sessions, days)
         
-        # Formatar a lista de dias mais ativos
+        # Formatar a lista de dias mais ativos com datas
         active_days_text = "Nenhum dia com atividade significativa"
         if most_active_days:
             active_days_text = "\n".join(
-                f"• {day}: {total} min (⌀ {avg} min/sessão)" 
-                for day, total, avg in most_active_days[:3]  # Mostrar top 3 dias
+                f"• {day_name} ({date_str}): {total} min (⌀ {avg} min/sessão)" 
+                for day_name, date_str, total, avg in most_active_days[:3]  # Mostrar top 3 dias
             )
 
         # Configurações de requisitos
@@ -688,7 +679,7 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
         embed.add_field(
             name="📈 Estatísticas Gerais",
             value=(
-                f"**Sessões:** {len(voice_sessions)}\n"
+                f"**Sessões:** {sessions_count}\n"
                 f"**Tempo Total:** {int(total_minutes)} min\n"
                 f"**Duração Média:** {int(avg_session_duration)} min/sessão\n"
                 f"**Dias Mais Ativos:**\n{active_days_text}\n"
@@ -709,6 +700,7 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
         )
         
         # Seção de status atual
+        last_check = await bot.db.get_last_period_check(member.id, member.guild.id)
         if last_check:
             period_start = last_check['period_start'].replace(tzinfo=bot.timezone)
             period_end = last_check['period_end'].replace(tzinfo=bot.timezone)
@@ -917,8 +909,7 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
             title=f"🏆 Ranking de Atividade (últimos {days} dias)",
             description="\n".join(ranking),
             color=discord.Color.gold(),
-            timestamp=datetime.now(bot.timezone)
-        )
+            timestamp=datetime.now(bot.timezone))
         # Adicionar estatísticas gerais
         embed.add_field(
             name="📊 Estatísticas Gerais",
