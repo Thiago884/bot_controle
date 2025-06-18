@@ -479,6 +479,189 @@ def create_backup():
         web_logger.error(f"Erro em /api/backup: {e}", exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
+@app.route('/api/allowed_roles', methods=['GET', 'POST'])
+@basic_auth_required
+def manage_allowed_roles():
+    try:
+        if request.method == 'GET':
+            allowed_roles = []
+            for role_id in bot.config.get('allowed_roles', []):
+                role = bot.get_guild(bot.config['guild_id']).get_role(role_id)
+                if role:
+                    allowed_roles.append({
+                        'id': role.id,
+                        'name': role.name,
+                        'color': str(role.color)
+                    })
+            return jsonify(allowed_roles)
+        
+        elif request.method == 'POST':
+            data = request.json
+            action = data.get('action')  # 'add' or 'remove'
+            role_id = data.get('id')
+            
+            if not all([action, role_id]):
+                return jsonify({'status': 'error', 'message': 'Missing parameters'}), 400
+            
+            try:
+                role_id = int(role_id)
+            except ValueError:
+                return jsonify({'status': 'error', 'message': 'Invalid ID format'}), 400
+            
+            if action == 'add':
+                if role_id not in bot.config['allowed_roles']:
+                    bot.config['allowed_roles'].append(role_id)
+            elif action == 'remove':
+                if role_id in bot.config['allowed_roles']:
+                    bot.config['allowed_roles'].remove(role_id)
+            else:
+                return jsonify({'status': 'error', 'message': 'Invalid action'}), 400
+            
+            run_coroutine_in_bot_loop(bot.save_config())
+            return jsonify({'status': 'success'})
+    
+    except Exception as e:
+        web_logger.error(f"Erro em /api/allowed_roles: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/whitelist_users', methods=['GET'])
+@basic_auth_required
+def get_whitelist_users():
+    try:
+        guild = bot.get_guild(bot.config['guild_id'])
+        users = []
+        for user_id in bot.config['whitelist']['users']:
+            user = guild.get_member(user_id)
+            if user:
+                users.append({
+                    'id': user.id,
+                    'name': user.display_name,
+                    'avatar': str(user.avatar.url) if user.avatar else None
+                })
+        return jsonify(users)
+    except Exception as e:
+        web_logger.error(f"Erro em /api/whitelist_users: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/run_command', methods=['POST'])
+@basic_auth_required
+def run_command():
+    try:
+        data = request.json
+        command = data.get('command')
+        
+        if not command:
+            return jsonify({'status': 'error', 'message': 'No command specified'}), 400
+        
+        async def _run_command():
+            try:
+                if command == 'force_check':
+                    member_id = data.get('member_id')
+                    if not member_id:
+                        return {'status': 'error', 'message': 'Member ID required'}
+                    
+                    member = bot.get_guild(bot.config['guild_id']).get_member(int(member_id))
+                    if not member:
+                        return {'status': 'error', 'message': 'Member not found'}
+                    
+                    from tasks import _execute_force_check
+                    result = await _execute_force_check(member)
+                    return {'status': 'success', 'result': result}
+                
+                elif command == 'cleanup_data':
+                    days = data.get('days', 60)
+                    result = await bot.db.cleanup_old_data(days)
+                    return {'status': 'success', 'result': result}
+                
+                elif command == 'sync_commands':
+                    await bot.tree.sync()
+                    return {'status': 'success', 'message': 'Commands synced'}
+                
+                else:
+                    return {'status': 'error', 'message': 'Invalid command'}
+            
+            except Exception as e:
+                return {'status': 'error', 'message': str(e)}
+        
+        result = run_coroutine_in_bot_loop(_run_command())
+        return jsonify(result)
+    
+    except Exception as e:
+        web_logger.error(f"Erro em /api/run_command: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/warnings_history', methods=['GET'])
+@basic_auth_required
+def get_warnings_history():
+    try:
+        days = request.args.get('days', default=30, type=int)
+        limit = request.args.get('limit', default=100, type=int)
+        
+        async def _get_warnings():
+            async with bot.db.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute('''
+                        SELECT u.user_id, u.warning_type, u.warning_date, m.display_name as user_name
+                        FROM user_warnings u
+                        LEFT JOIN (
+                            SELECT user_id, MAX(warning_date) as max_date
+                            FROM user_warnings
+                            WHERE guild_id = %s
+                            GROUP BY user_id
+                        ) latest ON u.user_id = latest.user_id AND u.warning_date = latest.max_date
+                        LEFT JOIN (
+                            SELECT id as user_id, display_name
+                            FROM members
+                            WHERE guild_id = %s
+                        ) m ON u.user_id = m.user_id
+                        WHERE u.guild_id = %s
+                        AND u.warning_date >= DATE_SUB(NOW(), INTERVAL %s DAY)
+                        ORDER BY u.warning_date DESC
+                        LIMIT %s
+                    ''', (bot.config['guild_id'], bot.config['guild_id'], bot.config['guild_id'], days, limit))
+                    
+                    return await cursor.fetchall()
+        
+        warnings = run_coroutine_in_bot_loop(_get_warnings())
+        return jsonify(warnings)
+    
+    except Exception as e:
+        web_logger.error(f"Erro em /api/warnings_history: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/kicks_history', methods=['GET'])
+@basic_auth_required
+def get_kicks_history():
+    try:
+        days = request.args.get('days', default=30, type=int)
+        limit = request.args.get('limit', default=100, type=int)
+        
+        async def _get_kicks():
+            async with bot.db.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute('''
+                        SELECT k.user_id, k.kick_date, k.reason, m.display_name as user_name
+                        FROM kicked_members k
+                        LEFT JOIN (
+                            SELECT id as user_id, display_name
+                            FROM members
+                            WHERE guild_id = %s
+                        ) m ON k.user_id = m.user_id
+                        WHERE k.guild_id = %s
+                        AND k.kick_date >= DATE_SUB(NOW(), INTERVAL %s DAY)
+                        ORDER BY k.kick_date DESC
+                        LIMIT %s
+                    ''', (bot.config['guild_id'], bot.config['guild_id'], days, limit))
+                    
+                    return await cursor.fetchall()
+        
+        kicks = run_coroutine_in_bot_loop(_get_kicks())
+        return jsonify(kicks)
+    
+    except Exception as e:
+        web_logger.error(f"Erro em /api/kicks_history: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
 def run_flask():
     try:
         app.run(host='0.0.0.0', port=8080, threaded=True)

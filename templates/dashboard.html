@@ -113,6 +113,23 @@
         .toast {
             transition: opacity 0.3s ease;
         }
+        /* Novos estilos adicionados */
+        .whitelist-item .badge {
+            width: 20px;
+            height: 20px;
+            padding: 0;
+            margin-right: 8px;
+        }
+        .history-table {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .command-btn {
+            margin-bottom: 10px;
+        }
+        #force-check-user {
+            max-width: 150px;
+        }
     </style>
 </head>
 <body>
@@ -200,6 +217,30 @@
                     </div>
                 </div>
 
+                <!-- Cargos Permitidos -->
+                <div class="card">
+                    <div class="card-header">
+                        <i class="bi bi-shield-check"></i> Cargos Permitidos
+                    </div>
+                    <div class="card-body">
+                        <div class="mb-3">
+                            <div id="allowed-roles-list">
+                                <div class="spinner-border spinner-border-sm" role="status">
+                                    <span class="visually-hidden">Carregando...</span>
+                                </div>
+                            </div>
+                            <div class="input-group mt-2">
+                                <input type="text" class="form-control" id="allowed-role-id" placeholder="ID do Cargo">
+                                <button class="btn btn-success" id="add-allowed-role">
+                                    <span class="spinner-border spinner-border-sm loading-spinner" id="add-allowed-role-spinner"></span>
+                                    <i class="bi bi-plus" id="add-allowed-role-icon"></i>
+                                </button>
+                            </div>
+                            <div class="form-text">Insira o ID do cargo e clique em +</div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Status das Tarefas -->
                 <div class="card">
                     <div class="card-header">
@@ -256,6 +297,35 @@
                                     </tr>
                                 </tbody>
                             </table>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Comandos do Bot -->
+                <div class="card">
+                    <div class="card-header">
+                        <i class="bi bi-terminal"></i> Comandos do Bot
+                    </div>
+                    <div class="card-body">
+                        <div class="row">
+                            <div class="col-md-4">
+                                <button class="btn btn-primary w-100 mb-2" id="sync-commands-btn">
+                                    <i class="bi bi-arrow-repeat"></i> Sincronizar Comandos
+                                </button>
+                            </div>
+                            <div class="col-md-4">
+                                <button class="btn btn-warning w-100 mb-2" id="cleanup-data-btn">
+                                    <i class="bi bi-trash"></i> Limpar Dados Antigos
+                                </button>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="input-group mb-2">
+                                    <input type="text" class="form-control" id="force-check-user" placeholder="ID do Usuário">
+                                    <button class="btn btn-danger" id="force-check-btn">
+                                        <i class="bi bi-search"></i> Verificar Inatividade
+                                    </button>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -317,6 +387,69 @@
                                             <span class="visually-hidden">Carregando...</span>
                                         </div>
                                     </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Histórico -->
+                <div class="card">
+                    <div class="card-header">
+                        <i class="bi bi-clock-history"></i> Histórico
+                    </div>
+                    <div class="card-body">
+                        <ul class="nav nav-tabs" id="historyTabs" role="tablist">
+                            <li class="nav-item" role="presentation">
+                                <button class="nav-link active" id="warnings-tab" data-bs-toggle="tab" data-bs-target="#warnings" type="button">Avisos</button>
+                            </li>
+                            <li class="nav-item" role="presentation">
+                                <button class="nav-link" id="kicks-tab" data-bs-toggle="tab" data-bs-target="#kicks" type="button">Expulsões</button>
+                            </li>
+                        </ul>
+                        <div class="tab-content mt-3" id="historyTabContent">
+                            <div class="tab-pane fade show active" id="warnings" role="tabpanel">
+                                <div class="table-responsive">
+                                    <table class="table table-hover">
+                                        <thead>
+                                            <tr>
+                                                <th>Usuário</th>
+                                                <th>Tipo</th>
+                                                <th>Data</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="warnings-table">
+                                            <tr>
+                                                <td colspan="3" class="text-center">
+                                                    <div class="spinner-border text-primary" role="status">
+                                                        <span class="visually-hidden">Carregando...</span>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                            <div class="tab-pane fade" id="kicks" role="tabpanel">
+                                <div class="table-responsive">
+                                    <table class="table table-hover">
+                                        <thead>
+                                            <tr>
+                                                <th>Usuário</th>
+                                                <th>Data</th>
+                                                <th>Motivo</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="kicks-table">
+                                            <tr>
+                                                <td colspan="3" class="text-center">
+                                                    <div class="spinner-border text-primary" role="status">
+                                                        <span class="visually-hidden">Carregando...</span>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
                                 </div>
                             </div>
                         </div>
@@ -1153,6 +1286,173 @@
             showToast('Relatório exportado com sucesso! (Funcionalidade simulada)', 'info');
         }
 
+        // Funções para cargos permitidos
+        async function loadAllowedRoles() {
+            try {
+                const response = await fetch('/api/allowed_roles');
+                if (!response.ok) throw new Error('Erro ao carregar cargos permitidos');
+                
+                const roles = await response.json();
+                let html = '';
+                
+                if (roles.length > 0) {
+                    roles.forEach(role => {
+                        html += `
+                            <div class="whitelist-item">
+                                <span>
+                                    <span class="badge" style="background-color: ${role.color}">&nbsp;&nbsp;&nbsp;</span>
+                                    ${role.name} (${role.id})
+                                </span>
+                                <button class="btn btn-sm btn-danger remove-allowed-role" data-id="${role.id}">
+                                    <i class="bi bi-trash"></i>
+                                </button>
+                            </div>`;
+                    });
+                } else {
+                    html = '<p class="text-muted">Nenhum cargo permitido definido</p>';
+                }
+                
+                document.getElementById('allowed-roles-list').innerHTML = html;
+                
+                // Adicionar eventos aos botões de remoção
+                document.querySelectorAll('.remove-allowed-role').forEach(button => {
+                    button.addEventListener('click', function() {
+                        const roleId = this.getAttribute('data-id');
+                        updateAllowedRoles('remove', roleId);
+                    });
+                });
+            } catch (error) {
+                console.error('Erro ao carregar cargos permitidos:', error);
+                document.getElementById('allowed-roles-list').innerHTML = `
+                    <div class="alert alert-danger">
+                        Erro ao carregar cargos permitidos: ${error.message}
+                    </div>`;
+            }
+        }
+
+        async function updateAllowedRoles(action, roleId) {
+            try {
+                const buttonId = action === 'add' ? 'add-allowed-role' : null;
+                if (buttonId) toggleLoading(buttonId, true);
+                
+                const response = await fetch('/api/allowed_roles', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        action: action,
+                        id: roleId
+                    })
+                });
+                
+                if (!response.ok) {
+                    const data = await response.json();
+                    throw new Error(data.message || 'Erro desconhecido');
+                }
+                
+                await loadAllowedRoles();
+                showToast(`Cargo ${action === 'add' ? 'adicionado' : 'removido'} com sucesso!`, 'success');
+                
+                if (action === 'add') {
+                    document.getElementById('allowed-role-id').value = '';
+                }
+            } catch (error) {
+                console.error('Erro ao atualizar cargos permitidos:', error);
+                showToast('Erro ao atualizar cargos permitidos: ' + error.message, 'error');
+            } finally {
+                toggleLoading('add-allowed-role', false);
+            }
+        }
+
+        // Funções para histórico
+        async function loadWarningsHistory() {
+            try {
+                const response = await fetch('/api/warnings_history?days=30&limit=50');
+                if (!response.ok) throw new Error('Erro ao carregar histórico de avisos');
+                
+                const warnings = await response.json();
+                let html = '';
+                
+                if (warnings.length > 0) {
+                    warnings.forEach(warning => {
+                        html += `
+                            <tr>
+                                <td>${warning.user_name || warning.user_id}</td>
+                                <td>${warning.warning_type}</td>
+                                <td>${new Date(warning.warning_date).toLocaleString()}</td>
+                            </tr>`;
+                    });
+                } else {
+                    html = '<tr><td colspan="3" class="text-center">Nenhum aviso registrado</td></tr>';
+                }
+                
+                document.getElementById('warnings-table').innerHTML = html;
+            } catch (error) {
+                console.error('Erro ao carregar histórico de avisos:', error);
+                document.getElementById('warnings-table').innerHTML = `
+                    <tr><td colspan="3" class="text-center text-danger">Erro ao carregar avisos: ${error.message}</td></tr>`;
+            }
+        }
+
+        async function loadKicksHistory() {
+            try {
+                const response = await fetch('/api/kicks_history?days=30&limit=50');
+                if (!response.ok) throw new Error('Erro ao carregar histórico de expulsões');
+                
+                const kicks = await response.json();
+                let html = '';
+                
+                if (kicks.length > 0) {
+                    kicks.forEach(kick => {
+                        html += `
+                            <tr>
+                                <td>${kick.user_name || kick.user_id}</td>
+                                <td>${new Date(kick.kick_date).toLocaleString()}</td>
+                                <td>${kick.reason || 'N/A'}</td>
+                            </tr>`;
+                    });
+                } else {
+                    html = '<tr><td colspan="3" class="text-center">Nenhuma expulsão registrada</td></tr>';
+                }
+                
+                document.getElementById('kicks-table').innerHTML = html;
+            } catch (error) {
+                console.error('Erro ao carregar histórico de expulsões:', error);
+                document.getElementById('kicks-table').innerHTML = `
+                    <tr><td colspan="3" class="text-center text-danger">Erro ao carregar expulsões: ${error.message}</td></tr>`;
+            }
+        }
+
+        // Funções para executar comandos
+        async function runBotCommand(command, data = {}) {
+            try {
+                const response = await fetch('/api/run_command', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        command: command,
+                        ...data
+                    })
+                });
+                
+                const result = await response.json();
+                
+                if (result.status === 'success') {
+                    showToast(`Comando ${command} executado com sucesso!`, 'success');
+                    return result;
+                } else {
+                    throw new Error(result.message || 'Erro desconhecido');
+                }
+            } catch (error) {
+                console.error(`Erro ao executar comando ${command}:`, error);
+                showToast(`Erro ao executar comando ${command}: ${error.message}`, 'error');
+                return null;
+            }
+        }
+
         // Configurar eventos dos botões
         function setupEventListeners() {
             // Whitelist
@@ -1174,8 +1474,17 @@
                 }
             });
             
+            // Cargos permitidos
+            document.getElementById('add-allowed-role').addEventListener('click', () => {
+                const roleId = document.getElementById('allowed-role-id').value;
+                if (roleId) {
+                    updateAllowedRoles('add', roleId);
+                } else {
+                    showToast('Por favor, insira um ID de cargo válido', 'warning');
+                }
+            });
+            
             // Logs e eventos
-            document.getElementById('refreshEvents').addEventListener('click', loadRecentEvents);
             document.getElementById('refreshLogs').addEventListener('click', loadLogs);
             
             // Configurações
@@ -1183,6 +1492,35 @@
             document.getElementById('restart-bot').addEventListener('click', restartBot);
             document.getElementById('backup-bot').addEventListener('click', createBackup);
             document.getElementById('export-report').addEventListener('click', exportReport);
+            
+            // Comandos do bot
+            document.getElementById('sync-commands-btn').addEventListener('click', () => {
+                if (confirm('Deseja sincronizar os comandos do bot agora?')) {
+                    runBotCommand('sync_commands');
+                }
+            });
+            
+            document.getElementById('cleanup-data-btn').addEventListener('click', () => {
+                if (confirm('Deseja limpar dados antigos do banco de dados agora?')) {
+                    const days = prompt('Dias para manter (padrão: 60):', '60');
+                    runBotCommand('cleanup_data', { days: parseInt(days) || 60 });
+                }
+            });
+            
+            document.getElementById('force-check-btn').addEventListener('click', () => {
+                const userId = document.getElementById('force-check-user').value;
+                if (userId) {
+                    if (confirm(`Deseja forçar verificação de inatividade para o usuário ${userId}?`)) {
+                        runBotCommand('force_check', { member_id: userId });
+                    }
+                } else {
+                    showToast('Por favor, insira um ID de usuário válido', 'warning');
+                }
+            });
+            
+            // Carregar históricos quando as abas são clicadas
+            document.getElementById('warnings-tab').addEventListener('click', loadWarningsHistory);
+            document.getElementById('kicks-tab').addEventListener('click', loadKicksHistory);
         }
 
         // Inicializar a página
@@ -1191,9 +1529,11 @@
             loadSystemStatus();
             loadGuilds();
             loadWhitelist();
+            loadAllowedRoles();
             loadRecentEvents();
             loadLogs();
             loadConfig();
+            loadWarningsHistory();
             initCharts();
             setupEventListeners();
             
