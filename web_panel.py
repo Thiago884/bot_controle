@@ -11,7 +11,7 @@ from collections import deque
 import logging
 from logging.handlers import RotatingFileHandler
 from functools import wraps
-import discord # Adicionado: Importa o módulo discord para tipos como discord.VoiceChannel
+import discord
 
 # Configuração básica do logger para o web panel
 web_logger = logging.getLogger('web_panel')
@@ -41,7 +41,6 @@ def basic_auth_required(f):
     return decorated
 
 # Função para executar corrotinas no loop do bot
-# Isso é crucial para evitar RuntimeError com asyncio.run()
 def run_coroutine_in_bot_loop(coro):
     future = asyncio.run_coroutine_threadsafe(coro, bot.loop)
     return future.result()
@@ -82,7 +81,6 @@ def dashboard():
         pool_status = {}
         if hasattr(bot, 'db') and bot.db:
             try:
-                # Usa a nova função para executar a corrotina no loop do bot
                 pool_status = run_coroutine_in_bot_loop(bot.db.check_pool_status()) or {}
                 db_status = "Operacional" if pool_status else "Erro"
             except Exception as e:
@@ -99,9 +97,7 @@ def dashboard():
         if hasattr(bot, 'voice_event_queue'):
             queue_status['voice_events'] = bot.voice_event_queue.qsize()
         if hasattr(bot, 'message_queue'):
-            # Se message_queue for uma PriorityQueue do asyncio, qsize pode não ter as chaves
-            # Presumindo que bot.message_queue é uma fila simples ou que qsize retorna um int
-            if isinstance(bot.message_queue, dict): # Ajuste se for um dicionário de filas
+            if isinstance(bot.message_queue, dict):
                 queue_status['messages'] = {k: v.qsize() for k, v in bot.message_queue.items()}
             else:
                 queue_status['messages'] = bot.message_queue.qsize()
@@ -133,65 +129,90 @@ def dashboard():
 def monitor():
     try:
         web_logger.info("Acessando a rota monitor")
-        # Obter status do banco de dados
-        db_status = "Desconhecido"
-        pool_status = {}
-        if hasattr(bot, 'db') and bot.db:
-            try:
-                # Usa a nova função para executar a corrotina no loop do bot
-                pool_status = run_coroutine_in_bot_loop(bot.db.check_pool_status()) or {}
-                db_status = "Operacional" if pool_status else "Erro"
-            except Exception as e:
-                db_status = f"Erro: {str(e)}"
-                web_logger.error(f"Erro ao verificar status do banco no monitor: {e}", exc_info=True)
-        else:
-            web_logger.warning("Objeto do banco de dados (bot.db) não está disponível no monitor.")
         
-        # Obter status de rate limits
-        rate_limits = {}
-        if hasattr(bot, 'rate_limit_monitor'):
-            rate_limits = bot.rate_limit_monitor.get_status_report()
+        # Obter status do sistema
+        system_status = get_system_status().json
         
-        # Obter estatísticas de uso
-        queue_status = {}
-        if hasattr(bot, 'message_queue'):
-            # Ajuste semelhante ao do dashboard para message_queue
-            if isinstance(bot.message_queue, dict):
-                queue_status = {k: v.qsize() for k, v in bot.message_queue.items()}
-            else:
-                queue_status = bot.message_queue.qsize()
+        # Obter rate limits
+        rate_limits = get_rate_limits().json
         
-        # Processar eventos recentes
-        recent_events = []
-        if hasattr(bot, 'rate_limit_monitor') and hasattr(bot.rate_limit_monitor, 'history'):
-            for event in list(bot.rate_limit_monitor.history)[-10:]:
-                recent_events.append({
-                    'time': datetime.datetime.fromtimestamp(event['time']).strftime('%H:%M:%S'),
-                    'bucket': event['bucket'],
-                    'remaining': event['remaining'],
-                    'endpoint': event.get('endpoint', 'unknown')
-                })
+        # Obter eventos recentes
+        recent_events = get_recent_events().json
         
         # Obter logs recentes
         log_lines = []
         try:
             with open('bot.log', 'r') as log_file:
-                log_lines = list(deque(log_file, 100))  # Últimas 100 linhas, convertido para lista
+                log_lines = list(deque(log_file, 100))  # Últimas 100 linhas
         except Exception as e:
-            web_logger.warning(f"Erro ao ler arquivo de log bot.log: {e}", exc_info=True)
+            web_logger.warning(f"Erro ao ler arquivo de log: {e}")
         
         return render_template('monitor.html',
-                            db_status=db_status,
-                            pool_status=pool_status,
+                            bot_name=bot.user.name if hasattr(bot, 'user') and bot.user else "Inactivity Bot",
+                            system_status=system_status,
                             rate_limits=rate_limits,
-                            queue_status=queue_status,
                             recent_events=recent_events,
-                            log_lines=log_lines,
-                            bot_name=bot.user.name if hasattr(bot, 'user') and bot.user else "Inactivity Bot")
+                            log_lines=log_lines)
     
     except Exception as e:
         web_logger.error(f"Erro na rota monitor: {e}", exc_info=True)
         return render_template('error.html', error_message="Erro ao carregar o monitor"), 500
+
+@app.route('/api/status')
+@basic_auth_required
+def get_system_status():
+    try:
+        # Obter status do bot
+        bot_status = "Operacional"
+        
+        # Obter status do banco de dados
+        db_status = "Desconhecido"
+        pool_status = {}
+        if hasattr(bot, 'db') and bot.db:
+            try:
+                pool_status = run_coroutine_in_bot_loop(bot.db.check_pool_status()) or {}
+                db_status = "Operacional" if pool_status else "Erro"
+            except Exception as e:
+                db_status = f"Erro: {str(e)}"
+        
+        # Obter uptime
+        uptime = str(datetime.datetime.now() - bot.start_time).split('.')[0] if hasattr(bot, 'start_time') else "N/A"
+        
+        # Obter contagem de servidores
+        guild_count = len(bot.guilds) if hasattr(bot, 'guilds') else 0
+        
+        # Obter status das filas
+        queue_status = {
+            'voice_events': 0,
+            'messages_critical': 0,
+            'messages_high': 0,
+            'messages_normal': 0,
+            'messages_low': 0
+        }
+        if hasattr(bot, 'voice_event_queue'):
+            queue_status['voice_events'] = bot.voice_event_queue.qsize()
+        if hasattr(bot, 'message_queue'):
+            if isinstance(bot.message_queue, dict):
+                queue_status.update({
+                    'messages_critical': bot.message_queue['critical'].qsize(),
+                    'messages_high': bot.message_queue['high'].qsize(),
+                    'messages_normal': bot.message_queue['normal'].qsize(),
+                    'messages_low': bot.message_queue['low'].qsize()
+                })
+            else:
+                queue_status['messages_normal'] = bot.message_queue.qsize()
+        
+        return jsonify({
+            'bot_status': bot_status,
+            'db_status': db_status,
+            'pool_status': pool_status,
+            'uptime': uptime,
+            'guild_count': guild_count,
+            'queue_status': queue_status
+        })
+    except Exception as e:
+        web_logger.error(f"Erro em /api/status: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/guilds')
 @basic_auth_required
@@ -222,7 +243,6 @@ def get_guild_info(guild_id):
             return jsonify({'error': 'Guild not found'}), 404
         
         tracked_roles = []
-        # Verifique se bot.config e bot.config['tracked_roles'] existem
         if hasattr(bot, 'config') and 'tracked_roles' in bot.config:
             for role_id in bot.config['tracked_roles']:
                 role = guild.get_role(role_id)
@@ -234,7 +254,7 @@ def get_guild_info(guild_id):
                         'member_count': len(role.members)
                     })
         
-        # Adicionar estatísticas de atividade (simuladas - implementação real depende do seu banco de dados)
+        # Estatísticas de atividade simuladas
         activity_stats = {
             'active_users': 0,
             'inactive_users': 0,
@@ -267,7 +287,7 @@ def get_guild_info(guild_id):
             'voice_channels': voice_channels,
             'notification_settings': notification_settings,
             'config': {
-                'required_minutes': bot.config.get('required_minutes', 15), # Usar .get para segurança
+                'required_minutes': bot.config.get('required_minutes', 15),
                 'required_days': bot.config.get('required_days', 2),
                 'monitoring_period': bot.config.get('monitoring_period', 14),
                 'kick_after_days': bot.config.get('kick_after_days', 30)
@@ -290,6 +310,25 @@ def get_rate_limits():
         web_logger.error(f"Erro em /api/rate_limits: {e}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/events')
+@basic_auth_required
+def get_recent_events():
+    try:
+        recent_events = []
+        if hasattr(bot, 'rate_limit_monitor') and hasattr(bot.rate_limit_monitor, 'history'):
+            for event in list(bot.rate_limit_monitor.history)[-20:]:
+                recent_events.append({
+                    'time': datetime.datetime.fromtimestamp(event['time']).strftime('%H:%M:%S'),
+                    'bucket': event['bucket'],
+                    'remaining': event['remaining'],
+                    'endpoint': event.get('endpoint', 'unknown'),
+                    'method': event.get('method', 'GET')
+                })
+        return jsonify({'recent_events': recent_events})
+    except Exception as e:
+        web_logger.error(f"Erro em /api/events: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/update_config', methods=['POST'])
 @basic_auth_required
 def update_config():
@@ -298,7 +337,6 @@ def update_config():
         if not data:
             return jsonify({'status': 'error', 'message': 'No data provided'}), 400
         
-        # Certifique-se de que bot.config exista
         if not hasattr(bot, 'config'):
             return jsonify({'status': 'error', 'message': 'Bot config not initialized'}), 500
 
@@ -311,7 +349,6 @@ def update_config():
         if 'kick_after_days' in data:
             bot.config['kick_after_days'] = int(data['kick_after_days'])
         
-        # Usa a nova função para executar a corrotina no loop do bot
         run_coroutine_in_bot_loop(bot.save_config())
         return jsonify({'status': 'success'})
     except Exception as e:
@@ -324,7 +361,6 @@ def restart_bot():
     try:
         web_logger.info("Reinicialização do bot solicitada")
         
-        # Simular reinicialização
         def restart():
             import sys
             python = sys.executable
@@ -344,14 +380,13 @@ def restart_bot():
 @basic_auth_required
 def manage_whitelist():
     try:
-        # Certifique-se de que bot.config e bot.config['whitelist'] existam
         if not hasattr(bot, 'config') or 'whitelist' not in bot.config:
             return jsonify({'status': 'error', 'message': 'Bot config or whitelist not initialized'}), 500
 
         if request.method == 'GET':
             return jsonify({
-                'users': bot.config['whitelist']['users'],
-                'roles': bot.config['whitelist']['roles']
+                'users': [str(id) for id in bot.config['whitelist']['users']],
+                'roles': [str(id) for id in bot.config['whitelist']['roles']]
             })
         
         elif request.method == 'POST':
@@ -363,7 +398,11 @@ def manage_whitelist():
             if not all([action, target_type, target_id]):
                 return jsonify({'status': 'error', 'message': 'Missing parameters'}), 400
             
-            target_id = int(target_id)
+            try:
+                target_id = int(target_id)
+            except ValueError:
+                return jsonify({'status': 'error', 'message': 'Invalid ID format'}), 400
+            
             config_key = 'users' if target_type == 'user' else 'roles'
             
             if action == 'add':
@@ -375,7 +414,6 @@ def manage_whitelist():
             else:
                 return jsonify({'status': 'error', 'message': 'Invalid action'}), 400
             
-            # Usa a nova função para executar a corrotina no loop do bot
             run_coroutine_in_bot_loop(bot.save_config())
             return jsonify({'status': 'success'})
     
@@ -389,11 +427,10 @@ def get_logs():
     try:
         lines = request.args.get('lines', default=100, type=int)
         
-        # Tenta ler o arquivo bot.log
         log_lines = []
         try:
             with open('bot.log', 'r') as log_file:
-                log_lines = list(deque(log_file, lines)) # Converte para lista para jsonify
+                log_lines = list(deque(log_file, lines))
         except FileNotFoundError:
             web_logger.warning("Arquivo de log 'bot.log' não encontrado.")
             return jsonify({'logs': ['Arquivo de log "bot.log" não encontrado.']})
@@ -412,7 +449,6 @@ def get_logs():
 @basic_auth_required
 def get_activity_stats():
     try:
-        # Esta é uma implementação simulada - você precisará adaptar para seu banco de dados
         stats = {
             'total_users': 0,
             'active_users': 0,
@@ -433,7 +469,6 @@ def create_backup():
         if not hasattr(bot, 'db_backup'):
             return jsonify({'status': 'error', 'message': 'Backup system not initialized'}), 500
         
-        # Usa a nova função para executar a corrotina no loop do bot
         success = run_coroutine_in_bot_loop(bot.db_backup.create_backup())
         
         if success:
