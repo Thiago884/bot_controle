@@ -27,7 +27,7 @@ class PerformanceMetrics:
         self._maybe_flush()
     
     def _maybe_flush(self):
-        if time.time() - self.last_flush > 300:  # 5 minutos
+        if time.time() - self.last_flush > 300:  # 5 minutes
             self._flush_metrics()
             self.last_flush = time.time()
     
@@ -44,7 +44,7 @@ class PerformanceMetrics:
             logger.info(f"Métricas API: Avg={avg_api:.3f}s, Max={max_api:.3f}s, Samples={len(self.api_call_times)}")
             self.api_call_times = []
 
-# Instância global
+# Global instance
 perf_metrics = PerformanceMetrics()
 
 class TaskMetrics:
@@ -117,36 +117,58 @@ async def inactivity_check():
     
     processed_members = 0
     members_with_roles_removed = 0
-    batch_size = bot._batch_processing_size
     
     for guild in bot.guilds:
-        # Process members in batches to avoid rate limits
-        members = list(guild.members)
-        for i in range(0, len(members), batch_size):
-            batch = members[i:i + batch_size]
-            await asyncio.gather(*[process_member_inactivity(member, guild, required_minutes, 
-                required_days, monitoring_period, tracked_roles) for member in batch])
+        try:
+            # Obter todos os membros com cargos monitorados
+            members_with_roles = []
+            for member in guild.members:
+                if any(role.id in tracked_roles for role in member.roles):
+                    members_with_roles.append(member)
             
-            # Small delay between batches
-            await asyncio.sleep(bot.rate_limit_delay)
+            # Processar em lotes
+            batch_size = bot._batch_processing_size
+            for i in range(0, len(members_with_roles), batch_size):
+                batch = members_with_roles[i:i + batch_size]
+                results = await asyncio.gather(*[
+                    process_member_inactivity(
+                        member, guild, required_minutes, 
+                        required_days, monitoring_period, tracked_roles
+                    ) for member in batch
+                ], return_exceptions=True)
+                
+                # Atualizar contadores
+                for result in results:
+                    if not isinstance(result, Exception):
+                        processed_members += result.get('processed', 0)
+                        members_with_roles_removed += result.get('removed', 0)
+                
+                # Pequeno delay entre lotes para evitar rate limits
+                await asyncio.sleep(bot.rate_limit_delay)
+                
+        except Exception as e:
+            logger.error(f"Erro ao verificar inatividade na guild {guild.name}: {e}")
+            continue
     
     logger.info(f"Verificação de inatividade concluída. Membros processados: {processed_members}, Cargos removidos: {members_with_roles_removed}")
 
 async def process_member_inactivity(member: discord.Member, guild: discord.Guild, 
                                   required_minutes: int, required_days: int, 
-                                  monitoring_period: int, tracked_roles: List[int]):
+                                  monitoring_period: int, tracked_roles: List[int]) -> Dict:
     """Process inactivity check for a single member"""
+    result = {'processed': 0, 'removed': 0}
+    
     try:
         # Verificar whitelist
         if member.id in bot.config['whitelist']['users'] or \
            any(role.id in bot.config['whitelist']['roles'] for role in member.roles):
-            return
+            return result
             
         # Verificar se tem cargos monitorados
         if not any(role.id in tracked_roles for role in member.roles):
-            return
+            return result
         
-        processed_members += 1
+        result['processed'] = 1
         
         # Verificar último período verificado
         start_time = time.time()
@@ -158,7 +180,7 @@ async def process_member_inactivity(member: discord.Member, guild: discord.Guild
         if last_check:
             last_period_end = last_check['period_end'].replace(tzinfo=bot.timezone)
             if now < last_period_end:
-                return
+                return result
         
         # Definir período de verificação
         period_end = now
@@ -180,6 +202,9 @@ async def process_member_inactivity(member: discord.Member, guild: discord.Guild
                     valid_days.add(day)
             
             meets_requirements = len(valid_days) >= required_days
+        else:
+            # Membros que nunca entraram em voz automaticamente não cumprem os requisitos
+            meets_requirements = False
         
         # Registrar verificação
         start_time = time.time()
@@ -228,7 +253,7 @@ async def process_member_inactivity(member: discord.Member, guild: discord.Guild
                         f"🚨 Cargos removidos de {member.mention} por inatividade: " +
                         ", ".join([f"`{r.name}`" for r in roles_to_remove]))
                     
-                    members_with_roles_removed += 1
+                    result['removed'] = 1
                     
                 except discord.Forbidden:
                     await bot.log_action("Erro ao Remover Cargo", member, "Permissões insuficientes")
@@ -237,6 +262,8 @@ async def process_member_inactivity(member: discord.Member, guild: discord.Guild
     
     except Exception as e:
         logger.error(f"Erro ao verificar inatividade para {member}: {e}")
+    
+    return result
 
 @tasks.loop(hours=24)
 @log_task_metrics("check_warnings")

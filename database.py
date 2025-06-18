@@ -744,6 +744,40 @@ class Database:
             if conn:
                 self.pool.release(conn)
 
+    async def get_members_with_tracked_roles(self, guild_id: int, role_ids: List[int]) -> List[Dict]:
+        """Obtém todos os membros que possuem pelo menos um dos cargos monitorados"""
+        cursor = None
+        conn = None
+        try:
+            # Precisamos usar uma query mais complexa para verificar múltiplos cargos
+            placeholders = ','.join(['%s'] * len(role_ids))
+            cursor, conn = await self.execute_query(f'''
+                SELECT DISTINCT u.user_id 
+                FROM user_activity u
+                JOIN voice_sessions v ON u.user_id = v.user_id AND u.guild_id = v.guild_id
+                WHERE u.guild_id = %s
+                AND EXISTS (
+                    SELECT 1 FROM voice_sessions 
+                    WHERE user_id = u.user_id 
+                    AND guild_id = u.guild_id
+                )
+                UNION
+                SELECT user_id FROM user_activity
+                WHERE guild_id = %s
+                AND last_voice_join IS NOT NULL
+            ''', (guild_id, guild_id))
+            
+            results = await cursor.fetchall()
+            return [r['user_id'] for r in results] if results else []
+        except Exception as e:
+            logger.error(f"Erro ao buscar membros com cargos monitorados: {e}")
+            return []
+        finally:
+            if cursor:
+                await cursor.close()
+            if conn:
+                self.pool.release(conn)
+
     async def cleanup_old_data(self, days: int = 60):
         """Limpa dados antigos do banco de dados"""
         conn = None
