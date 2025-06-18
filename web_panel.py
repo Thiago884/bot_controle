@@ -12,6 +12,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 from functools import wraps
 import discord
+import aiomysql
 
 # Configuração básica do logger para o web panel
 web_logger = logging.getLogger('web_panel')
@@ -244,42 +245,50 @@ def get_guild_info(guild_id):
         
         # Obter membros com cargos monitorados
         tracked_members = []
+        tracked_roles = []
         if hasattr(bot, 'config') and 'tracked_roles' in bot.config:
             for role_id in bot.config['tracked_roles']:
                 role = guild.get_role(role_id)
                 if role:
+                    tracked_roles.append({
+                        'id': role.id,
+                        'name': role.name,
+                        'color': str(role.color),
+                        'member_count': len(role.members)
+                    })
                     for member in role.members:
                         tracked_members.append(member.id)
         
-        # Estatísticas básicas (simuladas)
-        active_users = len(set(tracked_members))  # Simulação
-        inactive_users = 0  # Será calculado depois
+        # Estatísticas básicas
+        active_users = len(set(tracked_members)) if tracked_members else 0
+        
+        # Obter canais de voz
+        voice_channels = []
+        for channel in guild.channels:
+            if isinstance(channel, discord.VoiceChannel):
+                voice_channels.append({
+                    'id': channel.id,
+                    'name': channel.name,
+                    'user_count': len(channel.members)
+                })
         
         return jsonify({
             'id': guild.id,
             'name': guild.name,
             'icon': guild.icon.url if guild.icon else None,
-            'tracked_roles': [{
-                'id': role.id,
-                'name': role.name,
-                'color': str(role.color),
-                'member_count': len(role.members)
-            } for role in guild.roles if hasattr(bot, 'config') and 'tracked_roles' in bot.config and role.id in bot.config['tracked_roles']],
+            'tracked_roles': tracked_roles,
             'activity_stats': {
                 'active_users': active_users,
-                'inactive_users': inactive_users,
-                'warned_users': 0  # Será calculado depois
+                'inactive_users': 0,  # Será calculado depois
+                'warned_users': 0    # Será calculado depois
             },
-            'voice_channels': [{
-                'id': channel.id,
-                'name': channel.name,
-                'user_count': len(channel.members)
-            } for channel in guild.channels if isinstance(channel, discord.VoiceChannel)],
+            'voice_channels': voice_channels,
             'config': {
                 'required_minutes': bot.config.get('required_minutes', 15),
                 'required_days': bot.config.get('required_days', 2),
                 'monitoring_period': bot.config.get('monitoring_period', 14),
-                'kick_after_days': bot.config.get('kick_after_days', 30)
+                'kick_after_days': bot.config.get('kick_after_days', 30),
+                'timezone': bot.config.get('timezone', 'America/Sao_Paulo')
             }
         })
     except Exception as e:
@@ -472,10 +481,15 @@ def create_backup():
 @basic_auth_required
 def manage_allowed_roles():
     try:
+        if not bot.guilds:
+            return jsonify({'status': 'error', 'message': 'No guilds available'}), 400
+        
+        guild = bot.guilds[0]  # Usar a primeira guilda
+        
         if request.method == 'GET':
             allowed_roles = []
             for role_id in bot.config.get('allowed_roles', []):
-                role = bot.get_guild(bot.config['guild_id']).get_role(role_id)
+                role = guild.get_role(role_id)
                 if role:
                     allowed_roles.append({
                         'id': role.id,
@@ -498,10 +512,12 @@ def manage_allowed_roles():
                 return jsonify({'status': 'error', 'message': 'Invalid ID format'}), 400
             
             if action == 'add':
-                if role_id not in bot.config['allowed_roles']:
+                if role_id not in bot.config.get('allowed_roles', []):
+                    if 'allowed_roles' not in bot.config:
+                        bot.config['allowed_roles'] = []
                     bot.config['allowed_roles'].append(role_id)
             elif action == 'remove':
-                if role_id in bot.config['allowed_roles']:
+                if role_id in bot.config.get('allowed_roles', []):
                     bot.config['allowed_roles'].remove(role_id)
             else:
                 return jsonify({'status': 'error', 'message': 'Invalid action'}), 400
@@ -517,7 +533,10 @@ def manage_allowed_roles():
 @basic_auth_required
 def get_whitelist_users():
     try:
-        guild = bot.get_guild(bot.config['guild_id'])
+        if not bot.guilds:
+            return jsonify({'status': 'error', 'message': 'No guilds available'}), 400
+        
+        guild = bot.guilds[0]
         users = []
         for user_id in bot.config['whitelist']['users']:
             user = guild.get_member(user_id)
@@ -549,7 +568,10 @@ def run_command():
                     if not member_id:
                         return {'status': 'error', 'message': 'Member ID required'}
                     
-                    member = bot.get_guild(bot.config['guild_id']).get_member(int(member_id))
+                    if not bot.guilds:
+                        return {'status': 'error', 'message': 'No guilds available'}
+                    
+                    member = bot.guilds[0].get_member(int(member_id))
                     if not member:
                         return {'status': 'error', 'message': 'Member not found'}
                     
@@ -586,28 +608,40 @@ def get_warnings_history():
         days = request.args.get('days', default=30, type=int)
         limit = request.args.get('limit', default=100, type=int)
         
+        if not bot.guilds:
+            return jsonify({'status': 'error', 'message': 'No guilds available'}), 400
+        
+        guild_id = bot.guilds[0].id  # Usar a primeira guilda
+        
         async def _get_warnings():
-            async with bot.db.pool.acquire() as conn:
-                async with conn.cursor() as cursor:
-                    await cursor.execute('''
-                        SELECT 
-                            user_id, 
-                            warning_type, 
-                            warning_date
-                        FROM user_warnings
-                        WHERE guild_id = %s
-                        AND warning_date >= DATE_SUB(NOW(), INTERVAL %s DAY)
-                        ORDER BY warning_date DESC
-                        LIMIT %s
-                    ''', (bot.config['guild_id'], days, limit))
-                    
-                    return await cursor.fetchall()
+            if not hasattr(bot, 'db') or not bot.db:
+                return []
+                
+            try:
+                async with bot.db.pool.acquire() as conn:
+                    async with conn.cursor(aiomysql.DictCursor) as cursor:
+                        await cursor.execute('''
+                            SELECT 
+                                user_id, 
+                                warning_type, 
+                                warning_date
+                            FROM user_warnings
+                            WHERE guild_id = %s
+                            AND warning_date >= DATE_SUB(NOW(), INTERVAL %s DAY)
+                            ORDER BY warning_date DESC
+                            LIMIT %s
+                        ''', (guild_id, days, limit))
+                        
+                        return await cursor.fetchall()
+            except Exception as e:
+                web_logger.error(f"Database error in _get_warnings: {e}")
+                return []
         
         warnings = run_coroutine_in_bot_loop(_get_warnings())
         
         # Adicionar nomes de usuários se possível
         warnings_with_names = []
-        guild = bot.get_guild(bot.config['guild_id'])
+        guild = bot.guilds[0] if bot.guilds else None
         
         for warning in warnings:
             member = guild.get_member(warning['user_id']) if guild else None
@@ -615,7 +649,7 @@ def get_warnings_history():
                 'user_id': warning['user_id'],
                 'user_name': member.display_name if member else str(warning['user_id']),
                 'warning_type': warning['warning_type'],
-                'warning_date': warning['warning_date']
+                'warning_date': warning['warning_date'].strftime('%Y-%m-%d %H:%M:%S') if warning['warning_date'] else None
             })
         
         return jsonify(warnings_with_names)
@@ -631,9 +665,14 @@ def get_kicks_history():
         days = request.args.get('days', default=30, type=int)
         limit = request.args.get('limit', default=100, type=int)
         
+        if not bot.guilds:
+            return jsonify({'status': 'error', 'message': 'No guilds available'}), 400
+        
+        guild_id = bot.guilds[0].id
+        
         async def _get_kicks():
             async with bot.db.pool.acquire() as conn:
-                async with conn.cursor() as cursor:
+                async with conn.cursor(aiomysql.DictCursor) as cursor:
                     await cursor.execute('''
                         SELECT k.user_id, k.kick_date, k.reason
                         FROM kicked_members k
@@ -641,7 +680,7 @@ def get_kicks_history():
                         AND k.kick_date >= DATE_SUB(NOW(), INTERVAL %s DAY)
                         ORDER BY k.kick_date DESC
                         LIMIT %s
-                    ''', (bot.config['guild_id'], days, limit))
+                    ''', (guild_id, days, limit))
                     
                     return await cursor.fetchall()
         
@@ -649,14 +688,14 @@ def get_kicks_history():
         
         # Adicionar nomes de usuários se possível
         kicks_with_names = []
-        guild = bot.get_guild(bot.config['guild_id'])
+        guild = bot.guilds[0] if bot.guilds else None
         
         for kick in kicks:
             member = guild.get_member(kick['user_id']) if guild else None
             kicks_with_names.append({
                 'user_id': kick['user_id'],
                 'user_name': member.display_name if member else str(kick['user_id']),
-                'kick_date': kick['kick_date'],
+                'kick_date': kick['kick_date'].strftime('%Y-%m-%d %H:%M:%S') if kick['kick_date'] else None,
                 'reason': kick['reason']
             })
         
