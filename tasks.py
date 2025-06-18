@@ -203,7 +203,6 @@ async def process_member_inactivity(member: discord.Member, guild: discord.Guild
             
             meets_requirements = len(valid_days) >= required_days
         else:
-            # Membros que nunca entraram em voz automaticamente não cumprem os requisitos
             meets_requirements = False
         
         # Registrar verificação
@@ -214,51 +213,70 @@ async def process_member_inactivity(member: discord.Member, guild: discord.Guild
         # Ações para quem não cumpriu os requisitos
         if not meets_requirements:
             roles_to_remove = [role for role in member.roles if role.id in tracked_roles]
+            
+            # Verificar se o bot pode gerenciar esses cargos
             if roles_to_remove:
-                try:
-                    start_time = time.time()
-                    await member.remove_roles(*roles_to_remove)
-                    perf_metrics.record_api_call(time.time() - start_time)
-                    
-                    await bot.send_warning(member, 'final')
-                    
-                    start_time = time.time()
-                    await bot.db.log_removed_roles(member.id, guild.id, [r.id for r in roles_to_remove])
-                    perf_metrics.record_db_query(time.time() - start_time)
-                    
-                    # Gerar relatório gráfico
-                    report_file = await generate_activity_report(member, sessions)
-                    
-                    log_message = (
-                        f"Cargos removidos: {', '.join([r.name for r in roles_to_remove])}\n"
-                        f"Sessões no período: {len(sessions)}\n"
-                        f"Dias válidos: {len(valid_days)}/{required_days}"
+                # Obter o cargo mais alto do bot
+                bot_member = guild.get_member(bot.user.id)
+                bot_top_role = bot_member.top_role
+                
+                # Filtrar apenas cargos que o bot pode gerenciar (abaixo do seu cargo mais alto)
+                manageable_roles = [role for role in roles_to_remove if role < bot_top_role]
+                
+                if manageable_roles:
+                    try:
+                        start_time = time.time()
+                        await member.remove_roles(*manageable_roles)
+                        perf_metrics.record_api_call(time.time() - start_time)
+                        
+                        await bot.send_warning(member, 'final')
+                        
+                        start_time = time.time()
+                        await bot.db.log_removed_roles(member.id, guild.id, [r.id for r in manageable_roles])
+                        perf_metrics.record_db_query(time.time() - start_time)
+                        
+                        # Gerar relatório gráfico
+                        report_file = await generate_activity_report(member, sessions)
+                        
+                        log_message = (
+                            f"Cargos removidos: {', '.join([r.name for r in manageable_roles])}\n"
+                            f"Sessões no período: {len(sessions)}\n"
+                            f"Dias válidos: {len(valid_days)}/{required_days}"
+                        )
+                        
+                        if report_file:
+                            await bot.log_action(
+                                "Cargo Removido",
+                                member,
+                                log_message,
+                                file=report_file
+                            )
+                        else:
+                            await bot.log_action(
+                                "Cargo Removido",
+                                member,
+                                log_message
+                            )
+                        
+                        await bot.notify_roles(
+                            f"🚨 Cargos removidos de {member.mention} por inatividade: " +
+                            ", ".join([f"`{r.name}`" for r in manageable_roles]))
+                        
+                        result['removed'] = 1
+                        
+                    except discord.Forbidden:
+                        await bot.log_action("Erro ao Remover Cargo", member, "Permissões insuficientes")
+                    except Exception as e:
+                        logger.error(f"Erro ao remover cargos de {member}: {e}")
+                
+                # Registrar cargos que não puderam ser removidos
+                unmanageable_roles = [role for role in roles_to_remove if role >= bot_top_role]
+                if unmanageable_roles:
+                    await bot.log_action(
+                        "Cargos Não Removidos",
+                        member,
+                        f"O bot não tem permissão para remover: {', '.join([r.name for r in unmanageable_roles])}"
                     )
-                    
-                    if report_file:
-                        await bot.log_action(
-                            "Cargo Removido",
-                            member,
-                            log_message,
-                            file=report_file
-                        )
-                    else:
-                        await bot.log_action(
-                            "Cargo Removido",
-                            member,
-                            log_message
-                        )
-                    
-                    await bot.notify_roles(
-                        f"🚨 Cargos removidos de {member.mention} por inatividade: " +
-                        ", ".join([f"`{r.name}`" for r in roles_to_remove]))
-                    
-                    result['removed'] = 1
-                    
-                except discord.Forbidden:
-                    await bot.log_action("Erro ao Remover Cargo", member, "Permissões insuficientes")
-                except Exception as e:
-                    logger.error(f"Erro ao remover cargos de {member}: {e}")
     
     except Exception as e:
         logger.error(f"Erro ao verificar inatividade para {member}: {e}")

@@ -876,15 +876,24 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
         # Pegar apenas os top N resultados
         top_results = all_results[:limit]
         
-        # Obter informações dos membros
-        members_info = {}
-        for member in interaction.guild.members:
-            members_info[member.id] = member.display_name
+        # Obter informações dos membros de forma mais eficiente
+        member_ids = [row['user_id'] for row in top_results]
+        members = {member.id: member for member in interaction.guild.members if member.id in member_ids}
         
         # Construir ranking
         ranking = []
         for idx, row in enumerate(top_results, 1):
-            member_name = members_info.get(row['user_id'], f"Usuário desconhecido ({row['user_id']})")
+            member = members.get(row['user_id'])
+            if member:
+                member_name = member.display_name
+            else:
+                # Se o membro não foi encontrado, tentar buscar do cache ou API
+                try:
+                    member = await interaction.guild.fetch_member(row['user_id'])
+                    member_name = member.display_name
+                except:
+                    member_name = f"Usuário ID: {row['user_id']}"
+            
             total_hours = row['total_time'] / 3600
             avg_session = row['avg_duration'] / 60
             
@@ -908,7 +917,6 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
             color=discord.Color.gold(),
             timestamp=datetime.now(bot.timezone)
         )
-        
         # Adicionar estatísticas gerais
         embed.add_field(
             name="📊 Estatísticas Gerais",
@@ -980,6 +988,13 @@ async def force_check(interaction: discord.Interaction, member: discord.Member):
         tracked_roles = bot.config['tracked_roles']
         member_tracked_roles = [role for role in member.roles if role.id in tracked_roles]
         
+        # Obter o cargo mais alto do bot
+        bot_member = interaction.guild.get_member(bot.user.id)
+        bot_top_role = bot_member.top_role
+        
+        # Filtrar apenas cargos que o bot pode gerenciar
+        manageable_roles = [role for role in member_tracked_roles if role < bot_top_role]
+        
         embed = discord.Embed(
             title=f"Verificação de Atividade - {member.display_name}",
             color=discord.Color.blue()
@@ -1019,7 +1034,7 @@ async def force_check(interaction: discord.Interaction, member: discord.Member):
         
         # Criar view com botões se o usuário tiver cargos monitorados e não cumprir requisitos
         view = None
-        if member_tracked_roles and not result['meets_requirements']:
+        if manageable_roles and not result['meets_requirements']:
             view = discord.ui.View()
             button = discord.ui.Button(
                 style=discord.ButtonStyle.danger,
@@ -1035,10 +1050,10 @@ async def force_check(interaction: discord.Interaction, member: discord.Member):
                     return
                 
                 try:
-                    await member.remove_roles(*member_tracked_roles)
-                    await bot.db.log_removed_roles(member.id, member.guild.id, [r.id for r in member_tracked_roles])
+                    await member.remove_roles(*manageable_roles)
+                    await bot.db.log_removed_roles(member.id, member.guild.id, [r.id for r in manageable_roles])
                     
-                    removed_roles = ", ".join([f"`{role.name}`" for role in member_tracked_roles])
+                    removed_roles = ", ".join([f"`{role.name}`" for role in manageable_roles])
                     await interaction.response.send_message(
                         f"✅ Cargos removidos com sucesso: {removed_roles}",
                         ephemeral=True)
