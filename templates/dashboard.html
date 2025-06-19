@@ -810,11 +810,25 @@
                 const response = await fetch(`/api/guild/${guildId}`);
                 if (!response.ok) {
                     const errorData = await response.json();
+                    let errorMessage = errorData.error || 'Erro desconhecido';
+                    
                     if (errorData.error === 'Guild not found') {
-                        throw new Error('Servidor não encontrado - o bot pode ter sido removido deste servidor');
-                    } else {
-                        throw new Error(errorData.error || 'Erro ao carregar detalhes');
+                        errorMessage = 'Servidor não encontrado. Verifique se:';
+                        errorMessage += '<ul>';
+                        errorMessage += '<li>O bot ainda está no servidor</li>';
+                        errorMessage += '<li>O servidor está disponível</li>';
+                        errorMessage += '<li>Você tem permissões para visualizar</li>';
+                        errorMessage += '</ul>';
                     }
+                    
+                    document.getElementById('guildModalBody').innerHTML = `
+                        <div class="alert alert-danger">
+                            ${errorMessage}
+                            <button class="btn btn-sm btn-outline-primary mt-2" onclick="loadGuilds()">
+                                <i class="bi bi-arrow-repeat"></i> Atualizar lista de servidores
+                            </button>
+                        </div>`;
+                    return;
                 }
                 
                 const guild = await response.json();
@@ -1006,7 +1020,7 @@
                 console.error('Erro ao carregar detalhes da guilda:', error);
                 document.getElementById('guildModalBody').innerHTML = `
                     <div class="alert alert-danger">
-                        ${error.message}
+                        Erro ao carregar detalhes: ${error.message}
                         <button class="btn btn-sm btn-outline-primary mt-2" onclick="loadGuilds()">
                             <i class="bi bi-arrow-repeat"></i> Atualizar lista de servidores
                         </button>
