@@ -11,3 +11,4 @@ tzlocal>=4.3
 flask-cors>=3.0.10
 psutil>=5.9.0
 gunicorn>=21.2.0
+gevent>=1.4  # Add this line
