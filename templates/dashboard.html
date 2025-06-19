@@ -764,25 +764,28 @@
                 
                 let html = '';
                 guilds.forEach(guild => {
-                    html += `
-                        <tr>
-                            <td>
-                                ${guild.icon ? 
-                                    `<img src="${guild.icon}" class="guild-icon" alt="${guild.name}">` : 
-                                    `<div class="guild-icon guild-icon-placeholder"><i class="bi bi-server"></i></div>`}
-                            </td>
-                            <td>${guild.name}</td>
-                            <td>${guild.member_count}</td>
-                            <td>${guild.voice_channels}</td>
-                            <td>
-                                <button class="btn btn-sm btn-outline-primary" onclick="loadGuildDetails('${guild.id}')">
-                                    <i class="bi bi-eye"></i> Detalhes
-                                </button>
-                            </td>
-                        </tr>`;
+                    // Verificar se a guilda existe antes de adicionar à tabela
+                    if (guild && guild.id) {
+                        html += `
+                            <tr>
+                                <td>
+                                    ${guild.icon ? 
+                                        `<img src="${guild.icon}" class="guild-icon" alt="${guild.name}">` : 
+                                        `<div class="guild-icon guild-icon-placeholder"><i class="bi bi-server"></i></div>`}
+                                </td>
+                                <td>${guild.name || 'Nome desconhecido'}</td>
+                                <td>${guild.member_count || 0}</td>
+                                <td>${guild.voice_channels || 0}</td>
+                                <td>
+                                    <button class="btn btn-sm btn-outline-primary" onclick="loadGuildDetails('${guild.id}')">
+                                        <i class="bi bi-eye"></i> Detalhes
+                                    </button>
+                                </td>
+                            </tr>`;
+                    }
                 });
                 
-                tbody.innerHTML = html;
+                tbody.innerHTML = html || '<tr><td colspan="5" class="text-center">Nenhum servidor válido encontrado</td></tr>';
             } catch (error) {
                 console.error('Erro ao carregar servidores:', error);
                 showToast('Erro ao carregar servidores: ' + error.message, 'error');
@@ -807,10 +810,18 @@
                 const response = await fetch(`/api/guild/${guildId}`);
                 if (!response.ok) {
                     const errorData = await response.json();
-                    throw new Error(errorData.error || 'Erro ao carregar detalhes');
+                    if (errorData.error === 'Guild not found') {
+                        throw new Error('Servidor não encontrado - o bot pode ter sido removido deste servidor');
+                    } else {
+                        throw new Error(errorData.error || 'Erro ao carregar detalhes');
+                    }
                 }
                 
                 const guild = await response.json();
+                
+                if (!guild || !guild.id) {
+                    throw new Error('Dados do servidor inválidos');
+                }
                 
                 // Cabeçalho com ícone e nome do servidor
                 let html = `
@@ -995,9 +1006,9 @@
                 console.error('Erro ao carregar detalhes da guilda:', error);
                 document.getElementById('guildModalBody').innerHTML = `
                     <div class="alert alert-danger">
-                        Erro ao carregar detalhes do servidor: ${error.message}
-                        <button class="btn btn-sm btn-outline-primary mt-2" onclick="loadGuildDetails('${guildId}')">
-                            <i class="bi bi-arrow-repeat"></i> Tentar novamente
+                        ${error.message}
+                        <button class="btn btn-sm btn-outline-primary mt-2" onclick="loadGuilds()">
+                            <i class="bi bi-arrow-repeat"></i> Atualizar lista de servidores
                         </button>
                     </div>`;
             }

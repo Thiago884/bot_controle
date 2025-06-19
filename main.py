@@ -15,6 +15,7 @@ import aiomysql
 import random
 from collections import defaultdict
 from collections import deque
+from flask import Flask, jsonify  # Added for API support
 
 # Configuração do logger
 def setup_logger():
@@ -282,6 +283,43 @@ class InactivityBot(commands.Bot):
             'responses': defaultdict(dict)
         }
         self.cache_ttl = 300
+        
+        # API Flask
+        self.flask_app = Flask(__name__)
+        self.setup_api_routes()
+
+    def setup_api_routes(self):
+        """Configura as rotas da API Flask"""
+        @self.flask_app.route('/api/guild/<guild_id>')
+        async def get_guild_details(guild_id):
+            try:
+                guild = self.get_guild(int(guild_id))
+                if not guild:
+                    return jsonify({'error': 'Guild not found'}), 404
+                    
+                # Basic guild information
+                guild_data = {
+                    'id': guild.id,
+                    'name': guild.name,
+                    'icon': str(guild.icon.url) if guild.icon else None,
+                    'member_count': guild.member_count,
+                    'created_at': guild.created_at.isoformat(),
+                    'owner_id': guild.owner_id,
+                    'description': guild.description,
+                    'features': guild.features,
+                    'premium_tier': guild.premium_tier,
+                    'premium_subscription_count': guild.premium_subscription_count,
+                    'verification_level': str(guild.verification_level),
+                    'channels_count': len(guild.channels),
+                    'roles_count': len(guild.roles),
+                    'emojis_count': len(guild.emojis),
+                    'voice_channels': [{'id': c.id, 'name': c.name} for c in guild.voice_channels]
+                }
+                
+                return jsonify(guild_data)
+                
+            except Exception as e:
+                return jsonify({'error': str(e)}), 500
 
     async def check_rate_limit(self):
         """Verifica se o bot está sendo rate limited e ajusta o comportamento"""
