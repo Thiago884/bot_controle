@@ -1,6 +1,6 @@
 from flask import Flask, jsonify, render_template, request, redirect, url_for, Response
 from threading import Thread
-from main import bot
+from main import bot # Assuming 'bot' object is correctly initialized in main.py
 import asyncio
 import datetime
 from datetime import timedelta
@@ -18,9 +18,15 @@ import aiomysql
 web_logger = logging.getLogger('web_panel')
 web_logger.setLevel(logging.INFO)
 
-handler = RotatingFileHandler('web_panel.log', maxBytes=5*1024*1024, backupCount=3)
+# Configura o handler de arquivo com rotação
+handler = RotatingFileHandler('web_panel.log', maxBytes=5 * 1024 * 1024, backupCount=3)
 handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
 web_logger.addHandler(handler)
+
+# Adiciona um handler para console para depuração mais fácil durante o desenvolvimento
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+web_logger.addHandler(console_handler)
 
 app = Flask(__name__)
 
@@ -33,6 +39,7 @@ def basic_auth_required(f):
     def decorated(*args, **kwargs):
         auth = request.authorization
         if not auth or auth.username != WEB_AUTH_USER or auth.password != WEB_AUTH_PASS:
+            web_logger.warning("Tentativa de acesso não autorizado ao painel web.")
             return Response(
                 'Acesso não autorizado',
                 401,
@@ -43,12 +50,26 @@ def basic_auth_required(f):
 
 # Função para executar corrotinas no loop do bot
 def run_coroutine_in_bot_loop(coro):
+    """Executa uma corrotina no loop de eventos do bot e espera pelo resultado."""
+    if not bot.loop.is_running():
+        web_logger.error("Loop do bot não está rodando. Não é possível executar corrotina.")
+        raise RuntimeError("Bot loop is not running.")
+    
     future = asyncio.run_coroutine_threadsafe(coro, bot.loop)
-    return future.result()
+    try:
+        return future.result(timeout=10) # Adiciona um timeout para evitar bloqueio eterno
+    except asyncio.TimeoutError:
+        web_logger.error("Timeout ao executar corrotina no loop do bot.")
+        raise TimeoutError("Coroutine execution timed out.")
+    except Exception as e:
+        web_logger.error(f"Erro ao obter resultado da corrotina: {e}", exc_info=True)
+        raise # Re-raise a exceção para ser tratada pela rota Flask
+
 
 @app.route('/')
 @basic_auth_required
 def home():
+    web_logger.info("Redirecionando para /dashboard")
     return redirect(url_for('dashboard'))
 
 @app.route('/dashboard')
@@ -57,15 +78,21 @@ def dashboard():
     try:
         web_logger.info("Acessando a rota dashboard")
         
-        # Estatísticas básicas do bot
-        uptime = (datetime.datetime.now() - bot.start_time) if hasattr(bot, 'start_time') else "N/A"
-        web_logger.info(f"Tempo de atividade: {uptime}")
+        bot_user_name = bot.user.name if hasattr(bot, 'user') and bot.user else "Inactivity Bot"
+        uptime = "N/A"
+        if hasattr(bot, 'start_time'):
+            delta = datetime.datetime.now() - bot.start_time
+            uptime = str(delta).split('.')[0] # Remove microssegundos
+            web_logger.info(f"Tempo de atividade do bot: {uptime}")
+        else:
+            web_logger.warning("bot.start_time não definido.")
 
-        # Processar informações das guildas
         guild_stats = []
+        guild_count = 0
         if hasattr(bot, 'guilds') and bot.guilds:
+            guild_count = len(bot.guilds)
             for guild in bot.guilds:
-                web_logger.info(f"Processando guilda: {guild.name}")
+                web_logger.debug(f"Processando guilda para dashboard: {guild.name} (ID: {guild.id})")
                 voice_channels = len([c for c in guild.channels if isinstance(c, discord.VoiceChannel)])
                 guild_stats.append({
                     'id': guild.id,
@@ -75,55 +102,55 @@ def dashboard():
                     'icon': guild.icon.url if guild.icon else None
                 })
         else:
-            web_logger.warning("Bot.guilds não está disponível ou está vazio.")
+            web_logger.warning("Bot.guilds não está disponível ou está vazio ao carregar o dashboard.")
         
-        # Status do banco de dados
         db_status = "Desconhecido"
         pool_status = {}
         if hasattr(bot, 'db') and bot.db:
             try:
-                pool_status = run_coroutine_in_bot_loop(bot.db.check_pool_status()) or {}
-                db_status = "Operacional" if pool_status else "Erro"
+                # check_pool_status é uma corrotina, precisa ser executada no loop do bot
+                pool_status_data = run_coroutine_in_bot_loop(bot.db.check_pool_status())
+                pool_status = pool_status_data if pool_status_data else {}
+                db_status = "Operacional" if pool_status and pool_status.get('available_connections') is not None else "Erro"
             except Exception as e:
-                db_status = f"Erro: {str(e)}"
-                web_logger.error(f"Erro ao verificar status do banco: {e}", exc_info=True)
+                db_status = f"Erro ao verificar DB: {str(e)}"
+                web_logger.error(f"Erro ao verificar status do banco no dashboard: {e}", exc_info=True)
         else:
             web_logger.warning("Objeto do banco de dados (bot.db) não está disponível.")
         
-        # Status das filas
         queue_status = {
             'voice_events': 0,
             'messages': {'critical': 0, 'high': 0, 'normal': 0, 'low': 0}
         }
-        if hasattr(bot, 'voice_event_queue'):
+        if hasattr(bot, 'voice_event_queue') and bot.voice_event_queue:
             queue_status['voice_events'] = bot.voice_event_queue.qsize()
-        if hasattr(bot, 'message_queue'):
+        if hasattr(bot, 'message_queue') and bot.message_queue:
             if isinstance(bot.message_queue, dict):
                 queue_status['messages'] = {k: v.qsize() for k, v in bot.message_queue.items()}
             else:
-                queue_status['messages'] = bot.message_queue.qsize()
+                queue_status['messages'] = bot.message_queue.qsize() # Fallback for non-dict queue
         
-        # Configurações atuais
         current_config = {
-            'required_minutes': bot.config.get('required_minutes', 15),
-            'required_days': bot.config.get('required_days', 2),
-            'monitoring_period': bot.config.get('monitoring_period', 14),
-            'kick_after_days': bot.config.get('kick_after_days', 30)
+            'required_minutes': bot.config.get('required_minutes', 15) if hasattr(bot, 'config') else 15,
+            'required_days': bot.config.get('required_days', 2) if hasattr(bot, 'config') else 2,
+            'monitoring_period': bot.config.get('monitoring_period', 14) if hasattr(bot, 'config') else 14,
+            'kick_after_days': bot.config.get('kick_after_days', 30) if hasattr(bot, 'config') else 30
         }
         
         return render_template('dashboard.html', 
-                            bot_name=bot.user.name if hasattr(bot, 'user') and bot.user else "Inactivity Bot",
-                            guild_count=len(bot.guilds) if hasattr(bot, 'guilds') else 0,
+                            bot_name=bot_user_name,
+                            guild_count=guild_count,
                             guild_stats=guild_stats,
-                            uptime=str(uptime).split('.')[0] if uptime != "N/A" else uptime,
+                            uptime=uptime,
                             db_status=db_status,
                             pool_status=pool_status,
                             queue_status=queue_status,
                             current_config=current_config)
     
     except Exception as e:
-        web_logger.error(f"Erro na rota dashboard: {e}", exc_info=True)
-        return render_template('error.html', error_message="Erro ao carregar o dashboard"), 500
+        web_logger.error(f"Erro fatal na rota dashboard: {e}", exc_info=True)
+        # Renderiza uma página de erro genérica em caso de falha completa
+        return render_template('error.html', error_message=f"Erro ao carregar o dashboard: {e}"), 500
 
 @app.route('/monitor')
 @basic_auth_required
@@ -131,58 +158,66 @@ def monitor():
     try:
         web_logger.info("Acessando a rota monitor")
         
-        # Obter status do sistema
-        system_status = get_system_status().json
+        # Estas chamadas API internas já possuem tratamento de erro e retornam JSON
+        # Acessar .json diretamente aqui é um pouco arriscado se as funções retornarem erro e não um Response object
+        # O ideal seria chamar essas funções como se fossem um cliente, ou refatorar para ter uma única fonte de dados
+        # Por simplicidade, mantemos a estrutura, mas é bom estar ciente.
         
-        # Obter rate limits
-        rate_limits = get_rate_limits().json
+        system_status_data = get_system_status().json # Assumes get_system_status always returns a Flask Response
+        rate_limits_data = get_rate_limits().json
+        recent_events_data = get_recent_events().json
         
-        # Obter eventos recentes
-        recent_events = get_recent_events().json
-        
-        # Obter logs recentes
         log_lines = []
         try:
-            with open('bot.log', 'r') as log_file:
+            with open('bot.log', 'r', encoding='utf-8', errors='ignore') as log_file:
+                # Usar deque para pegar as últimas N linhas eficientemente
                 log_lines = list(deque(log_file, 100))  # Últimas 100 linhas
+        except FileNotFoundError:
+            web_logger.warning("Arquivo de log 'bot.log' não encontrado para o monitor.")
+            log_lines = ["Arquivo de log 'bot.log' não encontrado."]
         except Exception as e:
-            web_logger.warning(f"Erro ao ler arquivo de log: {e}")
+            web_logger.error(f"Erro ao ler arquivo de log para o monitor: {e}", exc_info=True)
+            log_lines = [f"Erro ao carregar logs: {str(e)}"]
+
+        bot_user_name = bot.user.name if hasattr(bot, 'user') and bot.user else "Inactivity Bot"
         
         return render_template('monitor.html',
-                            bot_name=bot.user.name if hasattr(bot, 'user') and bot.user else "Inactivity Bot",
-                            system_status=system_status,
-                            rate_limits=rate_limits,
-                            recent_events=recent_events,
+                            bot_name=bot_user_name,
+                            system_status=system_status_data,
+                            rate_limits=rate_limits_data,
+                            recent_events=recent_events_data,
                             log_lines=log_lines)
     
     except Exception as e:
-        web_logger.error(f"Erro na rota monitor: {e}", exc_info=True)
-        return render_template('error.html', error_message="Erro ao carregar o monitor"), 500
+        web_logger.error(f"Erro fatal na rota monitor: {e}", exc_info=True)
+        return render_template('error.html', error_message=f"Erro ao carregar o monitor: {e}"), 500
 
 @app.route('/api/status')
 @basic_auth_required
 def get_system_status():
     try:
-        # Obter status do bot
-        bot_status = "Operacional"
+        bot_status = "Offline"
+        if hasattr(bot, 'is_ready') and bot.is_ready():
+            bot_status = "Online"
         
-        # Obter status do banco de dados
         db_status = "Desconhecido"
         pool_status = {}
         if hasattr(bot, 'db') and bot.db:
             try:
-                pool_status = run_coroutine_in_bot_loop(bot.db.check_pool_status()) or {}
-                db_status = "Operacional" if pool_status else "Erro"
+                pool_status_data = run_coroutine_in_bot_loop(bot.db.check_pool_status())
+                pool_status = pool_status_data if pool_status_data else {}
+                db_status = "Operacional" if pool_status and pool_status.get('available_connections') is not None else "Erro"
             except Exception as e:
-                db_status = f"Erro: {str(e)}"
+                db_status = f"Erro DB: {str(e)}"
+                web_logger.error(f"Erro ao verificar status do banco em /api/status: {e}", exc_info=True)
         
-        # Obter uptime
-        uptime = str(datetime.datetime.now() - bot.start_time).split('.')[0] if hasattr(bot, 'start_time') else "N/A"
+        uptime = "N/A"
+        if hasattr(bot, 'start_time'):
+            delta = datetime.datetime.now() - bot.start_time
+            uptime = str(delta).split('.')[0]
         
-        # Obter contagem de servidores
         guild_count = len(bot.guilds) if hasattr(bot, 'guilds') else 0
         
-        # Obter status das filas
         queue_status = {
             'voice_events': 0,
             'messages_critical': 0,
@@ -190,9 +225,9 @@ def get_system_status():
             'messages_normal': 0,
             'messages_low': 0
         }
-        if hasattr(bot, 'voice_event_queue'):
+        if hasattr(bot, 'voice_event_queue') and bot.voice_event_queue:
             queue_status['voice_events'] = bot.voice_event_queue.qsize()
-        if hasattr(bot, 'message_queue'):
+        if hasattr(bot, 'message_queue') and bot.message_queue:
             if isinstance(bot.message_queue, dict):
                 queue_status.update({
                     'messages_critical': bot.message_queue['critical'].qsize(),
@@ -213,152 +248,165 @@ def get_system_status():
         })
     except Exception as e:
         web_logger.error(f"Erro em /api/status: {e}", exc_info=True)
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'status': 'error', 'message': str(e)}), 500 # Consistent error response
 
 @app.route('/api/guilds')
 @basic_auth_required
 def get_guilds():
     try:
-        guilds = []
+        guilds_data = []
         if hasattr(bot, 'guilds') and bot.guilds:
             for guild in bot.guilds:
                 voice_channels = len([c for c in guild.channels if isinstance(c, discord.VoiceChannel)])
-                guilds.append({
-                    'id': guild.id,
+                guilds_data.append({
+                    'id': str(guild.id), # Retorna como string para evitar problemas de JS com int64
                     'name': guild.name,
                     'member_count': guild.member_count,
                     'icon': guild.icon.url if guild.icon else None,
                     'voice_channels': voice_channels
                 })
-        return jsonify(guilds)
+        return jsonify(guilds_data)
     except Exception as e:
         web_logger.error(f"Erro em /api/guilds: {e}", exc_info=True)
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/api/guild/<int:guild_id>')
 @basic_auth_required
 def get_guild_info(guild_id):
     try:
         if not hasattr(bot, 'guilds') or not bot.guilds:
-            return jsonify({'error': 'Bot not connected to any guilds'}), 404
+            web_logger.warning(f"Bot não conectado a nenhuma guilda ao tentar obter informações da guilda {guild_id}.")
+            return jsonify({'status': 'error', 'message': 'Bot não conectado a nenhuma guilda.'}), 404
 
-        # Tentar encontrar a guilda na lista de guildas do bot
         guild = discord.utils.get(bot.guilds, id=guild_id)
         
-        # Se não encontrou, tentar buscar diretamente
         if not guild:
-            web_logger.warning(f"Guild {guild_id} not found in bot.guilds, trying direct fetch")
+            web_logger.warning(f"Guild {guild_id} não encontrada no cache do bot. Tentando buscar diretamente...")
             try:
-                guild = run_coroutine_in_bot_loop(bot.fetch_guild(guild_id))  # Usar fetch_guild em vez de get_guild
+                # Tenta buscar a guilda diretamente via API Discord
+                guild = run_coroutine_in_bot_loop(bot.fetch_guild(guild_id))
+                web_logger.info(f"Guild {guild_id} encontrada via fetch_guild.")
             except discord.NotFound:
-                web_logger.error(f"Guild {guild_id} not found via fetch_guild")
+                web_logger.error(f"Guild {guild_id} não encontrada, mesmo via fetch_guild. Verificar ID ou bot não está nela.")
                 return jsonify({
-                    'error': 'Guild not found',
+                    'status': 'error',
+                    'message': 'Servidor Discord não encontrado ou bot não faz parte dele.',
                     'solutions': [
-                        'Verify the bot is in the server',
-                        'Check server ID is correct',
-                        'Ensure bot has proper permissions'
+                        'Verifique se o bot está no servidor com o ID fornecido.',
+                        'Certifique-se de que o ID do servidor está correto.',
+                        'Verifique as permissões do bot no servidor (Intents de Gateway no Portal do Desenvolvedor Discord).'
                     ]
                 }), 404
             except discord.Forbidden:
-                web_logger.error(f"Bot lacks permissions to access guild {guild_id}")
+                web_logger.error(f"Bot não tem permissões para acessar a guilda {guild_id}.")
                 return jsonify({
-                    'error': 'Missing permissions',
+                    'status': 'error',
+                    'message': 'Permissões insuficientes do bot para acessar este servidor.',
                     'solutions': [
-                        'Check bot permissions in the server',
-                        'Ensure bot has VIEW_CHANNELS permission'
+                        'Verifique as permissões do bot no servidor, especialmente a permissão VIEW_CHANNEL.',
+                        'Certifique-se de que os Intents de Membros e Guilds estão habilitados no Portal do Desenvolvedor Discord.'
                     ]
                 }), 403
+            except Exception as fetch_e:
+                web_logger.error(f"Erro inesperado ao tentar buscar a guilda {guild_id}: {fetch_e}", exc_info=True)
+                return jsonify({'status': 'error', 'message': f"Erro ao buscar informações do servidor: {str(fetch_e)}"}), 500
 
-        # Força o carregamento de todos os membros (chunking)
+        # Força o carregamento de todos os membros (chunking) para garantir dados recentes
         try:
+            # chunk() é uma corrotina
             run_coroutine_in_bot_loop(guild.chunk())
+            web_logger.debug(f"Membros da guilda {guild.id} chunked com sucesso.")
         except Exception as e:
-            web_logger.warning(f"Error chunking guild members: {e}")
+            web_logger.warning(f"Erro ao fazer chunking de membros da guilda {guild.id}: {e}", exc_info=True)
+            # Continua mesmo com erro, mas os dados de membros podem estar incompletos
 
-        # Obter membros com cargos monitorados
-        tracked_members = []
-        tracked_roles = []
+        tracked_roles_data = []
+        # Obter membros com cargos monitorados (para futuros cálculos de inatividade)
+        # Este é um placeholder, a lógica real de "usuários ativos/inativos" viria do banco de dados
         if hasattr(bot, 'config') and 'tracked_roles' in bot.config:
             for role_id in bot.config['tracked_roles']:
                 role = guild.get_role(role_id)
                 if role:
-                    tracked_roles.append({
-                        'id': role.id,
+                    tracked_roles_data.append({
+                        'id': str(role.id),
                         'name': role.name,
                         'color': str(role.color),
-                        'member_count': len(role.members)
+                        'member_count': len(role.members) # Member count for this role
                     })
-                    for member in role.members:
-                        tracked_members.append(member.id)
         
-        # Estatísticas básicas
-        active_users = len(set(tracked_members)) if tracked_members else 0
-        
+        # Esses dados de atividade precisam ser buscados do DB, aqui são placeholders
+        activity_stats = {
+            'total_users': guild.member_count,
+            'active_users': 0, 
+            'inactive_users': 0,
+            'warned_users': 0,
+            'kicked_users': 0
+        }
+
         # Obter canais de voz
-        voice_channels = []
+        voice_channels_data = []
         for channel in guild.channels:
             if isinstance(channel, discord.VoiceChannel):
-                voice_channels.append({
-                    'id': channel.id,
+                voice_channels_data.append({
+                    'id': str(channel.id),
                     'name': channel.name,
                     'user_count': len(channel.members)
                 })
         
+        guild_config = {
+            'required_minutes': bot.config.get('required_minutes', 15) if hasattr(bot, 'config') else 15,
+            'required_days': bot.config.get('required_days', 2) if hasattr(bot, 'config') else 2,
+            'monitoring_period': bot.config.get('monitoring_period', 14) if hasattr(bot, 'config') else 14,
+            'kick_after_days': bot.config.get('kick_after_days', 30) if hasattr(bot, 'config') else 30,
+            'timezone': bot.config.get('timezone', 'America/Sao_Paulo') if hasattr(bot, 'config') else 'America/Sao_Paulo'
+        }
+
         return jsonify({
-            'id': guild.id,
+            'id': str(guild.id),
             'name': guild.name,
             'icon': guild.icon.url if guild.icon else None,
-            'tracked_roles': tracked_roles,
-            'activity_stats': {
-                'active_users': active_users,
-                'inactive_users': 0,  # Será calculado depois
-                'warned_users': 0    # Será calculado depois
-            },
-            'voice_channels': voice_channels,
-            'config': {
-                'required_minutes': bot.config.get('required_minutes', 15),
-                'required_days': bot.config.get('required_days', 2),
-                'monitoring_period': bot.config.get('monitoring_period', 14),
-                'kick_after_days': bot.config.get('kick_after_days', 30),
-                'timezone': bot.config.get('timezone', 'America/Sao_Paulo')
-            }
+            'tracked_roles': tracked_roles_data,
+            'activity_stats': activity_stats,
+            'voice_channels': voice_channels_data,
+            'config': guild_config
         })
     except Exception as e:
-        web_logger.error(f"Erro em /api/guild/{guild_id}: {e}", exc_info=True)
-        return jsonify({'error': str(e)}), 500
+        web_logger.error(f"Erro geral em /api/guild/{guild_id}: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': f"Erro interno do servidor ao carregar informações da guilda: {str(e)}"}), 500
 
 @app.route('/api/rate_limits')
 @basic_auth_required
 def get_rate_limits():
     try:
-        if not hasattr(bot, 'rate_limit_monitor'):
-            return jsonify({'error': 'Rate limit monitor not initialized'}), 500
+        if not hasattr(bot, 'rate_limit_monitor') or not bot.rate_limit_monitor:
+            web_logger.warning("Rate limit monitor não inicializado.")
+            return jsonify({'status': 'error', 'message': 'Monitor de Rate Limit não inicializado.'}), 500
         
         report = bot.rate_limit_monitor.get_status_report()
         return jsonify(report)
     except Exception as e:
         web_logger.error(f"Erro em /api/rate_limits: {e}", exc_info=True)
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/api/events')
 @basic_auth_required
 def get_recent_events():
     try:
         recent_events = []
-        if hasattr(bot, 'rate_limit_monitor') and hasattr(bot.rate_limit_monitor, 'history'):
-            for event in list(bot.rate_limit_monitor.history)[-20:]:
+        if hasattr(bot, 'rate_limit_monitor') and hasattr(bot.rate_limit_monitor, 'history') and bot.rate_limit_monitor.history:
+            # Converte deque para lista e pega os últimos 20, garantindo que é um tipo mutável
+            for event in list(bot.rate_limit_monitor.history)[-20:]: 
                 recent_events.append({
-                    'time': datetime.datetime.fromtimestamp(event['time']).strftime('%H:%M:%S'),
-                    'bucket': event['bucket'],
-                    'remaining': event['remaining'],
-                    'endpoint': event.get('endpoint', 'unknown'),
-                    'method': event.get('method', 'GET')
+                    'time': datetime.datetime.fromtimestamp(event['time']).strftime('%Y-%m-%d %H:%M:%S'), # Adiciona data
+                    'bucket': event.get('bucket', 'N/A'),
+                    'remaining': event.get('remaining', 'N/A'),
+                    'endpoint': event.get('endpoint', 'N/A'),
+                    'method': event.get('method', 'N/A')
                 })
         return jsonify({'recent_events': recent_events})
     except Exception as e:
         web_logger.error(f"Erro em /api/events: {e}", exc_info=True)
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/api/update_config', methods=['POST'])
 @basic_auth_required
@@ -366,120 +414,167 @@ def update_config():
     try:
         data = request.json
         if not data:
-            return jsonify({'status': 'error', 'message': 'No data provided'}), 400
+            return jsonify({'status': 'error', 'message': 'Nenhum dado fornecido'}), 400
         
-        if not hasattr(bot, 'config'):
-            return jsonify({'status': 'error', 'message': 'Bot config not initialized'}), 500
+        if not hasattr(bot, 'config') or not bot.config:
+            web_logger.warning("Objeto de configuração do bot não inicializado ao tentar atualizar.")
+            return jsonify({'status': 'error', 'message': 'Configuração do bot não inicializada'}), 500
 
-        if 'required_minutes' in data:
+        # Atualiza a configuração apenas se a chave existir e o valor for válido
+        updated = False
+        if 'required_minutes' in data and isinstance(data['required_minutes'], (int, str)):
             bot.config['required_minutes'] = int(data['required_minutes'])
-        if 'required_days' in data:
+            updated = True
+        if 'required_days' in data and isinstance(data['required_days'], (int, str)):
             bot.config['required_days'] = int(data['required_days'])
-        if 'monitoring_period' in data:
+            updated = True
+        if 'monitoring_period' in data and isinstance(data['monitoring_period'], (int, str)):
             bot.config['monitoring_period'] = int(data['monitoring_period'])
-        if 'kick_after_days' in data:
+            updated = True
+        if 'kick_after_days' in data and isinstance(data['kick_after_days'], (int, str)):
             bot.config['kick_after_days'] = int(data['kick_after_days'])
+            updated = True
+        if 'timezone' in data and isinstance(data['timezone'], str):
+            bot.config['timezone'] = data['timezone']
+            updated = True
         
-        run_coroutine_in_bot_loop(bot.save_config())
-        return jsonify({'status': 'success'})
+        if updated:
+            run_coroutine_in_bot_loop(bot.save_config())
+            web_logger.info("Configurações atualizadas e salvas.")
+            return jsonify({'status': 'success', 'message': 'Configurações atualizadas com sucesso.'})
+        else:
+            return jsonify({'status': 'info', 'message': 'Nenhuma configuração válida para atualizar.'}), 200 # 200 OK for no changes
+    except ValueError:
+        return jsonify({'status': 'error', 'message': 'Um ou mais valores de configuração são inválidos (esperado número).'}), 400
     except Exception as e:
         web_logger.error(f"Erro em /api/update_config: {e}", exc_info=True)
-        return jsonify({'status': 'error', 'message': str(e)}), 400
+        return jsonify({'status': 'error', 'message': f"Erro ao atualizar configuração: {str(e)}"}), 400
 
 @app.route('/api/restart', methods=['POST'])
 @basic_auth_required
 def restart_bot():
     try:
-        web_logger.info("Reinicialização do bot solicitada")
+        web_logger.info("Reinicialização do bot solicitada via painel web.")
         
-        def restart():
+        def initiate_restart():
+            # Dá um pequeno delay para a resposta HTTP ser enviada
+            import time
+            time.sleep(1) 
             import sys
             python = sys.executable
+            # os.execl substitui o processo atual. Isso faz com que o servidor Flask também reinicie.
             os.execl(python, python, *sys.argv)
         
-        Thread(target=restart).start()
+        # Inicia a função de reinício em uma nova thread para não bloquear a resposta HTTP
+        Thread(target=initiate_restart).start()
         
         return jsonify({
             'status': 'success', 
-            'message': 'Reinicialização solicitada. O bot deve reiniciar em breve.'
+            'message': 'Reinicialização solicitada. O bot e o painel web devem reiniciar em breve.'
         })
     except Exception as e:
-        web_logger.error(f"Erro em /api/restart: {e}", exc_info=True)
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        web_logger.critical(f"Erro ao iniciar processo de reinicialização: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': f"Erro ao reiniciar o bot: {str(e)}"}), 500
 
 @app.route('/api/whitelist', methods=['GET', 'POST'])
 @basic_auth_required
 def manage_whitelist():
     try:
         if not hasattr(bot, 'config') or 'whitelist' not in bot.config:
-            return jsonify({'status': 'error', 'message': 'Bot config or whitelist not initialized'}), 500
+            web_logger.warning("Config ou whitelist do bot não inicializadas ao gerenciar whitelist.")
+            return jsonify({'status': 'error', 'message': 'Configuração do bot ou whitelist não inicializada'}), 500
 
         if request.method == 'GET':
+            # Garante que as listas existem para evitar KeyError
+            whitelisted_users = [str(id) for id in bot.config['whitelist'].get('users', [])]
+            whitelisted_roles = [str(id) for id in bot.config['whitelist'].get('roles', [])]
             return jsonify({
-                'users': [str(id) for id in bot.config['whitelist']['users']],
-                'roles': [str(id) for id in bot.config['whitelist']['roles']]
+                'users': whitelisted_users,
+                'roles': whitelisted_roles
             })
         
         elif request.method == 'POST':
             data = request.json
             action = data.get('action')  # 'add' or 'remove'
             target_type = data.get('type')  # 'user' or 'role'
-            target_id = data.get('id')
+            target_id_str = data.get('id') # Receber como string
             
-            if not all([action, target_type, target_id]):
-                return jsonify({'status': 'error', 'message': 'Missing parameters'}), 400
+            if not all([action, target_type, target_id_str]):
+                return jsonify({'status': 'error', 'message': 'Parâmetros ausentes (action, type, id)'}), 400
             
             try:
-                target_id = int(target_id)
+                target_id = int(target_id_str) # Converter para int
             except ValueError:
-                return jsonify({'status': 'error', 'message': 'Invalid ID format'}), 400
+                return jsonify({'status': 'error', 'message': 'Formato de ID inválido. Deve ser um número inteiro.'}), 400
             
-            config_key = 'users' if target_type == 'user' else 'roles'
+            config_key = None
+            if target_type == 'user':
+                config_key = 'users'
+            elif target_type == 'role':
+                config_key = 'roles'
+            else:
+                return jsonify({'status': 'error', 'message': 'Tipo de alvo inválido. Deve ser "user" ou "role".'}), 400
+
+            # Garante que a chave existe no dicionário 'whitelist'
+            if config_key not in bot.config['whitelist']:
+                bot.config['whitelist'][config_key] = []
             
             if action == 'add':
                 if target_id not in bot.config['whitelist'][config_key]:
                     bot.config['whitelist'][config_key].append(target_id)
+                    web_logger.info(f"Adicionado {target_type} {target_id} à whitelist.")
+                else:
+                    return jsonify({'status': 'info', 'message': f'ID {target_id} já está na whitelist.'}), 200
             elif action == 'remove':
                 if target_id in bot.config['whitelist'][config_key]:
                     bot.config['whitelist'][config_key].remove(target_id)
+                    web_logger.info(f"Removido {target_type} {target_id} da whitelist.")
+                else:
+                    return jsonify({'status': 'info', 'message': f'ID {target_id} não encontrado na whitelist.'}), 200
             else:
-                return jsonify({'status': 'error', 'message': 'Invalid action'}), 400
+                return jsonify({'status': 'error', 'message': 'Ação inválida. Deve ser "add" ou "remove".'}), 400
             
             run_coroutine_in_bot_loop(bot.save_config())
-            return jsonify({'status': 'success'})
+            return jsonify({'status': 'success', 'message': 'Whitelist atualizada com sucesso.'})
     
     except Exception as e:
         web_logger.error(f"Erro em /api/whitelist: {e}", exc_info=True)
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        return jsonify({'status': 'error', 'message': f"Erro ao gerenciar whitelist: {str(e)}"}), 500
 
 @app.route('/api/logs')
 @basic_auth_required
 def get_logs():
     try:
-        lines = request.args.get('lines', default=100, type=int)
+        lines = request.args.get('lines', default=200, type=int) # Aumentar o padrão para 200 linhas
         
         log_lines = []
+        log_file_path = 'bot.log' # Caminho padrão do log principal do bot
+        
+        if not os.path.exists(log_file_path):
+            web_logger.warning(f"Arquivo de log '{log_file_path}' não encontrado.")
+            return jsonify({'logs': [f"Arquivo de log '{log_file_path}' não encontrado. Verifique se o bot está gerando logs."]}), 200
+        
         try:
-            with open('bot.log', 'r') as log_file:
-                log_lines = list(deque(log_file, lines))
-        except FileNotFoundError:
-            web_logger.warning("Arquivo de log 'bot.log' não encontrado.")
-            return jsonify({'logs': ['Arquivo de log "bot.log" não encontrado.']})
+            with open(log_file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                # Usar deque para eficiência em arquivos grandes
+                log_lines = list(deque(f, lines))
         except Exception as e:
-            web_logger.error(f"Erro ao ler logs de bot.log: {e}", exc_info=True)
-            return jsonify({'error': f"Erro ao ler logs: {str(e)}"}), 500
+            web_logger.error(f"Erro ao ler logs de {log_file_path}: {e}", exc_info=True)
+            return jsonify({'status': 'error', 'message': f"Erro ao ler logs: {str(e)}"}), 500
         
         return jsonify({
             'logs': log_lines
         })
     except Exception as e:
         web_logger.error(f"Erro em /api/logs: {e}", exc_info=True)
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'status': 'error', 'message': f"Erro interno do servidor ao carregar logs: {str(e)}"}), 500
 
 @app.route('/api/activity_stats')
 @basic_auth_required
 def get_activity_stats():
     try:
+        # Esta rota dependerá de dados do banco de dados para serem úteis.
+        # Por enquanto, retorna zeros, mas a estrutura está pronta.
         stats = {
             'total_users': 0,
             'active_users': 0,
@@ -487,102 +582,151 @@ def get_activity_stats():
             'warned_users': 0,
             'kicked_users': 0
         }
-        
+
+        if hasattr(bot, 'db') and bot.db and hasattr(bot, 'guilds') and bot.guilds:
+            guild_id = bot.guilds[0].id # Pega a primeira guilda para estatísticas globais ou refatore para por guilda
+            
+            async def _fetch_activity_stats():
+                try:
+                    # Exemplo: total de usuários no servidor
+                    total_members_in_guild = bot.guilds[0].member_count if bot.guilds else 0
+                    stats['total_users'] = total_members_in_guild
+
+                    # Buscar contagens do banco de dados (exemplo hipotético)
+                    # Você precisará implementar estes métodos no seu objeto DB
+                    # stats['active_users'] = await bot.db.get_active_users_count(guild_id)
+                    # stats['inactive_users'] = await bot.db.get_inactive_users_count(guild_id)
+                    # stats['warned_users'] = await bot.db.get_warned_users_count(guild_id)
+                    # stats['kicked_users'] = await bot.db.get_kicked_users_count(guild_id)
+                except Exception as e:
+                    web_logger.error(f"Erro ao buscar estatísticas de atividade do DB: {e}")
+                return stats
+            
+            fetched_stats = run_coroutine_in_bot_loop(_fetch_activity_stats())
+            stats.update(fetched_stats) # Atualiza com os dados (mesmo que sejam 0)
+
         return jsonify(stats)
     except Exception as e:
         web_logger.error(f"Erro em /api/activity_stats: {e}", exc_info=True)
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'status': 'error', 'message': f"Erro ao carregar estatísticas de atividade: {str(e)}"}), 500
 
 @app.route('/api/backup', methods=['POST'])
 @basic_auth_required
 def create_backup():
     try:
-        if not hasattr(bot, 'db_backup'):
-            return jsonify({'status': 'error', 'message': 'Backup system not initialized'}), 500
+        if not hasattr(bot, 'db_backup') or not bot.db_backup:
+            web_logger.warning("Sistema de backup não inicializado.")
+            return jsonify({'status': 'error', 'message': 'Sistema de backup não inicializado'}), 500
         
+        web_logger.info("Solicitando criação de backup do banco de dados.")
         success = run_coroutine_in_bot_loop(bot.db_backup.create_backup())
         
         if success:
-            return jsonify({'status': 'success', 'message': 'Backup created successfully'})
+            web_logger.info("Backup criado com sucesso.")
+            return jsonify({'status': 'success', 'message': 'Backup criado com sucesso'})
         else:
-            return jsonify({'status': 'error', 'message': 'Failed to create backup'}), 500
+            web_logger.error("Falha ao criar backup.")
+            return jsonify({'status': 'error', 'message': 'Falha ao criar backup'}), 500
     except Exception as e:
         web_logger.error(f"Erro em /api/backup: {e}", exc_info=True)
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        return jsonify({'status': 'error', 'message': f"Erro ao criar backup: {str(e)}"}), 500
 
 @app.route('/api/allowed_roles', methods=['GET', 'POST'])
 @basic_auth_required
 def manage_allowed_roles():
     try:
-        if not bot.guilds:
-            return jsonify({'status': 'error', 'message': 'No guilds available'}), 400
+        if not hasattr(bot, 'guilds') or not bot.guilds:
+            web_logger.warning("Bot não conectado a nenhuma guilda ao gerenciar allowed_roles.")
+            return jsonify({'status': 'error', 'message': 'Nenhuma guilda disponível. O bot precisa estar conectado a pelo menos uma guilda.'}), 400
         
-        guild = bot.guilds[0]  # Usar a primeira guilda
+        guild = bot.guilds[0]  # Considera a primeira guilda para gerenciar roles, pode precisar de um ID de guilda como parâmetro
         
         if request.method == 'GET':
-            allowed_roles = []
-            for role_id in bot.config.get('allowed_roles', []):
-                role = guild.get_role(role_id)
-                if role:
-                    allowed_roles.append({
-                        'id': role.id,
-                        'name': role.name,
-                        'color': str(role.color)
-                    })
-            return jsonify(allowed_roles)
+            allowed_roles_data = []
+            if hasattr(bot, 'config') and 'allowed_roles' in bot.config:
+                for role_id in bot.config['allowed_roles']:
+                    role = guild.get_role(role_id)
+                    if role:
+                        allowed_roles_data.append({
+                            'id': str(role.id),
+                            'name': role.name,
+                            'color': str(role.color)
+                        })
+            return jsonify(allowed_roles_data)
         
         elif request.method == 'POST':
             data = request.json
             action = data.get('action')  # 'add' or 'remove'
-            role_id = data.get('id')
+            role_id_str = data.get('id')
             
-            if not all([action, role_id]):
-                return jsonify({'status': 'error', 'message': 'Missing parameters'}), 400
+            if not all([action, role_id_str]):
+                return jsonify({'status': 'error', 'message': 'Parâmetros ausentes (action, id)'}), 400
             
             try:
-                role_id = int(role_id)
+                role_id = int(role_id_str)
             except ValueError:
-                return jsonify({'status': 'error', 'message': 'Invalid ID format'}), 400
+                return jsonify({'status': 'error', 'message': 'Formato de ID inválido. Deve ser um número inteiro.'}), 400
             
+            if not hasattr(bot, 'config'):
+                bot.config = {} # Inicializa se não existir
+
+            if 'allowed_roles' not in bot.config:
+                bot.config['allowed_roles'] = []
+
             if action == 'add':
-                if role_id not in bot.config.get('allowed_roles', []):
-                    if 'allowed_roles' not in bot.config:
-                        bot.config['allowed_roles'] = []
+                if role_id not in bot.config['allowed_roles']:
                     bot.config['allowed_roles'].append(role_id)
+                    web_logger.info(f"Adicionado role {role_id} aos allowed_roles.")
+                else:
+                    return jsonify({'status': 'info', 'message': f'Role {role_id} já está nos allowed_roles.'}), 200
             elif action == 'remove':
-                if role_id in bot.config.get('allowed_roles', []):
+                if role_id in bot.config['allowed_roles']:
                     bot.config['allowed_roles'].remove(role_id)
+                    web_logger.info(f"Removido role {role_id} dos allowed_roles.")
+                else:
+                    return jsonify({'status': 'info', 'message': f'Role {role_id} não encontrado nos allowed_roles.'}), 200
             else:
-                return jsonify({'status': 'error', 'message': 'Invalid action'}), 400
+                return jsonify({'status': 'error', 'message': 'Ação inválida. Deve ser "add" ou "remove".'}), 400
             
             run_coroutine_in_bot_loop(bot.save_config())
-            return jsonify({'status': 'success'})
+            return jsonify({'status': 'success', 'message': 'Allowed roles atualizados com sucesso.'})
     
     except Exception as e:
         web_logger.error(f"Erro em /api/allowed_roles: {e}", exc_info=True)
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        return jsonify({'status': 'error', 'message': f"Erro ao gerenciar allowed roles: {str(e)}"}), 500
 
 @app.route('/api/whitelist_users', methods=['GET'])
 @basic_auth_required
 def get_whitelist_users():
     try:
-        if not bot.guilds:
-            return jsonify({'status': 'error', 'message': 'No guilds available'}), 400
+        if not hasattr(bot, 'guilds') or not bot.guilds:
+            web_logger.warning("Bot não conectado a nenhuma guilda ao tentar obter usuários da whitelist.")
+            return jsonify({'status': 'error', 'message': 'Nenhuma guilda disponível. O bot precisa estar conectado a pelo menos uma guilda.'}), 400
         
-        guild = bot.guilds[0]
-        users = []
-        for user_id in bot.config['whitelist']['users']:
-            user = guild.get_member(user_id)
-            if user:
-                users.append({
-                    'id': user.id,
-                    'name': user.display_name,
-                    'avatar': str(user.avatar.url) if user.avatar else None
-                })
-        return jsonify(users)
+        guild = bot.guilds[0] # Pega a primeira guilda
+        users_data = []
+        # Garante que 'whitelist' e 'users' existem na configuração
+        if hasattr(bot, 'config') and 'whitelist' in bot.config and 'users' in bot.config['whitelist']:
+            for user_id in bot.config['whitelist']['users']:
+                member = guild.get_member(user_id) # Usar get_member é assíncrono para membros não cacheados, idealmente buscar do DB
+                if member:
+                    users_data.append({
+                        'id': str(member.id),
+                        'name': member.display_name,
+                        'avatar': str(member.avatar.url) if member.avatar else None
+                    })
+                else:
+                    # Se o membro não for encontrado no cache, você pode tentar fetch_user ou apenas listar o ID
+                    web_logger.warning(f"Usuário {user_id} da whitelist não encontrado no cache da guilda {guild.id}.")
+                    users_data.append({
+                        'id': str(user_id),
+                        'name': f"ID: {user_id} (Não encontrado)",
+                        'avatar': None
+                    })
+        return jsonify(users_data)
     except Exception as e:
         web_logger.error(f"Erro em /api/whitelist_users: {e}", exc_info=True)
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        return jsonify({'status': 'error', 'message': f"Erro ao carregar usuários da whitelist: {str(e)}"}), 500
 
 @app.route('/api/run_command', methods=['POST'])
 @basic_auth_required
@@ -592,47 +736,60 @@ def run_command():
         command = data.get('command')
         
         if not command:
-            return jsonify({'status': 'error', 'message': 'No command specified'}), 400
+            return jsonify({'status': 'error', 'message': 'Nenhum comando especificado'}), 400
         
-        async def _run_command():
+        async def _run_bot_command():
             try:
                 if command == 'force_check':
                     member_id = data.get('member_id')
                     if not member_id:
-                        return {'status': 'error', 'message': 'Member ID required'}
+                        return {'status': 'error', 'message': 'ID do membro é obrigatório para "force_check"'}
                     
-                    if not bot.guilds:
-                        return {'status': 'error', 'message': 'No guilds available'}
+                    if not hasattr(bot, 'guilds') or not bot.guilds:
+                        return {'status': 'error', 'message': 'Nenhuma guilda disponível para executar "force_check"'}
                     
-                    member = bot.guilds[0].get_member(int(member_id))
+                    # Tenta obter o membro, se não, tenta fetch_member
+                    guild = bot.guilds[0] # Assume a primeira guilda
+                    member = guild.get_member(int(member_id))
                     if not member:
-                        return {'status': 'error', 'message': 'Member not found'}
-                    
-                    from tasks import _execute_force_check
+                        try:
+                            member = await guild.fetch_member(int(member_id))
+                        except discord.NotFound:
+                            return {'status': 'error', 'message': f'Membro com ID {member_id} não encontrado neste servidor.'}
+                        except discord.Forbidden:
+                            return {'status': 'error', 'message': 'Bot não tem permissão para buscar este membro.'}
+
+                    from tasks import _execute_force_check # Importar localmente para evitar circular
                     result = await _execute_force_check(member)
                     return {'status': 'success', 'result': result}
                 
                 elif command == 'cleanup_data':
                     days = data.get('days', 60)
+                    if not hasattr(bot, 'db') or not bot.db:
+                        return {'status': 'error', 'message': 'Sistema de banco de dados não inicializado para "cleanup_data"'}
                     result = await bot.db.cleanup_old_data(days)
                     return {'status': 'success', 'result': result}
                 
                 elif command == 'sync_commands':
+                    if not hasattr(bot, 'tree'):
+                        return {'status': 'error', 'message': 'Árvore de comandos do bot não inicializada'}
                     await bot.tree.sync()
-                    return {'status': 'success', 'message': 'Commands synced'}
+                    return {'status': 'success', 'message': 'Comandos sincronizados com sucesso!'}
                 
                 else:
-                    return {'status': 'error', 'message': 'Invalid command'}
+                    return {'status': 'error', 'message': 'Comando inválido'}
             
             except Exception as e:
-                return {'status': 'error', 'message': str(e)}
+                web_logger.error(f"Erro ao executar comando '{command}' no loop do bot: {e}", exc_info=True)
+                return {'status': 'error', 'message': f"Erro ao executar comando: {str(e)}"}
         
-        result = run_coroutine_in_bot_loop(_run_command())
+        # Executa a corrotina e retorna o resultado
+        result = run_coroutine_in_bot_loop(_run_bot_command())
         return jsonify(result)
     
     except Exception as e:
         web_logger.error(f"Erro em /api/run_command: {e}", exc_info=True)
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        return jsonify({'status': 'error', 'message': f"Erro interno do servidor ao tentar executar comando: {str(e)}"}), 500
 
 @app.route('/api/warnings_history', methods=['GET'])
 @basic_auth_required
@@ -641,19 +798,20 @@ def get_warnings_history():
         days = request.args.get('days', default=30, type=int)
         limit = request.args.get('limit', default=100, type=int)
         
-        if not bot.guilds:
-            return jsonify({'status': 'error', 'message': 'No guilds available'}), 400
+        if not hasattr(bot, 'guilds') or not bot.guilds:
+            return jsonify({'status': 'error', 'message': 'Nenhuma guilda disponível'}), 400
         
-        guild_id = bot.guilds[0].id  # Usar a primeira guilda
+        guild_id = bot.guilds[0].id  # Assume a primeira guilda
         
-        async def _get_warnings():
+        async def _get_warnings_from_db():
             if not hasattr(bot, 'db') or not bot.db:
+                web_logger.warning("Objeto de banco de dados não disponível para warnings_history.")
                 return []
                 
             try:
                 async with bot.db.pool.acquire() as conn:
                     async with conn.cursor(aiomysql.DictCursor) as cursor:
-                        await cursor.execute('''
+                        query = '''
                             SELECT 
                                 user_id, 
                                 warning_type, 
@@ -663,24 +821,30 @@ def get_warnings_history():
                             AND warning_date >= DATE_SUB(NOW(), INTERVAL %s DAY)
                             ORDER BY warning_date DESC
                             LIMIT %s
-                        ''', (guild_id, days, limit))
+                        '''
+                        web_logger.debug(f"Executando query de warnings: {query} com params: {guild_id}, {days}, {limit}")
+                        await cursor.execute(query, (guild_id, days, limit))
                         
                         return await cursor.fetchall()
             except Exception as e:
-                web_logger.error(f"Database error in _get_warnings: {e}")
+                web_logger.error(f"Erro de banco de dados em _get_warnings_from_db: {e}", exc_info=True)
                 return []
         
-        warnings = run_coroutine_in_bot_loop(_get_warnings())
+        warnings = run_coroutine_in_bot_loop(_get_warnings_from_db())
         
-        # Adicionar nomes de usuários se possível
         warnings_with_names = []
         guild = bot.guilds[0] if bot.guilds else None
         
         for warning in warnings:
+            # Tenta obter o membro do cache, se não encontra, usa o ID
             member = guild.get_member(warning['user_id']) if guild else None
+            user_name = member.display_name if member else f"ID: {warning['user_id']}"
+            if not member:
+                web_logger.debug(f"Membro {warning['user_id']} não encontrado no cache da guilda {guild_id} para warnings_history.")
+
             warnings_with_names.append({
-                'user_id': warning['user_id'],
-                'user_name': member.display_name if member else str(warning['user_id']),
+                'user_id': str(warning['user_id']),
+                'user_name': user_name,
                 'warning_type': warning['warning_type'],
                 'warning_date': warning['warning_date'].strftime('%Y-%m-%d %H:%M:%S') if warning['warning_date'] else None
             })
@@ -689,7 +853,7 @@ def get_warnings_history():
     
     except Exception as e:
         web_logger.error(f"Erro em /api/warnings_history: {e}", exc_info=True)
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        return jsonify({'status': 'error', 'message': f"Erro ao carregar histórico de avisos: {str(e)}"}), 500
 
 @app.route('/api/kicks_history', methods=['GET'])
 @basic_auth_required
@@ -698,36 +862,49 @@ def get_kicks_history():
         days = request.args.get('days', default=30, type=int)
         limit = request.args.get('limit', default=100, type=int)
         
-        if not bot.guilds:
-            return jsonify({'status': 'error', 'message': 'No guilds available'}), 400
+        if not hasattr(bot, 'guilds') or not bot.guilds:
+            return jsonify({'status': 'error', 'message': 'Nenhuma guilda disponível'}), 400
         
         guild_id = bot.guilds[0].id
         
-        async def _get_kicks():
-            async with bot.db.pool.acquire() as conn:
-                async with conn.cursor(aiomysql.DictCursor) as cursor:
-                    await cursor.execute('''
-                        SELECT k.user_id, k.kick_date, k.reason
-                        FROM kicked_members k
-                        WHERE k.guild_id = %s
-                        AND k.kick_date >= DATE_SUB(NOW(), INTERVAL %s DAY)
-                        ORDER BY k.kick_date DESC
-                        LIMIT %s
-                    ''', (guild_id, days, limit))
-                    
-                    return await cursor.fetchall()
+        async def _get_kicks_from_db():
+            if not hasattr(bot, 'db') or not bot.db:
+                web_logger.warning("Objeto de banco de dados não disponível para kicks_history.")
+                return []
+            try:
+                async with bot.db.pool.acquire() as conn:
+                    async with conn.cursor(aiomysql.DictCursor) as cursor:
+                        query = '''
+                            SELECT k.user_id, k.kick_date, k.reason
+                            FROM kicked_members k
+                            WHERE k.guild_id = %s
+                            AND k.kick_date >= DATE_SUB(NOW(), INTERVAL %s DAY)
+                            ORDER BY k.kick_date DESC
+                            LIMIT %s
+                        '''
+                        web_logger.debug(f"Executando query de kicks: {query} com params: {guild_id}, {days}, {limit}")
+                        await cursor.execute(query, (guild_id, days, limit))
+                        
+                        return await cursor.fetchall()
+            except Exception as e:
+                web_logger.error(f"Erro de banco de dados em _get_kicks_from_db: {e}", exc_info=True)
+                return []
         
-        kicks = run_coroutine_in_bot_loop(_get_kicks())
+        kicks = run_coroutine_in_bot_loop(_get_kicks_from_db())
         
-        # Adicionar nomes de usuários se possível
         kicks_with_names = []
         guild = bot.guilds[0] if bot.guilds else None
         
         for kick in kicks:
+            # Tenta obter o membro do cache, se não, usa o ID
             member = guild.get_member(kick['user_id']) if guild else None
+            user_name = member.display_name if member else f"ID: {kick['user_id']}"
+            if not member:
+                web_logger.debug(f"Membro {kick['user_id']} não encontrado no cache da guilda {guild_id} para kicks_history.")
+
             kicks_with_names.append({
-                'user_id': kick['user_id'],
-                'user_name': member.display_name if member else str(kick['user_id']),
+                'user_id': str(kick['user_id']),
+                'user_name': user_name,
                 'kick_date': kick['kick_date'].strftime('%Y-%m-%d %H:%M:%S') if kick['kick_date'] else None,
                 'reason': kick['reason']
             })
@@ -736,21 +913,25 @@ def get_kicks_history():
     
     except Exception as e:
         web_logger.error(f"Erro em /api/kicks_history: {e}", exc_info=True)
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        return jsonify({'status': 'error', 'message': f"Erro ao carregar histórico de kicks: {str(e)}"}), 500
 
 def run_flask():
+    """Função para iniciar o servidor Flask."""
     try:
-        app.run(host='0.0.0.0', port=8080, threaded=True)
+        web_logger.info("Iniciando servidor Flask na porta 8080...")
+        app.run(host='0.0.0.0', port=8080, threaded=True, debug=False) # Desativar debug em produção
     except Exception as e:
-        web_logger.critical(f"Erro ao iniciar servidor Flask: {e}", exc_info=True)
+        web_logger.critical(f"Erro CRÍTICO ao iniciar servidor Flask: {e}", exc_info=True)
+        # Se o Flask falhar ao iniciar, é uma falha grave, então relogue e levante
         raise
 
 def keep_alive():
+    """Inicia o servidor Flask em uma thread separada."""
     try:
         t = Thread(target=run_flask)
-        t.daemon = True
+        t.daemon = True # Define a thread como daemon para que ela encerre com o processo principal
         t.start()
-        web_logger.info("Web panel iniciado na porta 8080")
+        web_logger.info("Thread do painel web iniciada.")
     except Exception as e:
-        web_logger.critical(f"Erro ao iniciar thread do web panel: {e}", exc_info=True)
+        web_logger.critical(f"Erro CRÍTICO ao iniciar thread do web panel: {e}", exc_info=True)
         raise
