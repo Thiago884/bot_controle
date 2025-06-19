@@ -775,7 +775,7 @@
                                 </td>
                                 <td>${guild.name || 'Nome desconhecido'}</td>
                                 <td>${guild.member_count || 0}</td>
-                                <td>${guild.voice_channels || 0}</td>
+                                <td>${guild.voice_channels?.length || 0}</td>
                                 <td>
                                     <button class="btn btn-sm btn-outline-primary" onclick="loadGuildDetails('${guild.id}')">
                                         <i class="bi bi-eye"></i> Detalhes
@@ -854,23 +854,23 @@
                     <div class="guild-stats-grid">
                         <div class="guild-stat-card">
                             <div class="guild-stat-label">Membros</div>
-                            <div class="guild-stat-value">${guild.member_count}</div>
+                            <div class="guild-stat-value" id="guild-member-count">${guild.member_count || 0}</div>
                         </div>
                         <div class="guild-stat-card">
                             <div class="guild-stat-label">Canais de Voz</div>
-                            <div class="guild-stat-value">${guild.voice_channels}</div>
+                            <div class="guild-stat-value" id="guild-voice-channels">${guild.voice_channels?.length || 0}</div>
                         </div>
                         <div class="guild-stat-card">
                             <div class="guild-stat-label">Ativos</div>
-                            <div class="guild-stat-value text-success">${guild.activity_stats.active_users || 0}</div>
+                            <div class="guild-stat-value text-success">${guild.activity_stats?.active_users || 0}</div>
                         </div>
                         <div class="guild-stat-card">
                             <div class="guild-stat-label">Inativos</div>
-                            <div class="guild-stat-value text-warning">${guild.activity_stats.inactive_users || 0}</div>
+                            <div class="guild-stat-value text-warning">${guild.activity_stats?.inactive_users || 0}</div>
                         </div>
                         <div class="guild-stat-card">
                             <div class="guild-stat-label">Avisados</div>
-                            <div class="guild-stat-value text-danger">${guild.activity_stats.warned_users || 0}</div>
+                            <div class="guild-stat-value text-danger">${guild.activity_stats?.warned_users || 0}</div>
                         </div>
                     </div>`;
                 
@@ -883,15 +883,15 @@
                                 <ul class="list-group">
                                     <li class="list-group-item d-flex justify-content-between align-items-center">
                                         Minutos necessários em voz
-                                        <span class="badge bg-primary rounded-pill config-value">${guild.config.required_minutes}</span>
+                                        <span class="badge bg-primary rounded-pill config-value">${guild.config?.required_minutes || 'N/A'}</span>
                                     </li>
                                     <li class="list-group-item d-flex justify-content-between align-items-center">
                                         Dias diferentes necessários
-                                        <span class="badge bg-primary rounded-pill config-value">${guild.config.required_days}</span>
+                                        <span class="badge bg-primary rounded-pill config-value">${guild.config?.required_days || 'N/A'}</span>
                                     </li>
                                     <li class="list-group-item d-flex justify-content-between align-items-center">
                                         Período de monitoramento
-                                        <span class="badge bg-primary rounded-pill config-value">${guild.config.monitoring_period} dias</span>
+                                        <span class="badge bg-primary rounded-pill config-value">${guild.config?.monitoring_period || 'N/A'} dias</span>
                                     </li>
                                 </ul>
                             </div>
@@ -899,15 +899,15 @@
                                 <ul class="list-group">
                                     <li class="list-group-item d-flex justify-content-between align-items-center">
                                         Expulsão após dias sem cargo
-                                        <span class="badge bg-primary rounded-pill config-value">${guild.config.kick_after_days}</span>
+                                        <span class="badge bg-primary rounded-pill config-value">${guild.config?.kick_after_days || 'N/A'}</span>
                                     </li>
                                     <li class="list-group-item d-flex justify-content-between align-items-center">
                                         Fuso horário
-                                        <span class="badge bg-primary rounded-pill config-value">${guild.config.timezone || 'N/A'}</span>
+                                        <span class="badge bg-primary rounded-pill config-value">${guild.config?.timezone || 'N/A'}</span>
                                     </li>
                                     <li class="list-group-item d-flex justify-content-between align-items-center">
                                         Última verificação
-                                        <span class="badge bg-primary rounded-pill config-value">${new Date(guild.last_check).toLocaleString() || 'N/A'}</span>
+                                        <span class="badge bg-primary rounded-pill config-value">${guild.last_check ? new Date(guild.last_check).toLocaleString() : 'N/A'}</span>
                                     </li>
                                 </ul>
                             </div>

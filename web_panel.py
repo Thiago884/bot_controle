@@ -48,7 +48,6 @@ def basic_auth_required(f):
         return f(*args, **kwargs)
     return decorated
 
-# Função para executar corrotinas no loop do bot
 def run_coroutine_in_bot_loop(coro):
     """Executa uma corrotina no loop de eventos do bot e espera pelo resultado."""
     if not bot.loop.is_running():
@@ -57,14 +56,13 @@ def run_coroutine_in_bot_loop(coro):
     
     future = asyncio.run_coroutine_threadsafe(coro, bot.loop)
     try:
-        return future.result(timeout=10) # Adiciona um timeout para evitar bloqueio eterno
+        return future.result(timeout=10)
     except asyncio.TimeoutError:
         web_logger.error("Timeout ao executar corrotina no loop do bot.")
         raise TimeoutError("Coroutine execution timed out.")
     except Exception as e:
         web_logger.error(f"Erro ao obter resultado da corrotina: {e}", exc_info=True)
-        raise # Re-raise a exceção para ser tratada pela rota Flask
-
+        raise
 
 @app.route('/')
 @basic_auth_required
@@ -82,17 +80,13 @@ def dashboard():
         uptime = "N/A"
         if hasattr(bot, 'start_time'):
             delta = datetime.datetime.now() - bot.start_time
-            uptime = str(delta).split('.')[0] # Remove microssegundos
-            web_logger.info(f"Tempo de atividade do bot: {uptime}")
-        else:
-            web_logger.warning("bot.start_time não definido.")
-
+            uptime = str(delta).split('.')[0]
+        
         guild_stats = []
         guild_count = 0
         if hasattr(bot, 'guilds') and bot.guilds:
             guild_count = len(bot.guilds)
             for guild in bot.guilds:
-                web_logger.debug(f"Processando guilda para dashboard: {guild.name} (ID: {guild.id})")
                 voice_channels = len([c for c in guild.channels if isinstance(c, discord.VoiceChannel)])
                 guild_stats.append({
                     'id': guild.id,
@@ -101,22 +95,23 @@ def dashboard():
                     'voice_channels': voice_channels,
                     'icon': guild.icon.url if guild.icon else None
                 })
-        else:
-            web_logger.warning("Bot.guilds não está disponível ou está vazio ao carregar o dashboard.")
         
         db_status = "Desconhecido"
-        pool_status = {}
+        pool_status = {
+            'freesize': 0,
+            'maxsize': 0,
+            'size': 0,
+            'used': 0
+        }
         if hasattr(bot, 'db') and bot.db:
             try:
-                # check_pool_status é uma corrotina, precisa ser executada no loop do bot
                 pool_status_data = run_coroutine_in_bot_loop(bot.db.check_pool_status())
-                pool_status = pool_status_data if pool_status_data else {}
-                db_status = "Operacional" if pool_status and pool_status.get('available_connections') is not None else "Erro"
+                if pool_status_data:
+                    pool_status = pool_status_data
+                    db_status = "Operacional" if pool_status.get('size', 0) > 0 else "Erro"
             except Exception as e:
-                db_status = f"Erro ao verificar DB: {str(e)}"
+                db_status = f"Erro: {str(e)}"
                 web_logger.error(f"Erro ao verificar status do banco no dashboard: {e}", exc_info=True)
-        else:
-            web_logger.warning("Objeto do banco de dados (bot.db) não está disponível.")
         
         queue_status = {
             'voice_events': 0,
@@ -128,7 +123,7 @@ def dashboard():
             if isinstance(bot.message_queue, dict):
                 queue_status['messages'] = {k: v.qsize() for k, v in bot.message_queue.items()}
             else:
-                queue_status['messages'] = bot.message_queue.qsize() # Fallback for non-dict queue
+                queue_status['messages'] = bot.message_queue.qsize()
         
         current_config = {
             'required_minutes': bot.config.get('required_minutes', 15) if hasattr(bot, 'config') else 15,
@@ -149,7 +144,6 @@ def dashboard():
     
     except Exception as e:
         web_logger.error(f"Erro fatal na rota dashboard: {e}", exc_info=True)
-        # Renderiza uma página de erro genérica em caso de falha completa
         return render_template('error.html', error_message=f"Erro ao carregar o dashboard: {e}"), 500
 
 @app.route('/monitor')
@@ -158,20 +152,14 @@ def monitor():
     try:
         web_logger.info("Acessando a rota monitor")
         
-        # Estas chamadas API internas já possuem tratamento de erro e retornam JSON
-        # Acessar .json diretamente aqui é um pouco arriscado se as funções retornarem erro e não um Response object
-        # O ideal seria chamar essas funções como se fossem um cliente, ou refatorar para ter uma única fonte de dados
-        # Por simplicidade, mantemos a estrutura, mas é bom estar ciente.
-        
-        system_status_data = get_system_status().json # Assumes get_system_status always returns a Flask Response
+        system_status_data = get_system_status().json
         rate_limits_data = get_rate_limits().json
         recent_events_data = get_recent_events().json
         
         log_lines = []
         try:
             with open('bot.log', 'r', encoding='utf-8', errors='ignore') as log_file:
-                # Usar deque para pegar as últimas N linhas eficientemente
-                log_lines = list(deque(log_file, 100))  # Últimas 100 linhas
+                log_lines = list(deque(log_file, 100))
         except FileNotFoundError:
             web_logger.warning("Arquivo de log 'bot.log' não encontrado para o monitor.")
             log_lines = ["Arquivo de log 'bot.log' não encontrado."]
@@ -196,19 +184,24 @@ def monitor():
 @basic_auth_required
 def get_system_status():
     try:
-        bot_status = "Offline"
-        if hasattr(bot, 'is_ready') and bot.is_ready():
-            bot_status = "Online"
+        bot_status = "Operacional" if hasattr(bot, 'is_ready') and bot.is_ready() else "Erro"
         
-        db_status = "Desconhecido"
-        pool_status = {}
+        db_status = "Operacional"
+        pool_status = {
+            'freesize': 0,
+            'maxsize': 0,
+            'size': 0,
+            'used': 0
+        }
+        
         if hasattr(bot, 'db') and bot.db:
             try:
                 pool_status_data = run_coroutine_in_bot_loop(bot.db.check_pool_status())
-                pool_status = pool_status_data if pool_status_data else {}
-                db_status = "Operacional" if pool_status and pool_status.get('available_connections') is not None else "Erro"
+                if pool_status_data:
+                    pool_status = pool_status_data
+                    db_status = "Operacional" if pool_status.get('size', 0) > 0 else "Erro"
             except Exception as e:
-                db_status = f"Erro DB: {str(e)}"
+                db_status = f"Erro: {str(e)}"
                 web_logger.error(f"Erro ao verificar status do banco em /api/status: {e}", exc_info=True)
         
         uptime = "N/A"
@@ -220,23 +213,15 @@ def get_system_status():
         
         queue_status = {
             'voice_events': 0,
-            'messages_critical': 0,
-            'messages_high': 0,
-            'messages_normal': 0,
-            'messages_low': 0
+            'messages': {'critical': 0, 'high': 0, 'normal': 0, 'low': 0}
         }
         if hasattr(bot, 'voice_event_queue') and bot.voice_event_queue:
             queue_status['voice_events'] = bot.voice_event_queue.qsize()
         if hasattr(bot, 'message_queue') and bot.message_queue:
             if isinstance(bot.message_queue, dict):
-                queue_status.update({
-                    'messages_critical': bot.message_queue['critical'].qsize(),
-                    'messages_high': bot.message_queue['high'].qsize(),
-                    'messages_normal': bot.message_queue['normal'].qsize(),
-                    'messages_low': bot.message_queue['low'].qsize()
-                })
+                queue_status['messages'] = {k: v.qsize() for k, v in bot.message_queue.items()}
             else:
-                queue_status['messages_normal'] = bot.message_queue.qsize()
+                queue_status['messages'] = bot.message_queue.qsize()
         
         return jsonify({
             'bot_status': bot_status,
@@ -248,7 +233,7 @@ def get_system_status():
         })
     except Exception as e:
         web_logger.error(f"Erro em /api/status: {e}", exc_info=True)
-        return jsonify({'status': 'error', 'message': str(e)}), 500 # Consistent error response
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/api/guilds')
 @basic_auth_required
@@ -259,7 +244,7 @@ def get_guilds():
             for guild in bot.guilds:
                 voice_channels = len([c for c in guild.channels if isinstance(c, discord.VoiceChannel)])
                 guilds_data.append({
-                    'id': str(guild.id), # Retorna como string para evitar problemas de JS com int64
+                    'id': str(guild.id),
                     'name': guild.name,
                     'member_count': guild.member_count,
                     'icon': guild.icon.url if guild.icon else None,
@@ -283,7 +268,6 @@ def get_guild_info(guild_id):
         if not guild:
             web_logger.warning(f"Guild {guild_id} não encontrada no cache do bot. Tentando buscar diretamente...")
             try:
-                # Tenta buscar a guilda diretamente via API Discord
                 guild = run_coroutine_in_bot_loop(bot.fetch_guild(guild_id))
                 web_logger.info(f"Guild {guild_id} encontrada via fetch_guild.")
             except discord.NotFound:
@@ -311,18 +295,13 @@ def get_guild_info(guild_id):
                 web_logger.error(f"Erro inesperado ao tentar buscar a guilda {guild_id}: {fetch_e}", exc_info=True)
                 return jsonify({'status': 'error', 'message': f"Erro ao buscar informações do servidor: {str(fetch_e)}"}), 500
 
-        # Força o carregamento de todos os membros (chunking) para garantir dados recentes
         try:
-            # chunk() é uma corrotina
             run_coroutine_in_bot_loop(guild.chunk())
             web_logger.debug(f"Membros da guilda {guild.id} chunked com sucesso.")
         except Exception as e:
             web_logger.warning(f"Erro ao fazer chunking de membros da guilda {guild.id}: {e}", exc_info=True)
-            # Continua mesmo com erro, mas os dados de membros podem estar incompletos
 
         tracked_roles_data = []
-        # Obter membros com cargos monitorados (para futuros cálculos de inatividade)
-        # Este é um placeholder, a lógica real de "usuários ativos/inativos" viria do banco de dados
         if hasattr(bot, 'config') and 'tracked_roles' in bot.config:
             for role_id in bot.config['tracked_roles']:
                 role = guild.get_role(role_id)
@@ -331,19 +310,17 @@ def get_guild_info(guild_id):
                         'id': str(role.id),
                         'name': role.name,
                         'color': str(role.color),
-                        'member_count': len(role.members) # Member count for this role
+                        'member_count': len(role.members)
                     })
         
-        # Esses dados de atividade precisam ser buscados do DB, aqui são placeholders
         activity_stats = {
             'total_users': guild.member_count,
-            'active_users': 0, 
+            'active_users': 0,
             'inactive_users': 0,
             'warned_users': 0,
             'kicked_users': 0
         }
 
-        # Obter canais de voz
         voice_channels_data = []
         for channel in guild.channels:
             if isinstance(channel, discord.VoiceChannel):
@@ -364,6 +341,7 @@ def get_guild_info(guild_id):
         return jsonify({
             'id': str(guild.id),
             'name': guild.name,
+            'member_count': guild.member_count,
             'icon': guild.icon.url if guild.icon else None,
             'tracked_roles': tracked_roles_data,
             'activity_stats': activity_stats,
@@ -394,10 +372,9 @@ def get_recent_events():
     try:
         recent_events = []
         if hasattr(bot, 'rate_limit_monitor') and hasattr(bot.rate_limit_monitor, 'history') and bot.rate_limit_monitor.history:
-            # Converte deque para lista e pega os últimos 20, garantindo que é um tipo mutável
-            for event in list(bot.rate_limit_monitor.history)[-20:]: 
+            for event in list(bot.rate_limit_monitor.history)[-20:]:
                 recent_events.append({
-                    'time': datetime.datetime.fromtimestamp(event['time']).strftime('%Y-%m-%d %H:%M:%S'), # Adiciona data
+                    'time': datetime.datetime.fromtimestamp(event['time']).strftime('%Y-%m-%d %H:%M:%S'),
                     'bucket': event.get('bucket', 'N/A'),
                     'remaining': event.get('remaining', 'N/A'),
                     'endpoint': event.get('endpoint', 'N/A'),
@@ -420,7 +397,6 @@ def update_config():
             web_logger.warning("Objeto de configuração do bot não inicializado ao tentar atualizar.")
             return jsonify({'status': 'error', 'message': 'Configuração do bot não inicializada'}), 500
 
-        # Atualiza a configuração apenas se a chave existir e o valor for válido
         updated = False
         if 'required_minutes' in data and isinstance(data['required_minutes'], (int, str)):
             bot.config['required_minutes'] = int(data['required_minutes'])
@@ -443,7 +419,7 @@ def update_config():
             web_logger.info("Configurações atualizadas e salvas.")
             return jsonify({'status': 'success', 'message': 'Configurações atualizadas com sucesso.'})
         else:
-            return jsonify({'status': 'info', 'message': 'Nenhuma configuração válida para atualizar.'}), 200 # 200 OK for no changes
+            return jsonify({'status': 'info', 'message': 'Nenhuma configuração válida para atualizar.'}), 200
     except ValueError:
         return jsonify({'status': 'error', 'message': 'Um ou mais valores de configuração são inválidos (esperado número).'}), 400
     except Exception as e:
@@ -457,15 +433,12 @@ def restart_bot():
         web_logger.info("Reinicialização do bot solicitada via painel web.")
         
         def initiate_restart():
-            # Dá um pequeno delay para a resposta HTTP ser enviada
             import time
-            time.sleep(1) 
+            time.sleep(1)
             import sys
             python = sys.executable
-            # os.execl substitui o processo atual. Isso faz com que o servidor Flask também reinicie.
             os.execl(python, python, *sys.argv)
         
-        # Inicia a função de reinício em uma nova thread para não bloquear a resposta HTTP
         Thread(target=initiate_restart).start()
         
         return jsonify({
@@ -485,7 +458,6 @@ def manage_whitelist():
             return jsonify({'status': 'error', 'message': 'Configuração do bot ou whitelist não inicializada'}), 500
 
         if request.method == 'GET':
-            # Garante que as listas existem para evitar KeyError
             whitelisted_users = [str(id) for id in bot.config['whitelist'].get('users', [])]
             whitelisted_roles = [str(id) for id in bot.config['whitelist'].get('roles', [])]
             return jsonify({
@@ -495,15 +467,15 @@ def manage_whitelist():
         
         elif request.method == 'POST':
             data = request.json
-            action = data.get('action')  # 'add' or 'remove'
-            target_type = data.get('type')  # 'user' or 'role'
-            target_id_str = data.get('id') # Receber como string
+            action = data.get('action')
+            target_type = data.get('type')
+            target_id_str = data.get('id')
             
             if not all([action, target_type, target_id_str]):
                 return jsonify({'status': 'error', 'message': 'Parâmetros ausentes (action, type, id)'}), 400
             
             try:
-                target_id = int(target_id_str) # Converter para int
+                target_id = int(target_id_str)
             except ValueError:
                 return jsonify({'status': 'error', 'message': 'Formato de ID inválido. Deve ser um número inteiro.'}), 400
             
@@ -515,7 +487,6 @@ def manage_whitelist():
             else:
                 return jsonify({'status': 'error', 'message': 'Tipo de alvo inválido. Deve ser "user" ou "role".'}), 400
 
-            # Garante que a chave existe no dicionário 'whitelist'
             if config_key not in bot.config['whitelist']:
                 bot.config['whitelist'][config_key] = []
             
@@ -545,10 +516,10 @@ def manage_whitelist():
 @basic_auth_required
 def get_logs():
     try:
-        lines = request.args.get('lines', default=200, type=int) # Aumentar o padrão para 200 linhas
+        lines = request.args.get('lines', default=200, type=int)
         
         log_lines = []
-        log_file_path = 'bot.log' # Caminho padrão do log principal do bot
+        log_file_path = 'bot.log'
         
         if not os.path.exists(log_file_path):
             web_logger.warning(f"Arquivo de log '{log_file_path}' não encontrado.")
@@ -556,7 +527,6 @@ def get_logs():
         
         try:
             with open(log_file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                # Usar deque para eficiência em arquivos grandes
                 log_lines = list(deque(f, lines))
         except Exception as e:
             web_logger.error(f"Erro ao ler logs de {log_file_path}: {e}", exc_info=True)
@@ -573,8 +543,6 @@ def get_logs():
 @basic_auth_required
 def get_activity_stats():
     try:
-        # Esta rota dependerá de dados do banco de dados para serem úteis.
-        # Por enquanto, retorna zeros, mas a estrutura está pronta.
         stats = {
             'total_users': 0,
             'active_users': 0,
@@ -584,26 +552,17 @@ def get_activity_stats():
         }
 
         if hasattr(bot, 'db') and bot.db and hasattr(bot, 'guilds') and bot.guilds:
-            guild_id = bot.guilds[0].id # Pega a primeira guilda para estatísticas globais ou refatore para por guilda
+            guild_id = bot.guilds[0].id
             
             async def _fetch_activity_stats():
                 try:
-                    # Exemplo: total de usuários no servidor
-                    total_members_in_guild = bot.guilds[0].member_count if bot.guilds else 0
-                    stats['total_users'] = total_members_in_guild
-
-                    # Buscar contagens do banco de dados (exemplo hipotético)
-                    # Você precisará implementar estes métodos no seu objeto DB
-                    # stats['active_users'] = await bot.db.get_active_users_count(guild_id)
-                    # stats['inactive_users'] = await bot.db.get_inactive_users_count(guild_id)
-                    # stats['warned_users'] = await bot.db.get_warned_users_count(guild_id)
-                    # stats['kicked_users'] = await bot.db.get_kicked_users_count(guild_id)
+                    stats['total_users'] = bot.guilds[0].member_count if bot.guilds else 0
                 except Exception as e:
                     web_logger.error(f"Erro ao buscar estatísticas de atividade do DB: {e}")
                 return stats
             
             fetched_stats = run_coroutine_in_bot_loop(_fetch_activity_stats())
-            stats.update(fetched_stats) # Atualiza com os dados (mesmo que sejam 0)
+            stats.update(fetched_stats)
 
         return jsonify(stats)
     except Exception as e:
@@ -639,7 +598,7 @@ def manage_allowed_roles():
             web_logger.warning("Bot não conectado a nenhuma guilda ao gerenciar allowed_roles.")
             return jsonify({'status': 'error', 'message': 'Nenhuma guilda disponível. O bot precisa estar conectado a pelo menos uma guilda.'}), 400
         
-        guild = bot.guilds[0]  # Considera a primeira guilda para gerenciar roles, pode precisar de um ID de guilda como parâmetro
+        guild = bot.guilds[0]
         
         if request.method == 'GET':
             allowed_roles_data = []
@@ -656,7 +615,7 @@ def manage_allowed_roles():
         
         elif request.method == 'POST':
             data = request.json
-            action = data.get('action')  # 'add' or 'remove'
+            action = data.get('action')
             role_id_str = data.get('id')
             
             if not all([action, role_id_str]):
@@ -668,7 +627,7 @@ def manage_allowed_roles():
                 return jsonify({'status': 'error', 'message': 'Formato de ID inválido. Deve ser um número inteiro.'}), 400
             
             if not hasattr(bot, 'config'):
-                bot.config = {} # Inicializa se não existir
+                bot.config = {}
 
             if 'allowed_roles' not in bot.config:
                 bot.config['allowed_roles'] = []
@@ -703,12 +662,11 @@ def get_whitelist_users():
             web_logger.warning("Bot não conectado a nenhuma guilda ao tentar obter usuários da whitelist.")
             return jsonify({'status': 'error', 'message': 'Nenhuma guilda disponível. O bot precisa estar conectado a pelo menos uma guilda.'}), 400
         
-        guild = bot.guilds[0] # Pega a primeira guilda
+        guild = bot.guilds[0]
         users_data = []
-        # Garante que 'whitelist' e 'users' existem na configuração
         if hasattr(bot, 'config') and 'whitelist' in bot.config and 'users' in bot.config['whitelist']:
             for user_id in bot.config['whitelist']['users']:
-                member = guild.get_member(user_id) # Usar get_member é assíncrono para membros não cacheados, idealmente buscar do DB
+                member = guild.get_member(user_id)
                 if member:
                     users_data.append({
                         'id': str(member.id),
@@ -716,7 +674,6 @@ def get_whitelist_users():
                         'avatar': str(member.avatar.url) if member.avatar else None
                     })
                 else:
-                    # Se o membro não for encontrado no cache, você pode tentar fetch_user ou apenas listar o ID
                     web_logger.warning(f"Usuário {user_id} da whitelist não encontrado no cache da guilda {guild.id}.")
                     users_data.append({
                         'id': str(user_id),
@@ -748,8 +705,7 @@ def run_command():
                     if not hasattr(bot, 'guilds') or not bot.guilds:
                         return {'status': 'error', 'message': 'Nenhuma guilda disponível para executar "force_check"'}
                     
-                    # Tenta obter o membro, se não, tenta fetch_member
-                    guild = bot.guilds[0] # Assume a primeira guilda
+                    guild = bot.guilds[0]
                     member = guild.get_member(int(member_id))
                     if not member:
                         try:
@@ -759,7 +715,7 @@ def run_command():
                         except discord.Forbidden:
                             return {'status': 'error', 'message': 'Bot não tem permissão para buscar este membro.'}
 
-                    from tasks import _execute_force_check # Importar localmente para evitar circular
+                    from tasks import _execute_force_check
                     result = await _execute_force_check(member)
                     return {'status': 'success', 'result': result}
                 
@@ -783,7 +739,6 @@ def run_command():
                 web_logger.error(f"Erro ao executar comando '{command}' no loop do bot: {e}", exc_info=True)
                 return {'status': 'error', 'message': f"Erro ao executar comando: {str(e)}"}
         
-        # Executa a corrotina e retorna o resultado
         result = run_coroutine_in_bot_loop(_run_bot_command())
         return jsonify(result)
     
@@ -801,7 +756,7 @@ def get_warnings_history():
         if not hasattr(bot, 'guilds') or not bot.guilds:
             return jsonify({'status': 'error', 'message': 'Nenhuma guilda disponível'}), 400
         
-        guild_id = bot.guilds[0].id  # Assume a primeira guilda
+        guild_id = bot.guilds[0].id
         
         async def _get_warnings_from_db():
             if not hasattr(bot, 'db') or not bot.db:
@@ -836,7 +791,6 @@ def get_warnings_history():
         guild = bot.guilds[0] if bot.guilds else None
         
         for warning in warnings:
-            # Tenta obter o membro do cache, se não encontra, usa o ID
             member = guild.get_member(warning['user_id']) if guild else None
             user_name = member.display_name if member else f"ID: {warning['user_id']}"
             if not member:
@@ -896,7 +850,6 @@ def get_kicks_history():
         guild = bot.guilds[0] if bot.guilds else None
         
         for kick in kicks:
-            # Tenta obter o membro do cache, se não, usa o ID
             member = guild.get_member(kick['user_id']) if guild else None
             user_name = member.display_name if member else f"ID: {kick['user_id']}"
             if not member:
@@ -919,17 +872,16 @@ def run_flask():
     """Função para iniciar o servidor Flask."""
     try:
         web_logger.info("Iniciando servidor Flask na porta 8080...")
-        app.run(host='0.0.0.0', port=8080, threaded=True, debug=False) # Desativar debug em produção
+        app.run(host='0.0.0.0', port=8080, threaded=True, debug=False)
     except Exception as e:
         web_logger.critical(f"Erro CRÍTICO ao iniciar servidor Flask: {e}", exc_info=True)
-        # Se o Flask falhar ao iniciar, é uma falha grave, então relogue e levante
         raise
 
 def keep_alive():
     """Inicia o servidor Flask em uma thread separada."""
     try:
         t = Thread(target=run_flask)
-        t.daemon = True # Define a thread como daemon para que ela encerre com o processo principal
+        t.daemon = True
         t.start()
         web_logger.info("Thread do painel web iniciada.")
     except Exception as e:
