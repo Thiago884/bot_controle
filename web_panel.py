@@ -1,6 +1,6 @@
 from flask import Flask, jsonify, render_template, request, redirect, url_for, Response
 from threading import Thread
-from main import bot # Assuming 'bot' object is correctly initialized in main.py
+from main import bot  # Assuming 'bot' object is correctly initialized in main.py
 import asyncio
 import datetime
 from datetime import timedelta
@@ -13,6 +13,8 @@ from logging.handlers import RotatingFileHandler
 from functools import wraps
 import discord
 import aiomysql
+import psutil
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 # Configuração básica do logger para o web panel
 web_logger = logging.getLogger('web_panel')
@@ -29,6 +31,7 @@ console_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(level
 web_logger.addHandler(console_handler)
 
 app = Flask(__name__)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
 # Configuração de autenticação
 WEB_AUTH_USER = os.getenv('WEB_AUTH_USER', 'admin')
@@ -56,13 +59,39 @@ def run_coroutine_in_bot_loop(coro):
     
     future = asyncio.run_coroutine_threadsafe(coro, bot.loop)
     try:
-        return future.result(timeout=10)
+        return future.result(timeout=30)  # Aumentado timeout para 30 segundos
     except asyncio.TimeoutError:
         web_logger.error("Timeout ao executar corrotina no loop do bot.")
         raise TimeoutError("Coroutine execution timed out.")
     except Exception as e:
         web_logger.error(f"Erro ao obter resultado da corrotina: {e}", exc_info=True)
         raise
+
+async def safe_db_operation(coro):
+    """Executa operações no banco de dados com tratamento de erros"""
+    try:
+        return await run_coroutine_in_bot_loop(coro)
+    except aiomysql.Error as e:
+        web_logger.error(f"Erro de banco de dados: {e}")
+        return None
+    except Exception as e:
+        web_logger.error(f"Erro inesperado: {e}")
+        return None
+
+def get_main_guild():
+    """Obtém a guilda principal do bot"""
+    if not hasattr(bot, 'guilds') or not bot.guilds:
+        return None
+    return bot.guilds[0]  # Assumindo que o bot está em apenas uma guilda
+
+@app.before_request
+def check_bot_ready():
+    """Verifica se o bot está pronto antes de processar requisições"""
+    if request.endpoint in ['static', 'panel_status']:
+        return
+    
+    if not hasattr(bot, 'is_ready') or not bot.is_ready():
+        return jsonify({'status': 'error', 'message': 'Bot ainda não está pronto'}), 503
 
 @app.route('/')
 @basic_auth_required
@@ -132,6 +161,14 @@ def dashboard():
             'kick_after_days': bot.config.get('kick_after_days', 30) if hasattr(bot, 'config') else 30
         }
         
+        # Obter informações do sistema
+        system_info = {
+            'cpu_usage': psutil.cpu_percent(),
+            'memory_usage': psutil.virtual_memory().percent,
+            'disk_usage': psutil.disk_usage('/').percent,
+            'process_memory': psutil.Process().memory_info().rss / 1024 / 1024  # em MB
+        }
+        
         return render_template('dashboard.html', 
                             bot_name=bot_user_name,
                             guild_count=guild_count,
@@ -140,7 +177,8 @@ def dashboard():
                             db_status=db_status,
                             pool_status=pool_status,
                             queue_status=queue_status,
-                            current_config=current_config)
+                            current_config=current_config,
+                            system_info=system_info)
     
     except Exception as e:
         web_logger.error(f"Erro fatal na rota dashboard: {e}", exc_info=True)
@@ -179,6 +217,34 @@ def monitor():
     except Exception as e:
         web_logger.error(f"Erro fatal na rota monitor: {e}", exc_info=True)
         return render_template('error.html', error_message=f"Erro ao carregar o monitor: {e}"), 500
+
+@app.route('/api/panel_status')
+@basic_auth_required
+def panel_status():
+    """Endpoint para verificar o status do painel e do bot"""
+    return jsonify({
+        'status': 'running',
+        'bot_ready': bot.is_ready() if hasattr(bot, 'is_ready') else False,
+        'guild_count': len(bot.guilds) if hasattr(bot, 'guilds') else 0,
+        'last_heartbeat': datetime.datetime.now().isoformat(),
+        'panel_version': '1.0.0'
+    })
+
+@app.route('/api/system_info')
+@basic_auth_required
+def system_info():
+    """Endpoint para obter informações do sistema"""
+    try:
+        return jsonify({
+            'cpu_usage': psutil.cpu_percent(),
+            'memory_usage': psutil.virtual_memory().percent,
+            'disk_usage': psutil.disk_usage('/').percent,
+            'process_memory': psutil.Process().memory_info().rss / 1024 / 1024,  # em MB
+            'uptime': str(datetime.datetime.now() - bot.start_time).split('.')[0] if hasattr(bot, 'start_time') else 'N/A'
+        })
+    except Exception as e:
+        web_logger.error(f"Erro ao obter informações do sistema: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/api/status')
 @basic_auth_required
@@ -867,6 +933,244 @@ def get_kicks_history():
     except Exception as e:
         web_logger.error(f"Erro em /api/kicks_history: {e}", exc_info=True)
         return jsonify({'status': 'error', 'message': f"Erro ao carregar histórico de kicks: {str(e)}"}), 500
+
+@app.route('/api/set_inactivity', methods=['POST'])
+@basic_auth_required
+def api_set_inactivity():
+    try:
+        data = request.json
+        days = data.get('days')
+        
+        if not days or not isinstance(days, int) or days <= 0:
+            return jsonify({'status': 'error', 'message': 'Período de monitoramento inválido'}), 400
+            
+        bot.config['monitoring_period'] = days
+        run_coroutine_in_bot_loop(bot.save_config())
+        
+        web_logger.info(f"Período de monitoramento atualizado para {days} dias via painel web")
+        return jsonify({'status': 'success', 'message': f'Período de monitoramento definido para {days} dias.'})
+    
+    except Exception as e:
+        web_logger.error(f"Erro em /api/set_inactivity: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/set_requirements', methods=['POST'])
+@basic_auth_required
+def api_set_requirements():
+    try:
+        data = request.json
+        minutes = data.get('minutes')
+        days = data.get('days')
+        
+        if not minutes or not isinstance(minutes, int) or minutes <= 0:
+            return jsonify({'status': 'error', 'message': 'Minutos necessários inválidos'}), 400
+            
+        if not days or not isinstance(days, int) or days <= 0:
+            return jsonify({'status': 'error', 'message': 'Dias necessários inválidos'}), 400
+            
+        bot.config['required_minutes'] = minutes
+        bot.config['required_days'] = days
+        run_coroutine_in_bot_loop(bot.save_config())
+        
+        web_logger.info(f"Requisitos atualizados para {minutes} minutos em {days} dias via painel web")
+        return jsonify({
+            'status': 'success',
+            'message': f'Requisitos definidos para {minutes} minutos em {days} dias diferentes.'
+        })
+    
+    except Exception as e:
+        web_logger.error(f"Erro em /api/set_requirements: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/set_kick_days', methods=['POST'])
+@basic_auth_required
+def api_set_kick_days():
+    try:
+        data = request.json
+        days = data.get('days')
+        
+        if not days or not isinstance(days, int) or days <= 0:
+            return jsonify({'status': 'error', 'message': 'Dias para expulsão inválidos'}), 400
+            
+        bot.config['kick_after_days'] = days
+        run_coroutine_in_bot_loop(bot.save_config())
+        
+        web_logger.info(f"Dias para expulsão atualizados para {days} dias via painel web")
+        return jsonify({
+            'status': 'success',
+            'message': f'Membros sem cargo serão expulsos após {days} dias.'
+        })
+    
+    except Exception as e:
+        web_logger.error(f"Erro em /api/set_kick_days: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/manage_tracked_roles', methods=['POST'])
+@basic_auth_required
+def api_manage_tracked_roles():
+    try:
+        data = request.json
+        action = data.get('action')  # 'add' ou 'remove'
+        role_id = data.get('role_id')
+        
+        if not action or action not in ['add', 'remove']:
+            return jsonify({'status': 'error', 'message': 'Ação inválida'}), 400
+            
+        if not role_id:
+            return jsonify({'status': 'error', 'message': 'ID do cargo é obrigatório'}), 400
+            
+        # Obter o objeto de guild
+        if not hasattr(bot, 'guilds') or not bot.guilds:
+            return jsonify({'status': 'error', 'message': 'Bot não está em nenhum servidor'}), 400
+            
+        guild = bot.guilds[0]
+        role = guild.get_role(int(role_id))
+        
+        if not role:
+            return jsonify({'status': 'error', 'message': 'Cargo não encontrado'}), 404
+            
+        # Executar a ação
+        if action == 'add':
+            if role.id not in bot.config['tracked_roles']:
+                bot.config['tracked_roles'].append(role.id)
+                run_coroutine_in_bot_loop(bot.save_config())
+                message = f"Cargo {role.name} adicionado à lista de monitorados."
+            else:
+                return jsonify({'status': 'info', 'message': 'Este cargo já está sendo monitorado.'}), 200
+        else:  # remove
+            if role.id in bot.config['tracked_roles']:
+                bot.config['tracked_roles'].remove(role.id)
+                run_coroutine_in_bot_loop(bot.save_config())
+                message = f"Cargo {role.name} removido da lista de monitorados."
+            else:
+                return jsonify({'status': 'info', 'message': 'Este cargo não estava sendo monitorado.'}), 200
+        
+        web_logger.info(f"Cargo {role.name} ({role.id}) {action} via painel web")
+        return jsonify({'status': 'success', 'message': message})
+    
+    except Exception as e:
+        web_logger.error(f"Erro em /api/manage_tracked_roles: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/set_notification_channel', methods=['POST'])
+@basic_auth_required
+def api_set_notification_channel():
+    try:
+        data = request.json
+        channel_id = data.get('channel_id')
+        
+        if not channel_id:
+            return jsonify({'status': 'error', 'message': 'ID do canal é obrigatório'}), 400
+            
+        # Obter o objeto de guild
+        if not hasattr(bot, 'guilds') or not bot.guilds:
+            return jsonify({'status': 'error', 'message': 'Bot não está em nenhum servidor'}), 400
+            
+        guild = bot.guilds[0]
+        channel = guild.get_channel(int(channel_id))
+        
+        if not channel or not isinstance(channel, discord.TextChannel):
+            return jsonify({'status': 'error', 'message': 'Canal de texto não encontrado'}), 404
+            
+        bot.config['notification_channel'] = channel.id
+        run_coroutine_in_bot_loop(bot.save_config())
+        
+        web_logger.info(f"Canal de notificações definido para {channel.name} via painel web")
+        return jsonify({
+            'status': 'success',
+            'message': f'Canal de notificações definido para #{channel.name}.'
+        })
+    
+    except Exception as e:
+        web_logger.error(f"Erro em /api/set_notification_channel: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/set_warning_days', methods=['POST'])
+@basic_auth_required
+def api_set_warning_days():
+    try:
+        data = request.json
+        first = data.get('first_warning')
+        second = data.get('second_warning')
+        
+        if not first or not second or not isinstance(first, int) or not isinstance(second, int):
+            return jsonify({'status': 'error', 'message': 'Dias de aviso inválidos'}), 400
+            
+        if first <= second:
+            return jsonify({'status': 'error', 'message': 'O primeiro aviso deve ser enviado antes do segundo.'}), 400
+            
+        bot.config['warnings']['first_warning'] = first
+        bot.config['warnings']['second_warning'] = second
+        run_coroutine_in_bot_loop(bot.save_config())
+        
+        web_logger.info(f"Dias de aviso atualizados para {first} e {second} dias via painel web")
+        return jsonify({
+            'status': 'success',
+            'message': f'Avisos configurados: primeiro em {first} dias, segundo em {second} dias.'
+        })
+    
+    except Exception as e:
+        web_logger.error(f"Erro em /api/set_warning_days: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/set_absence_channel', methods=['POST'])
+@basic_auth_required
+def api_set_absence_channel():
+    try:
+        data = request.json
+        channel_id = data.get('channel_id')
+        
+        if not channel_id:
+            return jsonify({'status': 'error', 'message': 'ID do canal é obrigatório'}), 400
+            
+        # Obter o objeto de guild
+        if not hasattr(bot, 'guilds') or not bot.guilds:
+            return jsonify({'status': 'error', 'message': 'Bot não está em nenhum servidor'}), 400
+            
+        guild = bot.guilds[0]
+        channel = guild.get_channel(int(channel_id))
+        
+        if not channel or not isinstance(channel, discord.VoiceChannel):
+            return jsonify({'status': 'error', 'message': 'Canal de voz não encontrado'}), 404
+            
+        bot.config['absence_channel'] = channel.id
+        run_coroutine_in_bot_loop(bot.save_config())
+        
+        web_logger.info(f"Canal de ausência definido para {channel.name} via painel web")
+        return jsonify({
+            'status': 'success',
+            'message': f'Canal de ausência definido para {channel.name}.'
+        })
+    
+    except Exception as e:
+        web_logger.error(f"Erro em /api/set_absence_channel: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/get_config', methods=['GET'])
+@basic_auth_required
+def api_get_config():
+    try:
+        if not hasattr(bot, 'config'):
+            return jsonify({'status': 'error', 'message': 'Configuração não carregada'}), 500
+            
+        config = {
+            'required_minutes': bot.config.get('required_minutes', 15),
+            'required_days': bot.config.get('required_days', 2),
+            'monitoring_period': bot.config.get('monitoring_period', 14),
+            'kick_after_days': bot.config.get('kick_after_days', 30),
+            'warnings': bot.config.get('warnings', {}),
+            'tracked_roles': bot.config.get('tracked_roles', []),
+            'notification_channel': bot.config.get('notification_channel'),
+            'absence_channel': bot.config.get('absence_channel'),
+            'whitelist': bot.config.get('whitelist', {'users': [], 'roles': []}),
+            'allowed_roles': bot.config.get('allowed_roles', [])
+        }
+        
+        return jsonify({'status': 'success', 'config': config})
+    
+    except Exception as e:
+        web_logger.error(f"Erro em /api/get_config: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 def run_flask():
     """Função para iniciar o servidor Flask."""

@@ -15,7 +15,7 @@ import aiomysql
 import random
 from collections import defaultdict
 from collections import deque
-from flask import Flask, jsonify  # Added for API support
+from flask import Flask, jsonify
 
 # Configuração do logger
 def setup_logger():
@@ -1268,6 +1268,11 @@ from bot_commands import *
 
 # Iniciar o bot
 if __name__ == "__main__":
+    # Iniciar o painel web se estiver no Render
+    if os.getenv('RENDER', 'false').lower() == 'true':
+        from web_panel import keep_alive
+        keep_alive()
+    
     delay = random.uniform(1, 10)
     logger.info(f"Aguardando {delay:.2f} segundos antes de iniciar para evitar rate limit...")
     time.sleep(delay)
@@ -1280,11 +1285,6 @@ if __name__ == "__main__":
     if missing_vars:
         logger.critical(f"Variáveis de ambiente ausentes: {', '.join(missing_vars)}")
         raise ValueError(f"Variáveis de ambiente ausentes: {', '.join(missing_vars)}")
-    
-    if os.getenv('RENDER', 'false').lower() == 'true':
-        logger.info("Executando no Render - Configurações especiais aplicadas")
-        from web_panel import keep_alive
-        keep_alive()
     
     max_retries = 5
     initial_delay = 2
