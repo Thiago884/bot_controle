@@ -242,16 +242,33 @@ def get_guild_info(guild_id):
         if not hasattr(bot, 'guilds') or not bot.guilds:
             return jsonify({'error': 'Bot not connected to any guilds'}), 404
 
-        # Primeiro tenta encontrar a guilda na lista de guildas do bot
+        # Tentar encontrar a guilda na lista de guildas do bot
         guild = discord.utils.get(bot.guilds, id=guild_id)
         
-        # Se não encontrou, tenta buscar diretamente (pode exigir intents)
+        # Se não encontrou, tentar buscar diretamente
         if not guild:
             web_logger.warning(f"Guild {guild_id} not found in bot.guilds, trying direct fetch")
-            guild = bot.get_guild(guild_id)
-            if not guild:
-                web_logger.error(f"Guild {guild_id} not found via direct fetch")
-                return jsonify({'error': 'Guild not found - bot may have been removed from this server'}), 404
+            try:
+                guild = run_coroutine_in_bot_loop(bot.fetch_guild(guild_id))  # Usar fetch_guild em vez de get_guild
+            except discord.NotFound:
+                web_logger.error(f"Guild {guild_id} not found via fetch_guild")
+                return jsonify({
+                    'error': 'Guild not found',
+                    'solutions': [
+                        'Verify the bot is in the server',
+                        'Check server ID is correct',
+                        'Ensure bot has proper permissions'
+                    ]
+                }), 404
+            except discord.Forbidden:
+                web_logger.error(f"Bot lacks permissions to access guild {guild_id}")
+                return jsonify({
+                    'error': 'Missing permissions',
+                    'solutions': [
+                        'Check bot permissions in the server',
+                        'Ensure bot has VIEW_CHANNELS permission'
+                    ]
+                }), 403
 
         # Força o carregamento de todos os membros (chunking)
         try:
