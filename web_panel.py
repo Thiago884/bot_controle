@@ -239,10 +239,26 @@ def get_guilds():
 @basic_auth_required
 def get_guild_info(guild_id):
     try:
-        guild = bot.get_guild(guild_id)
-        if not guild:
-            return jsonify({'error': 'Guild not found'}), 404
+        if not hasattr(bot, 'guilds') or not bot.guilds:
+            return jsonify({'error': 'Bot not connected to any guilds'}), 404
+
+        # Primeiro tenta encontrar a guilda na lista de guildas do bot
+        guild = discord.utils.get(bot.guilds, id=guild_id)
         
+        # Se não encontrou, tenta buscar diretamente (pode exigir intents)
+        if not guild:
+            web_logger.warning(f"Guild {guild_id} not found in bot.guilds, trying direct fetch")
+            guild = bot.get_guild(guild_id)
+            if not guild:
+                web_logger.error(f"Guild {guild_id} not found via direct fetch")
+                return jsonify({'error': 'Guild not found - bot may have been removed from this server'}), 404
+
+        # Força o carregamento de todos os membros (chunking)
+        try:
+            run_coroutine_in_bot_loop(guild.chunk())
+        except Exception as e:
+            web_logger.warning(f"Error chunking guild members: {e}")
+
         # Obter membros com cargos monitorados
         tracked_members = []
         tracked_roles = []
