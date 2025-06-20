@@ -1,5 +1,3 @@
-from gevent import monkey
-monkey.patch_all() # ADICIONE ESTAS DUAS LINHAS NO TOPO
 import discord
 from discord.ext import commands
 import pytz
@@ -18,11 +16,7 @@ import random
 from collections import defaultdict
 from collections import deque
 from flask import Flask
-import nest_asyncio
 
-nest_asyncio.apply(loop=False)
-
-nest_asyncio.apply()
 
 
 # Configuração do logger
