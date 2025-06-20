@@ -15,6 +15,10 @@ import discord
 import aiomysql
 import psutil
 from werkzeug.middleware.proxy_fix import ProxyFix
+import nest_asyncio
+
+# Aplicar nest_asyncio para permitir múltiplos loops de eventos
+nest_asyncio.apply()
 
 # Configuração básica do logger para o web panel
 web_logger = logging.getLogger('web_panel')
@@ -1181,6 +1185,9 @@ def start_bot():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
+        # Configura o loop para a instância do bot
+        bot.loop = loop
+        
         # Inicia o bot
         loop.run_until_complete(bot.start(os.getenv('DISCORD_TOKEN')))
     except Exception as e:
@@ -1189,6 +1196,14 @@ def start_bot():
 
 # Inicia o bot Discord em uma thread separada quando o módulo é carregado
 if __name__ != '__main__':
-    bot_thread = Thread(target=start_bot, daemon=True)
-    bot_thread.start()
-    web_logger.info("Thread do bot Discord iniciada.")
+    try:
+        # Garante que o loop principal está configurado
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            asyncio.set_event_loop(asyncio.new_event_loop())
+            
+        bot_thread = Thread(target=start_bot, daemon=True)
+        bot_thread.start()
+        web_logger.info("Thread do bot Discord iniciada.")
+    except Exception as e:
+        web_logger.error(f"Erro ao iniciar thread do bot: {e}", exc_info=True)

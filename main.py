@@ -18,6 +18,8 @@ import random
 from collections import defaultdict
 from collections import deque
 from flask import Flask
+import nest_asyncio
+nest_asyncio.apply()
 
 # Configuração do logger
 def setup_logger():
