@@ -104,8 +104,7 @@ def log_task_metrics(task_name: str):
 @log_task_metrics("inactivity_check")
 async def inactivity_check():
     """Verifica a inatividade dos membros e remove cargos se necessário"""
-    if not hasattr(bot, '_ready') or not bot._ready.is_set():
-        await bot._ready.wait()
+    await bot.wait_until_ready()
     
     required_minutes = bot.config['required_minutes']
     required_days = bot.config['required_days']
@@ -288,8 +287,7 @@ async def process_member_inactivity(member: discord.Member, guild: discord.Guild
 @log_task_metrics("check_warnings")
 async def check_warnings():
     """Verifica e envia avisos de inatividade para membros"""
-    if not hasattr(bot, '_ready') or not bot._ready.is_set():
-        await bot._ready.wait()
+    await bot.wait_until_ready()
     
     required_minutes = bot.config['required_minutes']
     required_days = bot.config['required_days']
@@ -367,8 +365,7 @@ async def process_member_warnings(member: discord.Member, guild: discord.Guild,
 @log_task_metrics("cleanup_members")
 async def cleanup_members():
     """Remove membros inativos que estão sem cargos há muito tempo"""
-    if not hasattr(bot, '_ready') or not bot._ready.is_set():
-        await bot._ready.wait()
+    await bot.wait_until_ready()
     
     kick_after_days = bot.config['kick_after_days']
     if kick_after_days <= 0:
@@ -434,8 +431,7 @@ async def process_member_cleanup(member: discord.Member, guild: discord.Guild,
 @log_task_metrics("database_backup")
 async def database_backup():
     """Executa backup diário do banco de dados"""
-    if not hasattr(bot, '_ready') or not bot._ready.is_set():
-        await bot._ready.wait()
+    await bot.wait_until_ready()
     if not hasattr(bot, 'db_backup'):
         from database import DatabaseBackup
         bot.db_backup = DatabaseBackup(bot.db)
@@ -458,8 +454,7 @@ async def database_backup():
 @log_task_metrics("cleanup_old_data")
 async def cleanup_old_data():
     """Limpa dados antigos do banco de dados"""
-    if not hasattr(bot, '_ready') or not bot._ready.is_set():
-        await bot._ready.wait()
+    await bot.wait_until_ready()
     
     try:
         cutoff_date = datetime.utcnow() - timedelta(days=60)  # 2 meses
@@ -504,8 +499,7 @@ async def cleanup_old_data():
 @log_task_metrics("monitor_rate_limits")
 async def monitor_rate_limits():
     """Monitora e ajusta dinamicamente os rate limits"""
-    if not hasattr(bot, '_ready') or not bot._ready.is_set():
-        await bot._ready.wait()
+    await bot.wait_until_ready()
     
     try:
         # Verificar uso atual
@@ -558,8 +552,7 @@ async def monitor_rate_limits():
 @log_task_metrics("report_metrics")
 async def report_metrics():
     """Report daily task metrics"""
-    if not hasattr(bot, '_ready') or not bot._ready.is_set():
-        await bot._ready.wait()
+    await bot.wait_until_ready()
     
     try:
         metrics_report = []
