@@ -16,7 +16,7 @@ import random
 from collections import defaultdict
 from collections import deque
 from flask import Flask
-
+from database import Database
 
 
 # Configuração do logger

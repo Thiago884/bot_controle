@@ -163,7 +163,7 @@ class Database:
                     logger.info("Banco de dados inicializado com sucesso")
                 
                 # Iniciar task de heartbeat
-                self.heartbeat_task = asyncio.create_task(self._db_heartbeat(interval=300))  # 5 minutos
+                  # 5 minutos
                 logger.info("Task de heartbeat do banco de dados iniciada")
                 
                 # Aquecer o pool (criar algumas conexões iniciais)
