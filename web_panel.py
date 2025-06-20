@@ -20,6 +20,7 @@ import aiomysql
 import psutil
 from werkzeug.middleware.proxy_fix import ProxyFix
 import time
+from gevent import spawn
 
 # Configuração básica do logger para o web panel
 web_logger = logging.getLogger('web_panel')
@@ -1177,29 +1178,29 @@ def api_get_config():
         web_logger.error(f"Erro em /api/get_config: {e}", exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-# ==> SIMPLIFICAR A INICIALIZAÇÃO DO BOT <==
-def start_bot():
-    """Inicia o bot Discord em uma thread separada."""
-    web_logger.info("Tentando iniciar o bot Discord na sua própria thread...")
+async def start_discord_bot_async():
+    """Starts the Discord bot asynchronously using bot.start()."""
+    web_logger.info("Attempting to start Discord bot asynchronously...")
     try:
-        # Cria um novo loop de eventos para esta thread
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        # bot.run() é a maneira mais simples e robusta de iniciar o bot.
-        # Ele cuida do loop de eventos automaticamente.
-        bot.run(os.getenv('DISCORD_TOKEN'))
+        # Use bot.start() which is a coroutine and does not create a new event loop.
+        # nest_asyncio should allow this to run within the existing gevent-patched loop.
+        await bot.start(os.getenv('DISCORD_TOKEN'))
     except Exception as e:
-        web_logger.critical(f"Erro CRÍTICO e fatal na thread do bot Discord: {e}", exc_info=True)
-        # Em um ambiente de produção, forçar a saída pode fazer com que
-        # o serviço (Render, Docker, etc.) reinicie o contêiner.
+        web_logger.critical(f"CRITICAL and fatal error in Discord bot start: {e}", exc_info=True)
+        # In a production environment, forcing exit might cause the service to restart the container.
         os._exit(1)
 
-# ==> INICIAR A THREAD DO BOT <==
-# Esta parte do código só é executada quando o Gunicorn importa o arquivo.
+# This part of the code is executed when Gunicorn imports the file for each worker.
 if __name__ != '__main__':
-    web_logger.info("Iniciando a thread para o bot Discord...")
-    bot_thread = Thread(target=start_bot, daemon=True)
-    bot_thread.start()
-    # Pequeno delay para permitir que o bot inicie antes que as requisições web comecem a chegar
-    time.sleep(2)
+    web_logger.info("Scheduling Discord bot initialization with gevent.spawn...")
+    # Use gevent.spawn to run the async bot start function in a greenlet.
+    # This will not block the main Flask application startup in the worker process.
+    spawn(start_discord_bot_async)
+
+# Main execution block for direct running (e.g., local development without Gunicorn)
+if __name__ == '__main__':
+    web_logger.info("Running Flask app directly for local development (not Gunicorn).")
+    # For local development, you might want to run the bot here in the main loop
+    # or ensure it's handled appropriately if you need it.
+    # For deployment with Gunicorn, the `if __name__ != '__main__':` block is the primary entry.
+    app.run(debug=True, host='0.0.0.0', port=os.getenv('PORT', 5000))
