@@ -640,8 +640,18 @@ async def _execute_force_check(member: discord.Member):
         logger.error(f"Erro na verificação forçada para {member}: {e}")
         raise
 
-def setup_tasks():
-    """Configura e inicia todas as tarefas agendadas"""
+async def start_tasks_when_ready():
+    """Espera o bot estar pronto antes de iniciar as tasks"""
+    await bot.wait_until_ready()
+    
+    # Verifique se o bot está realmente conectado
+    if not bot.is_ready():
+        logger.warning("Bot não está pronto - tentando novamente em 10 segundos")
+        await asyncio.sleep(10)
+        return await start_tasks_when_ready()
+    
+    logger.info("Bot está pronto - iniciando tarefas agendadas")
+    
     inactivity_check.start()
     check_warnings.start()
     cleanup_members.start()
@@ -649,5 +659,8 @@ def setup_tasks():
     cleanup_old_data.start()
     monitor_rate_limits.start()
     report_metrics.start()
-    
-    logger.info("Todas as tarefas agendadas foram iniciadas")
+
+def setup_tasks():
+    """Configura e inicia todas as tarefas agendadas"""
+    # Não inicie as tasks imediatamente, espere o bot estar pronto
+    bot.loop.create_task(start_tasks_when_ready())

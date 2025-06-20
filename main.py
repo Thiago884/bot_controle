@@ -21,6 +21,7 @@ from flask import Flask
 import nest_asyncio
 nest_asyncio.apply()
 
+
 # Configuração do logger
 def setup_logger():
     logger = logging.getLogger('inactivity_bot')
@@ -1216,6 +1217,11 @@ bot = InactivityBot(
 
 @bot.event
 async def on_ready():
+    # Garante que o bot está realmente conectado
+    if not bot.is_ready():
+        logger.warning("Evento on_ready chamado mas bot não está pronto")
+        return
+    
     logger.info(f'Bot conectado como {bot.user}')
     
     for guild in bot.guilds:

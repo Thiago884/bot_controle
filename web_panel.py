@@ -16,6 +16,7 @@ import aiomysql
 import psutil
 from werkzeug.middleware.proxy_fix import ProxyFix
 import nest_asyncio
+import time
 
 # Aplicar nest_asyncio para permitir múltiplos loops de eventos
 nest_asyncio.apply()
@@ -1188,10 +1189,33 @@ def start_bot():
         # Configura o loop para a instância do bot
         bot.loop = loop
         
-        # Inicia o bot
-        loop.run_until_complete(bot.start(os.getenv('DISCORD_TOKEN')))
+        # Configura timeout e tentativas de reconexão
+        max_attempts = 3
+        attempt = 0
+        
+        while attempt < max_attempts:
+            try:
+                # Aumenta o timeout para 30 segundos
+                loop.run_until_complete(asyncio.wait_for(
+                    bot.start(os.getenv('DISCORD_TOKEN')),
+                    timeout=30
+                ))
+                break
+            except (asyncio.TimeoutError, TimeoutError) as e:
+                attempt += 1
+                web_logger.warning(f"Timeout na tentativa {attempt} de conectar o bot: {e}")
+                if attempt < max_attempts:
+                    web_logger.info("Tentando novamente em 10 segundos...")
+                    time.sleep(10)
+            except Exception as e:
+                web_logger.critical(f"Erro CRÍTICO ao iniciar bot Discord: {e}")
+                raise
+        
+        if attempt >= max_attempts:
+            web_logger.error("Falha ao conectar o bot após várias tentativas")
+            
     except Exception as e:
-        web_logger.critical(f"Erro CRÍTICO ao iniciar bot Discord: {e}", exc_info=True)
+        web_logger.critical(f"Erro CRÍTICO ao iniciar bot Discord: {e}")
         raise
 
 # Inicia o bot Discord em uma thread separada quando o módulo é carregado
