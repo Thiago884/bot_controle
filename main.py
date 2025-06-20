@@ -17,6 +17,7 @@ import aiomysql
 import random
 from collections import defaultdict
 from collections import deque
+from flask import Flask
 
 # Configuração do logger
 def setup_logger():
