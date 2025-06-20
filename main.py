@@ -16,8 +16,6 @@ import random
 from collections import defaultdict
 from collections import deque
 from flask import Flask
-from database import Database
-
 
 # Configuração do logger
 def setup_logger():
@@ -510,6 +508,47 @@ class InactivityBot(commands.Bot):
             self.health_check_task = asyncio.create_task(self.periodic_health_check())
             self.audio_check_task = asyncio.create_task(self.check_audio_states())
 
+    async def initialize_db(self):
+        max_retries = 5
+        initial_delay = 2
+        for attempt in range(max_retries):
+            try:
+                from database import Database
+                self.db = Database()
+                await self.db.initialize()
+                logger.info("Banco de dados inicializado com sucesso")
+                
+                # Testar a conexão
+                async with self.db.pool.acquire() as conn:
+                    await conn.ping(reconnect=True)  # Resetar a conexão
+                    async with conn.cursor() as cursor:
+                        await cursor.execute("SELECT 1")
+                        await cursor.fetchone()
+                
+                await self.db.create_tables()
+                
+                db_config = await self.db.load_config(0)
+                if db_config:
+                    self.config.update(db_config)
+                    await self.save_config()
+                    logger.info("Configuração carregada do banco de dados")
+                
+                # Configurar reconexão automática
+                self.db.pool._reconnect_interval = 60
+                self.db.pool._reconnect_max_attempts = 10
+                
+                break
+            except Exception as e:
+                logger.error(f"Tentativa {attempt + 1} de conexão ao banco de dados falhou: {e}")
+                if attempt == max_retries - 1:
+                    logger.error("Falha ao conectar ao banco de dados após várias tentativas")
+                    raise
+                
+                # Backoff exponencial com jitter
+                sleep_time = min(initial_delay * (2 ** attempt) + random.uniform(0, 1), 30)
+                logger.info(f"Tentando novamente em {sleep_time:.2f} segundos...")
+                await asyncio.sleep(sleep_time)
+
     async def check_audio_states(self):
         while True:
             try:
@@ -567,45 +606,6 @@ class InactivityBot(commands.Bot):
             except Exception as e:
                 logger.error(f"Erro ao verificar estados de áudio: {e}")
                 await asyncio.sleep(60)
-
-    async def initialize_db(self):
-        max_retries = 5
-        initial_delay = 2
-        for attempt in range(max_retries):
-            try:
-                from database import Database
-                self.db = Database()
-                await self.db.initialize()
-                logger.info("Banco de dados inicializado com sucesso")
-                
-                # Testar a conexão
-                async with self.db.pool.acquire() as conn:
-                    async with conn.cursor() as cursor:
-                        await cursor.execute("SELECT 1")
-                        await cursor.fetchone()
-                
-                await self.db.create_tables()
-                
-                db_config = await self.db.load_config(0)
-                if db_config:
-                    self.config.update(db_config)
-                    await self.save_config()
-                    logger.info("Configuração carregada do banco de dados")
-                
-                # Configurar reconexão automática
-                self.db.pool._reconnect_interval = 60  # Tentar reconectar a cada 60 segundos
-                self.db.pool._reconnect_max_attempts = 10  # Máximo de 10 tentativas
-                
-                break
-            except Exception as e:
-                logger.error(f"Tentativa {attempt + 1} de conexão ao banco de dados falhou: {e}")
-                if attempt == max_retries - 1:
-                    raise
-                
-                # Backoff exponencial com jitter
-                sleep_time = min(initial_delay * (2 ** attempt) + random.uniform(0, 1), 30)
-                logger.info(f"Tentando novamente em {sleep_time:.2f} segundos...")
-                await asyncio.sleep(sleep_time)
 
     async def monitor_db_pool(self):
         while True:

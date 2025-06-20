@@ -138,32 +138,39 @@ class Database:
                     user=os.getenv('DB_USER'),
                     password=os.getenv('DB_PASS'),
                     db=os.getenv('DB_NAME'),
-                    minsize=5,  # Conexões mínimas mantidas (aumentado de 2 para 5)
-                    maxsize=25,  # Limite máximo da HostGator (aumentado de 15 para 25)
+                    minsize=5,
+                    maxsize=25,
                     connect_timeout=30,
                     autocommit=True,
                     cursorclass=DictCursor,
-                    pool_recycle=300,  # Reciclar conexões a cada 5 minutos
-                    echo=False  # Desativar logs de queries para performance
+                    pool_recycle=300,
+                    echo=False
                 )
                 
                 # Testar conexão com timeout
                 try:
                     async with self.pool.acquire() as conn:
+                        # Resetar a conexão para evitar "Command Out of Sync"
+                        await conn.ping(reconnect=True)
                         async with conn.cursor() as cursor:
-                            await asyncio.wait_for(cursor.execute("SELECT 1"), timeout=10)
+                            await cursor.execute("SELECT 1")
                             await cursor.fetchone()
                 except asyncio.TimeoutError:
                     raise Exception("Timeout ao testar conexão com o banco de dados")
                 
                 # Verificar e criar tabelas se não estiverem inicializadas
                 if not self._is_initialized:
-                    await self.create_tables()
-                    self._is_initialized = True
-                    logger.info("Banco de dados inicializado com sucesso")
-                
+                    try:
+                        await self.create_tables()
+                        self._is_initialized = True
+                        logger.info("Banco de dados inicializado com sucesso")
+                    except Exception as e:
+                        logger.error(f"Erro ao criar tabelas: {e}")
+                        # Tentar novamente mesmo que a criação de tabelas falhe
+                        continue
+                    
                 # Iniciar task de heartbeat
-                  # 5 minutos
+                self.heartbeat_task = asyncio.create_task(self._db_heartbeat(interval=300))  # 5 minutos
                 logger.info("Task de heartbeat do banco de dados iniciada")
                 
                 # Aquecer o pool (criar algumas conexões iniciais)

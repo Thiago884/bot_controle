@@ -1179,13 +1179,13 @@ def api_get_config():
 
 # ==> SIMPLIFICAR A INICIALIZAÇÃO DO BOT <==
 def start_bot():
-    """
-    Inicia o bot Discord em uma thread separada.
-    bot.run() é bloqueante e gerencia seu próprio loop, tornando-o mais seguro
-    em ambientes com múltiplos threads e frameworks como gevent.
-    """
+    """Inicia o bot Discord em uma thread separada."""
     web_logger.info("Tentando iniciar o bot Discord na sua própria thread...")
     try:
+        # Cria um novo loop de eventos para esta thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
         # bot.run() é a maneira mais simples e robusta de iniciar o bot.
         # Ele cuida do loop de eventos automaticamente.
         bot.run(os.getenv('DISCORD_TOKEN'))
