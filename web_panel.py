@@ -1,6 +1,10 @@
+from gevent import monkey
+monkey.patch_all()
+import nest_asyncio
+nest_asyncio.apply()
 from flask import Flask, jsonify, render_template, request, redirect, url_for, Response
 from threading import Thread
-from main import bot  # Agora importa uma instância de bot não iniciada
+from main import bot
 import asyncio
 import datetime
 from datetime import timedelta
@@ -15,11 +19,7 @@ import discord
 import aiomysql
 import psutil
 from werkzeug.middleware.proxy_fix import ProxyFix
-import nest_asyncio
 import time
-
-# Aplicar nest_asyncio para permitir múltiplos loops de eventos
-nest_asyncio.apply()
 
 # Configuração básica do logger para o web panel
 web_logger = logging.getLogger('web_panel')
@@ -58,7 +58,7 @@ def basic_auth_required(f):
 
 def run_coroutine_in_bot_loop(coro):
     """Executa uma corrotina no loop de eventos do bot e espera pelo resultado."""
-    if not bot.loop.is_running():
+    if not hasattr(bot, 'loop') or not bot.loop.is_running():
         web_logger.error("Loop do bot não está rodando. Não é possível executar corrotina.")
         raise RuntimeError("Bot loop is not running.")
     
@@ -1177,58 +1177,29 @@ def api_get_config():
         web_logger.error(f"Erro em /api/get_config: {e}", exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
+# ==> SIMPLIFICAR A INICIALIZAÇÃO DO BOT <==
 def start_bot():
-    """Inicia o bot Discord em uma thread separada"""
+    """
+    Inicia o bot Discord em uma thread separada.
+    bot.run() é bloqueante e gerencia seu próprio loop, tornando-o mais seguro
+    em ambientes com múltiplos threads e frameworks como gevent.
+    """
+    web_logger.info("Tentando iniciar o bot Discord na sua própria thread...")
     try:
-        web_logger.info("Iniciando bot Discord em thread separada...")
-        
-        # Cria um novo loop de eventos para o bot
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        # Configura o loop para a instância do bot
-        bot.loop = loop
-        
-        # Desativa nest_asyncio para esta thread
-        nest_asyncio.apply(loop=False)
-        
-        # Configura timeout e tentativas de reconexão
-        max_attempts = 3
-        attempt = 0
-        
-        while attempt < max_attempts:
-            try:
-                loop.run_until_complete(bot.start(os.getenv('DISCORD_TOKEN')))
-                break
-            except (asyncio.TimeoutError, TimeoutError) as e:
-                attempt += 1
-                web_logger.warning(f"Timeout na tentativa {attempt} de conectar o bot: {e}")
-                if attempt < max_attempts:
-                    web_logger.info("Tentando novamente em 10 segundos...")
-                    time.sleep(10)
-            except Exception as e:
-                web_logger.critical(f"Erro CRÍTICO ao iniciar bot Discord: {e}")
-                raise
-        
-        if attempt >= max_attempts:
-            web_logger.error("Falha ao conectar o bot após várias tentativas")
-            
+        # bot.run() é a maneira mais simples e robusta de iniciar o bot.
+        # Ele cuida do loop de eventos automaticamente.
+        bot.run(os.getenv('DISCORD_TOKEN'))
     except Exception as e:
-        web_logger.critical(f"Erro CRÍTICO ao iniciar bot Discord: {e}")
-        raise
+        web_logger.critical(f"Erro CRÍTICO e fatal na thread do bot Discord: {e}", exc_info=True)
+        # Em um ambiente de produção, forçar a saída pode fazer com que
+        # o serviço (Render, Docker, etc.) reinicie o contêiner.
+        os._exit(1)
 
-# Modifique a inicialização para:
+# ==> INICIAR A THREAD DO BOT <==
+# Esta parte do código só é executada quando o Gunicorn importa o arquivo.
 if __name__ != '__main__':
-    try:
-        # Configura o loop principal para o Flask
-        loop = asyncio.get_event_loop()
-        
-        # Inicia o bot em uma thread separada
-        bot_thread = Thread(target=start_bot, daemon=True)
-        bot_thread.start()
-        web_logger.info("Thread do bot Discord iniciada.")
-        
-        # Pequeno delay para permitir que o bot inicie
-        time.sleep(2)
-    except Exception as e:
-        web_logger.error(f"Erro ao iniciar thread do bot: {e}", exc_info=True)
+    web_logger.info("Iniciando a thread para o bot Discord...")
+    bot_thread = Thread(target=start_bot, daemon=True)
+    bot_thread.start()
+    # Pequeno delay para permitir que o bot inicie antes que as requisições web comecem a chegar
+    time.sleep(2)
