@@ -1,3 +1,5 @@
+from gevent import monkey
+monkey.patch_all() # ADICIONE ESTAS DUAS LINHAS NO TOPO
 import discord
 from discord.ext import commands
 import pytz
@@ -15,7 +17,6 @@ import aiomysql
 import random
 from collections import defaultdict
 from collections import deque
-from flask import Flask, jsonify
 
 # Configuração do logger
 def setup_logger():
@@ -1265,60 +1266,3 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
 
 # Importar comandos
 from bot_commands import *
-
-# Iniciar o bot
-if __name__ == "__main__":
-    # Iniciar o painel web se estiver no Render
-    if os.getenv('RENDER', 'false').lower() == 'true':
-        from web_panel import keep_alive
-        keep_alive()
-    
-    delay = random.uniform(1, 10)
-    logger.info(f"Aguardando {delay:.2f} segundos antes de iniciar para evitar rate limit...")
-    time.sleep(delay)
-    
-    load_dotenv()
-    
-    required_env_vars = ['DISCORD_TOKEN', 'DB_HOST', 'DB_NAME', 'DB_USER', 'DB_PASS']
-    missing_vars = [var for var in required_env_vars if not os.getenv(var)]
-    
-    if missing_vars:
-        logger.critical(f"Variáveis de ambiente ausentes: {', '.join(missing_vars)}")
-        raise ValueError(f"Variáveis de ambiente ausentes: {', '.join(missing_vars)}")
-    
-    max_retries = 5
-    initial_delay = 2
-    
-    async def run_bot():
-        for attempt in range(max_retries):
-            try:
-                await bot.start(os.getenv('DISCORD_TOKEN'))
-                break
-            except discord.errors.HTTPException as e:
-                if e.status == 429:
-                    retry_after = float(e.response.headers.get('Retry-After', 60))
-                    logger.error(f"Rate limit atingido (tentativa {attempt + 1}/{max_retries}). Tentando novamente em {retry_after} segundos...")
-                    await asyncio.sleep(retry_after)
-                else:
-                    raise
-            except Exception as e:
-                logger.error(f"Erro ao iniciar o bot (tentativa {attempt + 1}/{max_retries}): {e}")
-                if attempt == max_retries - 1:
-                    raise
-                sleep_time = initial_delay * (2 ** attempt)
-                logger.info(f"Tentando novamente em {sleep_time} segundos...")
-                await asyncio.sleep(sleep_time)
-    
-    try:
-        asyncio.run(run_bot())
-    except Exception as e:
-        logger.critical(f"Erro ao iniciar o bot após {max_retries} tentativas: {e}")
-        raise
-    finally:
-        if hasattr(bot, 'db') and bot.db:
-            try:
-                loop = asyncio.get_event_loop()
-                if not loop.is_closed():
-                     bot.db.close()
-            except Exception as e:
-                logger.error(f"Erro ao fechar pool de conexões: {e}")

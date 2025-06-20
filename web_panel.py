@@ -1,6 +1,6 @@
 from flask import Flask, jsonify, render_template, request, redirect, url_for, Response
 from threading import Thread
-from main import bot  # Assuming 'bot' object is correctly initialized in main.py
+from main import bot  # Agora importa uma instância de bot não iniciada
 import asyncio
 import datetime
 from datetime import timedelta
@@ -1172,22 +1172,23 @@ def api_get_config():
         web_logger.error(f"Erro em /api/get_config: {e}", exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-def run_flask():
-    """Função para iniciar o servidor Flask."""
+def start_bot():
+    """Inicia o bot Discord em uma thread separada"""
     try:
-        web_logger.info("Iniciando servidor Flask na porta 8080...")
-        app.run(host='0.0.0.0', port=8080, threaded=True, debug=False)
+        web_logger.info("Iniciando bot Discord em thread separada...")
+        
+        # Cria um novo loop de eventos para o bot
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        # Inicia o bot
+        loop.run_until_complete(bot.start(os.getenv('DISCORD_TOKEN')))
     except Exception as e:
-        web_logger.critical(f"Erro CRÍTICO ao iniciar servidor Flask: {e}", exc_info=True)
+        web_logger.critical(f"Erro CRÍTICO ao iniciar bot Discord: {e}", exc_info=True)
         raise
 
-def keep_alive():
-    """Inicia o servidor Flask em uma thread separada."""
-    try:
-        t = Thread(target=run_flask)
-        t.daemon = True
-        t.start()
-        web_logger.info("Thread do painel web iniciada.")
-    except Exception as e:
-        web_logger.critical(f"Erro CRÍTICO ao iniciar thread do web panel: {e}", exc_info=True)
-        raise
+# Inicia o bot Discord em uma thread separada quando o módulo é carregado
+if __name__ != '__main__':
+    bot_thread = Thread(target=start_bot, daemon=True)
+    bot_thread.start()
+    web_logger.info("Thread do bot Discord iniciada.")
