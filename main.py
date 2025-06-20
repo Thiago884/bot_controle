@@ -19,6 +19,9 @@ from collections import defaultdict
 from collections import deque
 from flask import Flask
 import nest_asyncio
+
+nest_asyncio.apply(loop=False)
+
 nest_asyncio.apply()
 
 

@@ -1189,17 +1189,16 @@ def start_bot():
         # Configura o loop para a instância do bot
         bot.loop = loop
         
+        # Desativa nest_asyncio para esta thread
+        nest_asyncio.apply(loop=False)
+        
         # Configura timeout e tentativas de reconexão
         max_attempts = 3
         attempt = 0
         
         while attempt < max_attempts:
             try:
-                # Aumenta o timeout para 30 segundos
-                loop.run_until_complete(asyncio.wait_for(
-                    bot.start(os.getenv('DISCORD_TOKEN')),
-                    timeout=30
-                ))
+                loop.run_until_complete(bot.start(os.getenv('DISCORD_TOKEN')))
                 break
             except (asyncio.TimeoutError, TimeoutError) as e:
                 attempt += 1
@@ -1218,16 +1217,18 @@ def start_bot():
         web_logger.critical(f"Erro CRÍTICO ao iniciar bot Discord: {e}")
         raise
 
-# Inicia o bot Discord em uma thread separada quando o módulo é carregado
+# Modifique a inicialização para:
 if __name__ != '__main__':
     try:
-        # Garante que o loop principal está configurado
+        # Configura o loop principal para o Flask
         loop = asyncio.get_event_loop()
-        if loop.is_closed():
-            asyncio.set_event_loop(asyncio.new_event_loop())
-            
+        
+        # Inicia o bot em uma thread separada
         bot_thread = Thread(target=start_bot, daemon=True)
         bot_thread.start()
         web_logger.info("Thread do bot Discord iniciada.")
+        
+        # Pequeno delay para permitir que o bot inicie
+        time.sleep(2)
     except Exception as e:
         web_logger.error(f"Erro ao iniciar thread do bot: {e}", exc_info=True)
