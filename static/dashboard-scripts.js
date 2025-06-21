@@ -1123,6 +1123,86 @@ async function loadKicksHistory() {
     }
 }
 
+// Carregar histórico de remoção de cargos
+async function loadRoleRemovalsHistory() {
+    try {
+        const removals = await fetchWithErrorHandling('/api/get_role_removals?days=30&limit=50');
+        
+        let html = '';
+        if (removals.removals && removals.removals.length > 0) {
+            removals.removals.forEach(removal => {
+                html += `
+                    <tr>
+                        <td>${removal.user_name || removal.user_id || 'ID desconhecido'}</td>
+                        <td>${removal.removed_roles || 'N/A'}</td>
+                        <td>${removal.removal_date || 'N/A'}</td>
+                        <td>${removal.executed_by || 'Sistema'}</td>
+                    </tr>`;
+            });
+        } else {
+            html = '<tr><td colspan="4" class="text-center">Nenhuma remoção de cargo registrada</td></tr>';
+        }
+        
+        const removalsTable = document.getElementById('role-removals-table');
+        if (removalsTable) {
+            removalsTable.innerHTML = html;
+        }
+    } catch (error) {
+        console.error('Erro ao carregar histórico de remoções de cargo:', error);
+        
+        const removalsTable = document.getElementById('role-removals-table');
+        if (removalsTable) {
+            removalsTable.innerHTML = `
+                <tr><td colspan="4" class="text-center text-danger">Erro ao carregar remoções: ${error.message || 'Erro desconhecido'}</td></tr>`;
+        }
+    }
+}
+
+// Carregar ranking de atividade
+async function loadActivityRanking() {
+    try {
+        const days = document.getElementById('ranking-days')?.value || 7;
+        const limit = document.getElementById('ranking-limit')?.value || 5;
+        
+        const ranking = await fetchWithErrorHandling(`/api/get_ranking?days=${days}&limit=${limit}`);
+        
+        let html = '<div class="list-group">';
+        if (ranking.ranking && ranking.ranking.length > 0) {
+            ranking.ranking.forEach((user, index) => {
+                html += `
+                    <div class="list-group-item d-flex justify-content-between align-items-center">
+                        <div>
+                            <span class="badge bg-primary me-2">${index + 1}</span>
+                            ${user.user_name}
+                        </div>
+                        <div>
+                            <span class="badge bg-success me-2">${user.total_minutes} min</span>
+                            <span class="badge bg-info">${user.active_days} dias</span>
+                        </div>
+                    </div>`;
+            });
+        } else {
+            html += '<div class="list-group-item text-muted">Nenhum dado de ranking disponível</div>';
+        }
+        html += '</div>';
+        
+        const rankingResults = document.getElementById('ranking-results');
+        if (rankingResults) {
+            rankingResults.innerHTML = html;
+        }
+    } catch (error) {
+        console.error('Erro ao carregar ranking:', error);
+        
+        const rankingResults = document.getElementById('ranking-results');
+        if (rankingResults) {
+            rankingResults.innerHTML = `
+                <div class="alert alert-danger">
+                    Erro ao carregar ranking: ${error.message || 'Erro desconhecido'}
+                </div>`;
+        }
+    }
+}
+
 // Funções para executar comandos
 async function runBotCommand(command, data = {}) {
     try {
@@ -1404,6 +1484,18 @@ function setupEventListeners() {
                 }
             });
         }
+        
+        // Novo: Botão para gerar ranking
+        const generateRankingBtn = document.getElementById('generate-ranking-btn');
+        if (generateRankingBtn) {
+            generateRankingBtn.addEventListener('click', loadActivityRanking);
+        }
+        
+        // Novo: Aba de remoções de cargo
+        const roleRemovalsTab = document.getElementById('role-removals-tab');
+        if (roleRemovalsTab) {
+            roleRemovalsTab.addEventListener('click', loadRoleRemovalsHistory);
+        }
     } catch (error) {
         console.error('Erro ao configurar event listeners:', error);
         showToast('Erro ao configurar interações da página: ' + (error.message || 'Erro desconhecido'), 'error');
@@ -1424,6 +1516,8 @@ function initializeDashboard() {
         loadLogs();
         loadConfig();
         loadWarningsHistory();
+        loadRoleRemovalsHistory();
+        loadActivityRanking();
         initCharts();
         setupEventListeners();
         
@@ -1432,6 +1526,7 @@ function initializeDashboard() {
         refreshIntervals.push(setInterval(updateCharts, 30000)); // 30 segundos
         refreshIntervals.push(setInterval(loadRecentEvents, 15000)); // 15 segundos
         refreshIntervals.push(setInterval(loadLogs, 20000)); // 20 segundos
+        refreshIntervals.push(setInterval(loadActivityRanking, 300000)); // 5 minutos
     } catch (error) {
         console.error('Erro ao inicializar dashboard:', error);
         showToast('Erro ao inicializar dashboard: ' + (error.message || 'Erro desconhecido'), 'error');

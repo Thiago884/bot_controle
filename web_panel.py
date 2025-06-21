@@ -56,6 +56,7 @@ def static_files(filename):
 # Tratamento de erro para rotas não encontradas
 @app.errorhandler(404)
 def not_found(error):
+    web_logger.warning(f"Página não encontrada: {request.path}")
     return render_template('error.html', error_message="Página não encontrada"), 404
 
 def basic_auth_required(f):
@@ -63,7 +64,7 @@ def basic_auth_required(f):
     def decorated(*args, **kwargs):
         auth = request.authorization
         if not auth or auth.username != WEB_AUTH_USER or auth.password != WEB_AUTH_PASS:
-            web_logger.warning("Tentativa de acesso não autorizado ao painel web.")
+            web_logger.warning(f"Tentativa de acesso não autorizado ao painel web. IP: {request.remote_addr}")
             return Response(
                 'Acesso não autorizado',
                 401,
@@ -93,15 +94,16 @@ async def safe_db_operation(coro):
     try:
         return await run_coroutine_in_bot_loop(coro)
     except aiomysql.Error as e:
-        web_logger.error(f"Erro de banco de dados: {e}")
+        web_logger.error(f"Erro de banco de dados: {e}", exc_info=True)
         return None
     except Exception as e:
-        web_logger.error(f"Erro inesperado: {e}")
+        web_logger.error(f"Erro inesperado: {e}", exc_info=True)
         return None
 
 def get_main_guild():
     """Obtém a guilda principal do bot"""
     if not hasattr(bot, 'guilds') or not bot.guilds:
+        web_logger.warning("Nenhuma guilda disponível no cache do bot.")
         return None
     return bot.guilds[0]  # Assumindo que o bot está em apenas uma guilda
 
@@ -114,6 +116,7 @@ def check_bot_ready():
         return
     
     if request.path.startswith('/api') and not getattr(bot, 'is_ready', lambda: False)():
+        web_logger.warning(f"Bot não pronto para atender requisição à {request.path}")
         return jsonify({'status': 'error', 'message': 'Bot não está pronto'}), 503
 
 @app.route('/')
@@ -245,13 +248,17 @@ def monitor():
 @basic_auth_required
 def panel_status():
     """Endpoint para verificar o status do painel e do bot"""
-    return jsonify({
-        'status': 'running',
-        'bot_ready': bot.is_ready() if hasattr(bot, 'is_ready') else False,
-        'guild_count': len(bot.guilds) if hasattr(bot, 'guilds') else 0,
-        'last_heartbeat': datetime.datetime.now().isoformat(),
-        'panel_version': '1.0.0'
-    })
+    try:
+        return jsonify({
+            'status': 'running',
+            'bot_ready': bot.is_ready() if hasattr(bot, 'is_ready') else False,
+            'guild_count': len(bot.guilds) if hasattr(bot, 'guilds') else 0,
+            'last_heartbeat': datetime.datetime.now().isoformat(),
+            'panel_version': '1.0.0'
+        })
+    except Exception as e:
+        web_logger.error(f"Erro em /api/panel_status: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/api/system_info')
 @basic_auth_required
@@ -266,7 +273,7 @@ def system_info():
             'uptime': str(datetime.datetime.now() - bot.start_time).split('.')[0] if hasattr(bot, 'start_time') else 'N/A'
         })
     except Exception as e:
-        web_logger.error(f"Erro ao obter informações do sistema: {e}")
+        web_logger.error(f"Erro ao obter informações do sistema: {e}", exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/api/status')
@@ -480,6 +487,7 @@ def update_config():
     try:
         data = request.json
         if not data:
+            web_logger.warning("Tentativa de atualização de configuração sem dados.")
             return jsonify({'status': 'error', 'message': 'Nenhum dado fornecido'}), 400
         
         if not hasattr(bot, 'config') or not bot.config:
@@ -508,8 +516,10 @@ def update_config():
             web_logger.info("Configurações atualizadas e salvas.")
             return jsonify({'status': 'success', 'message': 'Configurações atualizadas com sucesso.'})
         else:
+            web_logger.info("Nenhuma configuração válida para atualizar.")
             return jsonify({'status': 'info', 'message': 'Nenhuma configuração válida para atualizar.'}), 200
     except ValueError:
+        web_logger.warning("Valor de configuração inválido fornecido.")
         return jsonify({'status': 'error', 'message': 'Um ou mais valores de configuração são inválidos (esperado número).'}), 400
     except Exception as e:
         web_logger.error(f"Erro em /api/update_config: {e}", exc_info=True)
@@ -561,11 +571,13 @@ def manage_whitelist():
             target_id_str = data.get('id')
             
             if not all([action, target_type, target_id_str]):
+                web_logger.warning("Parâmetros ausentes na requisição de whitelist.")
                 return jsonify({'status': 'error', 'message': 'Parâmetros ausentes (action, type, id)'}), 400
             
             try:
                 target_id = int(target_id_str)
             except ValueError:
+                web_logger.warning(f"ID inválido fornecido para whitelist: {target_id_str}")
                 return jsonify({'status': 'error', 'message': 'Formato de ID inválido. Deve ser um número inteiro.'}), 400
             
             config_key = None
@@ -574,6 +586,7 @@ def manage_whitelist():
             elif target_type == 'role':
                 config_key = 'roles'
             else:
+                web_logger.warning(f"Tipo de alvo inválido para whitelist: {target_type}")
                 return jsonify({'status': 'error', 'message': 'Tipo de alvo inválido. Deve ser "user" ou "role".'}), 400
 
             if config_key not in bot.config['whitelist']:
@@ -584,14 +597,17 @@ def manage_whitelist():
                     bot.config['whitelist'][config_key].append(target_id)
                     web_logger.info(f"Adicionado {target_type} {target_id} à whitelist.")
                 else:
+                    web_logger.info(f"Tentativa de adicionar {target_type} {target_id} já existente na whitelist.")
                     return jsonify({'status': 'info', 'message': f'ID {target_id} já está na whitelist.'}), 200
             elif action == 'remove':
                 if target_id in bot.config['whitelist'][config_key]:
                     bot.config['whitelist'][config_key].remove(target_id)
                     web_logger.info(f"Removido {target_type} {target_id} da whitelist.")
                 else:
+                    web_logger.info(f"Tentativa de remover {target_type} {target_id} não existente na whitelist.")
                     return jsonify({'status': 'info', 'message': f'ID {target_id} não encontrado na whitelist.'}), 200
             else:
+                web_logger.warning(f"Ação inválida para whitelist: {action}")
                 return jsonify({'status': 'error', 'message': 'Ação inválida. Deve ser "add" ou "remove".'}), 400
             
             run_coroutine_in_bot_loop(bot.save_config())
@@ -708,11 +724,13 @@ def manage_allowed_roles():
             role_id_str = data.get('id')
             
             if not all([action, role_id_str]):
+                web_logger.warning("Parâmetros ausentes na requisição de allowed_roles.")
                 return jsonify({'status': 'error', 'message': 'Parâmetros ausentes (action, id)'}), 400
             
             try:
                 role_id = int(role_id_str)
             except ValueError:
+                web_logger.warning(f"ID de role inválido fornecido: {role_id_str}")
                 return jsonify({'status': 'error', 'message': 'Formato de ID inválido. Deve ser um número inteiro.'}), 400
             
             if not hasattr(bot, 'config'):
@@ -726,14 +744,17 @@ def manage_allowed_roles():
                     bot.config['allowed_roles'].append(role_id)
                     web_logger.info(f"Adicionado role {role_id} aos allowed_roles.")
                 else:
+                    web_logger.info(f"Tentativa de adicionar role {role_id} já existente nos allowed_roles.")
                     return jsonify({'status': 'info', 'message': f'Role {role_id} já está nos allowed_roles.'}), 200
             elif action == 'remove':
                 if role_id in bot.config['allowed_roles']:
                     bot.config['allowed_roles'].remove(role_id)
                     web_logger.info(f"Removido role {role_id} dos allowed_roles.")
                 else:
+                    web_logger.info(f"Tentativa de remover role {role_id} não existente nos allowed_roles.")
                     return jsonify({'status': 'info', 'message': f'Role {role_id} não encontrado nos allowed_roles.'}), 200
             else:
+                web_logger.warning(f"Ação inválida para allowed_roles: {action}")
                 return jsonify({'status': 'error', 'message': 'Ação inválida. Deve ser "add" ou "remove".'}), 400
             
             run_coroutine_in_bot_loop(bot.save_config())
@@ -782,6 +803,7 @@ def run_command():
         command = data.get('command')
         
         if not command:
+            web_logger.warning("Tentativa de executar comando sem especificar o comando.")
             return jsonify({'status': 'error', 'message': 'Nenhum comando especificado'}), 400
         
         async def _run_bot_command():
@@ -839,10 +861,12 @@ def run_command():
 @basic_auth_required
 def get_warnings_history():
     try:
+        page = request.args.get('page', default=1, type=int)
+        per_page = request.args.get('per_page', default=50, type=int)
         days = request.args.get('days', default=30, type=int)
-        limit = request.args.get('limit', default=100, type=int)
         
         if not hasattr(bot, 'guilds') or not bot.guilds:
+            web_logger.warning("Nenhuma guilda disponível para buscar histórico de avisos.")
             return jsonify({'status': 'error', 'message': 'Nenhuma guilda disponível'}), 400
         
         guild_id = bot.guilds[0].id
@@ -850,11 +874,22 @@ def get_warnings_history():
         async def _get_warnings_from_db():
             if not hasattr(bot, 'db') or not bot.db:
                 web_logger.warning("Objeto de banco de dados não disponível para warnings_history.")
-                return []
+                return {'total': 0, 'warnings': []}
                 
             try:
                 async with bot.db.pool.acquire() as conn:
                     async with conn.cursor(aiomysql.DictCursor) as cursor:
+                        # Query para contar o total
+                        count_query = '''
+                            SELECT COUNT(*) as total
+                            FROM user_warnings
+                            WHERE guild_id = %s
+                            AND warning_date >= DATE_SUB(NOW(), INTERVAL %s DAY)
+                        '''
+                        await cursor.execute(count_query, (guild_id, days))
+                        total = (await cursor.fetchone())['total']
+                        
+                        # Query para obter os dados paginados
                         query = '''
                             SELECT 
                                 user_id, 
@@ -864,22 +899,26 @@ def get_warnings_history():
                             WHERE guild_id = %s
                             AND warning_date >= DATE_SUB(NOW(), INTERVAL %s DAY)
                             ORDER BY warning_date DESC
-                            LIMIT %s
+                            LIMIT %s OFFSET %s
                         '''
-                        web_logger.debug(f"Executando query de warnings: {query} com params: {guild_id}, {days}, {limit}")
-                        await cursor.execute(query, (guild_id, days, limit))
+                        offset = (page - 1) * per_page
+                        web_logger.debug(f"Executando query de warnings: {query} com params: {guild_id}, {days}, {per_page}, {offset}")
+                        await cursor.execute(query, (guild_id, days, per_page, offset))
                         
-                        return await cursor.fetchall()
+                        return {
+                            'total': total,
+                            'warnings': await cursor.fetchall()
+                        }
             except Exception as e:
                 web_logger.error(f"Erro de banco de dados em _get_warnings_from_db: {e}", exc_info=True)
-                return []
+                return {'total': 0, 'warnings': []}
         
-        warnings = run_coroutine_in_bot_loop(_get_warnings_from_db())
+        warnings_data = run_coroutine_in_bot_loop(_get_warnings_from_db())
         
         warnings_with_names = []
         guild = bot.guilds[0] if bot.guilds else None
         
-        for warning in warnings:
+        for warning in warnings_data['warnings']:
             member = guild.get_member(warning['user_id']) if guild else None
             user_name = member.display_name if member else f"ID: {warning['user_id']}"
             if not member:
@@ -892,7 +931,16 @@ def get_warnings_history():
                 'warning_date': warning['warning_date'].strftime('%Y-%m-%d %H:%M:%S') if warning['warning_date'] else None
             })
         
-        return jsonify(warnings_with_names)
+        return jsonify({
+            'status': 'success',
+            'warnings': warnings_with_names,
+            'pagination': {
+                'page': page,
+                'per_page': per_page,
+                'total': warnings_data['total'],
+                'total_pages': (warnings_data['total'] + per_page - 1) // per_page
+            }
+        })
     
     except Exception as e:
         web_logger.error(f"Erro em /api/warnings_history: {e}", exc_info=True)
@@ -902,10 +950,12 @@ def get_warnings_history():
 @basic_auth_required
 def get_kicks_history():
     try:
+        page = request.args.get('page', default=1, type=int)
+        per_page = request.args.get('per_page', default=50, type=int)
         days = request.args.get('days', default=30, type=int)
-        limit = request.args.get('limit', default=100, type=int)
         
         if not hasattr(bot, 'guilds') or not bot.guilds:
+            web_logger.warning("Nenhuma guilda disponível para buscar histórico de expulsões.")
             return jsonify({'status': 'error', 'message': 'Nenhuma guilda disponível'}), 400
         
         guild_id = bot.guilds[0].id
@@ -913,32 +963,50 @@ def get_kicks_history():
         async def _get_kicks_from_db():
             if not hasattr(bot, 'db') or not bot.db:
                 web_logger.warning("Objeto de banco de dados não disponível para kicks_history.")
-                return []
+                return {'total': 0, 'kicks': []}
             try:
                 async with bot.db.pool.acquire() as conn:
                     async with conn.cursor(aiomysql.DictCursor) as cursor:
-                        query = '''
-                            SELECT k.user_id, k.kick_date, k.reason
-                            FROM kicked_members k
-                            WHERE k.guild_id = %s
-                            AND k.kick_date >= DATE_SUB(NOW(), INTERVAL %s DAY)
-                            ORDER BY k.kick_date DESC
-                            LIMIT %s
+                        # Query para contar o total
+                        count_query = '''
+                            SELECT COUNT(*) as total
+                            FROM kicked_members
+                            WHERE guild_id = %s
+                            AND kick_date >= DATE_SUB(NOW(), INTERVAL %s DAY)
                         '''
-                        web_logger.debug(f"Executando query de kicks: {query} com params: {guild_id}, {days}, {limit}")
-                        await cursor.execute(query, (guild_id, days, limit))
+                        await cursor.execute(count_query, (guild_id, days))
+                        total = (await cursor.fetchone())['total']
                         
-                        return await cursor.fetchall()
+                        # Query para obter os dados paginados
+                        query = '''
+                            SELECT 
+                                user_id, 
+                                kick_date, 
+                                reason
+                            FROM kicked_members
+                            WHERE guild_id = %s
+                            AND kick_date >= DATE_SUB(NOW(), INTERVAL %s DAY)
+                            ORDER BY kick_date DESC
+                            LIMIT %s OFFSET %s
+                        '''
+                        offset = (page - 1) * per_page
+                        web_logger.debug(f"Executando query de kicks: {query} com params: {guild_id}, {days}, {per_page}, {offset}")
+                        await cursor.execute(query, (guild_id, days, per_page, offset))
+                        
+                        return {
+                            'total': total,
+                            'kicks': await cursor.fetchall()
+                        }
             except Exception as e:
                 web_logger.error(f"Erro de banco de dados em _get_kicks_from_db: {e}", exc_info=True)
-                return []
+                return {'total': 0, 'kicks': []}
         
-        kicks = run_coroutine_in_bot_loop(_get_kicks_from_db())
+        kicks_data = run_coroutine_in_bot_loop(_get_kicks_from_db())
         
         kicks_with_names = []
         guild = bot.guilds[0] if bot.guilds else None
         
-        for kick in kicks:
+        for kick in kicks_data['kicks']:
             member = guild.get_member(kick['user_id']) if guild else None
             user_name = member.display_name if member else f"ID: {kick['user_id']}"
             if not member:
@@ -951,11 +1019,20 @@ def get_kicks_history():
                 'reason': kick['reason']
             })
         
-        return jsonify(kicks_with_names)
+        return jsonify({
+            'status': 'success',
+            'kicks': kicks_with_names,
+            'pagination': {
+                'page': page,
+                'per_page': per_page,
+                'total': kicks_data['total'],
+                'total_pages': (kicks_data['total'] + per_page - 1) // per_page
+            }
+        })
     
     except Exception as e:
         web_logger.error(f"Erro em /api/kicks_history: {e}", exc_info=True)
-        return jsonify({'status': 'error', 'message': f"Erro ao carregar histórico de kicks: {str(e)}"}), 500
+        return jsonify({'status': 'error', 'message': f"Erro ao carregar histórico de expulsões: {str(e)}"}), 500
 
 @app.route('/api/set_inactivity', methods=['POST'])
 @basic_auth_required
@@ -965,6 +1042,7 @@ def api_set_inactivity():
         days = data.get('days')
         
         if not days or not isinstance(days, int) or days <= 0:
+            web_logger.warning(f"Período de monitoramento inválido fornecido: {days}")
             return jsonify({'status': 'error', 'message': 'Período de monitoramento inválido'}), 400
             
         bot.config['monitoring_period'] = days
@@ -986,9 +1064,11 @@ def api_set_requirements():
         days = data.get('days')
         
         if not minutes or not isinstance(minutes, int) or minutes <= 0:
+            web_logger.warning(f"Minutos necessários inválidos fornecidos: {minutes}")
             return jsonify({'status': 'error', 'message': 'Minutos necessários inválidos'}), 400
             
         if not days or not isinstance(days, int) or days <= 0:
+            web_logger.warning(f"Dias necessários inválidos fornecidos: {days}")
             return jsonify({'status': 'error', 'message': 'Dias necessários inválidos'}), 400
             
         bot.config['required_minutes'] = minutes
@@ -1013,6 +1093,7 @@ def api_set_kick_days():
         days = data.get('days')
         
         if not days or not isinstance(days, int) or days <= 0:
+            web_logger.warning(f"Dias para expulsão inválidos fornecidos: {days}")
             return jsonify({'status': 'error', 'message': 'Dias para expulsão inválidos'}), 400
             
         bot.config['kick_after_days'] = days
@@ -1037,19 +1118,23 @@ def api_manage_tracked_roles():
         role_id = data.get('role_id')
         
         if not action or action not in ['add', 'remove']:
+            web_logger.warning(f"Ação inválida para tracked_roles: {action}")
             return jsonify({'status': 'error', 'message': 'Ação inválida'}), 400
             
         if not role_id:
+            web_logger.warning("ID do cargo não fornecido para tracked_roles")
             return jsonify({'status': 'error', 'message': 'ID do cargo é obrigatório'}), 400
             
         # Obter o objeto de guild
         if not hasattr(bot, 'guilds') or not bot.guilds:
+            web_logger.warning("Bot não está em nenhum servidor para gerenciar tracked_roles")
             return jsonify({'status': 'error', 'message': 'Bot não está em nenhum servidor'}), 400
             
         guild = bot.guilds[0]
         role = guild.get_role(int(role_id))
         
         if not role:
+            web_logger.warning(f"Cargo {role_id} não encontrado para tracked_roles")
             return jsonify({'status': 'error', 'message': 'Cargo não encontrado'}), 404
             
         # Executar a ação
@@ -1059,6 +1144,7 @@ def api_manage_tracked_roles():
                 run_coroutine_in_bot_loop(bot.save_config())
                 message = f"Cargo {role.name} adicionado à lista de monitorados."
             else:
+                web_logger.info(f"Cargo {role.id} já está sendo monitorado.")
                 return jsonify({'status': 'info', 'message': 'Este cargo já está sendo monitorado.'}), 200
         else:  # remove
             if role.id in bot.config['tracked_roles']:
@@ -1066,6 +1152,7 @@ def api_manage_tracked_roles():
                 run_coroutine_in_bot_loop(bot.save_config())
                 message = f"Cargo {role.name} removido da lista de monitorados."
             else:
+                web_logger.info(f"Cargo {role.id} não estava sendo monitorado.")
                 return jsonify({'status': 'info', 'message': 'Este cargo não estava sendo monitorado.'}), 200
         
         web_logger.info(f"Cargo {role.name} ({role.id}) {action} via painel web")
@@ -1083,16 +1170,19 @@ def api_set_notification_channel():
         channel_id = data.get('channel_id')
         
         if not channel_id:
+            web_logger.warning("ID do canal não fornecido para notification_channel")
             return jsonify({'status': 'error', 'message': 'ID do canal é obrigatório'}), 400
             
         # Obter o objeto de guild
         if not hasattr(bot, 'guilds') or not bot.guilds:
+            web_logger.warning("Bot não está em nenhum servidor para definir notification_channel")
             return jsonify({'status': 'error', 'message': 'Bot não está em nenhum servidor'}), 400
             
         guild = bot.guilds[0]
         channel = guild.get_channel(int(channel_id))
         
         if not channel or not isinstance(channel, discord.TextChannel):
+            web_logger.warning(f"Canal de texto {channel_id} não encontrado")
             return jsonify({'status': 'error', 'message': 'Canal de texto não encontrado'}), 404
             
         bot.config['notification_channel'] = channel.id
@@ -1117,9 +1207,11 @@ def api_set_warning_days():
         second = data.get('second_warning')
         
         if not first or not second or not isinstance(first, int) or not isinstance(second, int):
+            web_logger.warning(f"Dias de aviso inválidos fornecidos: {first}, {second}")
             return jsonify({'status': 'error', 'message': 'Dias de aviso inválidos'}), 400
             
         if first <= second:
+            web_logger.warning(f"Primeiro aviso ({first}) deve ser antes do segundo ({second})")
             return jsonify({'status': 'error', 'message': 'O primeiro aviso deve ser enviado antes do segundo.'}), 400
             
         bot.config['warnings']['first_warning'] = first
@@ -1144,16 +1236,19 @@ def api_set_absence_channel():
         channel_id = data.get('channel_id')
         
         if not channel_id:
+            web_logger.warning("ID do canal não fornecido para absence_channel")
             return jsonify({'status': 'error', 'message': 'ID do canal é obrigatório'}), 400
             
         # Obter o objeto de guild
         if not hasattr(bot, 'guilds') or not bot.guilds:
+            web_logger.warning("Bot não está em nenhum servidor para definir absence_channel")
             return jsonify({'status': 'error', 'message': 'Bot não está em nenhum servidor'}), 400
             
         guild = bot.guilds[0]
         channel = guild.get_channel(int(channel_id))
         
         if not channel or not isinstance(channel, discord.VoiceChannel):
+            web_logger.warning(f"Canal de voz {channel_id} não encontrado")
             return jsonify({'status': 'error', 'message': 'Canal de voz não encontrado'}), 404
             
         bot.config['absence_channel'] = channel.id
@@ -1174,6 +1269,7 @@ def api_set_absence_channel():
 def api_get_config():
     try:
         if not hasattr(bot, 'config'):
+            web_logger.warning("Configuração do bot não carregada")
             return jsonify({'status': 'error', 'message': 'Configuração não carregada'}), 500
             
         config = {
@@ -1193,6 +1289,262 @@ def api_get_config():
     
     except Exception as e:
         web_logger.error(f"Erro em /api/get_config: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/get_warning_messages', methods=['GET'])
+@basic_auth_required
+def get_warning_messages():
+    try:
+        if not hasattr(bot, 'config') or 'warnings' not in bot.config:
+            web_logger.warning("Configuração de avisos não encontrada")
+            return jsonify({
+                'status': 'error',
+                'message': 'Configuração de avisos não encontrada'
+            }), 404
+            
+        return jsonify({
+            'status': 'success',
+            'messages': bot.config['warnings']
+        })
+    except Exception as e:
+        web_logger.error(f"Erro em /api/get_warning_messages: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/update_warning_message', methods=['POST'])
+@basic_auth_required
+def update_warning_message():
+    try:
+        data = request.json
+        warning_type = data.get('type')
+        message = data.get('message')
+        
+        if not warning_type or not message:
+            web_logger.warning("Tipo ou mensagem de aviso não fornecidos")
+            return jsonify({
+                'status': 'error',
+                'message': 'Tipo e mensagem são obrigatórios'
+            }), 400
+            
+        if not hasattr(bot, 'config'):
+            bot.config = {}
+            
+        if 'warnings' not in bot.config:
+            bot.config['warnings'] = {}
+            
+        bot.config['warnings'][warning_type] = message
+        run_coroutine_in_bot_loop(bot.save_config())
+        
+        web_logger.info(f"Mensagem de aviso {warning_type} atualizada")
+        return jsonify({
+            'status': 'success',
+            'message': 'Mensagem de aviso atualizada com sucesso'
+        })
+    except Exception as e:
+        web_logger.error(f"Erro em /api/update_warning_message: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/get_ranking', methods=['GET'])
+@basic_auth_required
+def get_ranking():
+    try:
+        days = request.args.get('days', default=7, type=int)
+        limit = request.args.get('limit', default=5, type=int)
+        
+        if not hasattr(bot, 'guilds') or not bot.guilds:
+            web_logger.warning("Nenhuma guilda disponível para obter ranking")
+            return jsonify({
+                'status': 'error',
+                'message': 'Nenhuma guilda disponível'
+            }), 400
+            
+        guild_id = bot.guilds[0].id
+        
+        async def _get_ranking_from_db():
+            if not hasattr(bot, 'db') or not bot.db:
+                web_logger.warning("Banco de dados não disponível para ranking")
+                return []
+                
+            try:
+                async with bot.db.pool.acquire() as conn:
+                    async with conn.cursor(aiomysql.DictCursor) as cursor:
+                        query = '''
+                            SELECT 
+                                user_id,
+                                SUM(minutes) as total_minutes,
+                                COUNT(DISTINCT DATE(join_time)) as active_days
+                            FROM voice_activity
+                            WHERE guild_id = %s
+                            AND join_time >= DATE_SUB(NOW(), INTERVAL %s DAY)
+                            GROUP BY user_id
+                            ORDER BY total_minutes DESC, active_days DESC
+                            LIMIT %s
+                        '''
+                        await cursor.execute(query, (guild_id, days, limit))
+                        return await cursor.fetchall()
+            except Exception as e:
+                web_logger.error(f"Erro ao buscar ranking: {e}", exc_info=True)
+                return []
+        
+        ranking = run_coroutine_in_bot_loop(_get_ranking_from_db())
+        
+        # Adicionar nomes de usuário
+        guild = bot.guilds[0]
+        ranking_with_names = []
+        for item in ranking:
+            member = guild.get_member(item['user_id'])
+            ranking_with_names.append({
+                'user_id': str(item['user_id']),
+                'user_name': member.display_name if member else f"ID: {item['user_id']}",
+                'total_minutes': item['total_minutes'],
+                'active_days': item['active_days']
+            })
+        
+        return jsonify({
+            'status': 'success',
+            'ranking': ranking_with_names
+        })
+    except Exception as e:
+        web_logger.error(f"Erro em /api/get_ranking: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/get_role_removals', methods=['GET'])
+@basic_auth_required
+def get_role_removals():
+    try:
+        page = request.args.get('page', default=1, type=int)
+        per_page = request.args.get('per_page', default=50, type=int)
+        days = request.args.get('days', default=30, type=int)
+        
+        if not hasattr(bot, 'guilds') or not bot.guilds:
+            web_logger.warning("Nenhuma guilda disponível para obter remoções de cargos")
+            return jsonify({
+                'status': 'error',
+                'message': 'Nenhuma guilda disponível'
+            }), 400
+            
+        guild_id = bot.guilds[0].id
+        
+        async def _get_role_removals_from_db():
+            if not hasattr(bot, 'db') or not bot.db:
+                web_logger.warning("Banco de dados não disponível para remoções de cargos")
+                return {'total': 0, 'removals': []}
+                
+            try:
+                async with bot.db.pool.acquire() as conn:
+                    async with conn.cursor(aiomysql.DictCursor) as cursor:
+                        # Query para contar o total
+                        count_query = '''
+                            SELECT COUNT(*) as total
+                            FROM role_removals
+                            WHERE guild_id = %s
+                            AND removal_date >= DATE_SUB(NOW(), INTERVAL %s DAY)
+                        '''
+                        await cursor.execute(count_query, (guild_id, days))
+                        total = (await cursor.fetchone())['total']
+                        
+                        # Query para obter os dados paginados
+                        query = '''
+                            SELECT 
+                                user_id,
+                                removed_roles,
+                                removal_date,
+                                executed_by
+                            FROM role_removals
+                            WHERE guild_id = %s
+                            AND removal_date >= DATE_SUB(NOW(), INTERVAL %s DAY)
+                            ORDER BY removal_date DESC
+                            LIMIT %s OFFSET %s
+                        '''
+                        offset = (page - 1) * per_page
+                        await cursor.execute(query, (guild_id, days, per_page, offset))
+                        
+                        return {
+                            'total': total,
+                            'removals': await cursor.fetchall()
+                        }
+            except Exception as e:
+                web_logger.error(f"Erro ao buscar remoções de cargo: {e}", exc_info=True)
+                return {'total': 0, 'removals': []}
+        
+        removals_data = run_coroutine_in_bot_loop(_get_role_removals_from_db())
+        
+        # Adicionar nomes de usuário
+        guild = bot.guilds[0]
+        removals_with_names = []
+        for item in removals_data['removals']:
+            member = guild.get_member(item['user_id'])
+            executed_by = guild.get_member(item['executed_by'])
+            
+            removals_with_names.append({
+                'user_id': str(item['user_id']),
+                'user_name': member.display_name if member else f"ID: {item['user_id']}",
+                'removed_roles': item['removed_roles'],
+                'removal_date': item['removal_date'].strftime('%Y-%m-%d %H:%M:%S') if item['removal_date'] else None,
+                'executed_by': executed_by.display_name if executed_by else f"ID: {item['executed_by']}"
+            })
+        
+        return jsonify({
+            'status': 'success',
+            'removals': removals_with_names,
+            'pagination': {
+                'page': page,
+                'per_page': per_page,
+                'total': removals_data['total'],
+                'total_pages': (removals_data['total'] + per_page - 1) // per_page
+            }
+        })
+    except Exception as e:
+        web_logger.error(f"Erro em /api/get_role_removals: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/export_report', methods=['POST'])
+@basic_auth_required
+def export_report():
+    try:
+        # Simulação de geração de relatório - implementação real dependerá dos seus requisitos
+        report_data = {
+            'status': 'success',
+            'message': 'Relatório gerado com sucesso',
+            'download_url': '/api/download_report'
+        }
+        web_logger.info("Relatório de inatividade gerado com sucesso")
+        return jsonify(report_data)
+    except Exception as e:
+        web_logger.error(f"Erro em /api/export_report: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/download_report', methods=['GET'])
+@basic_auth_required
+def download_report():
+    try:
+        # Simulação de download - implementação real dependerá dos seus requisitos
+        from flask import send_file
+        from io import BytesIO
+        import pandas as pd
+        
+        # Criar um DataFrame de exemplo
+        data = {
+            'Metric': ['Total de Membros', 'Membros Ativos', 'Membros Inativos', 'Avisos Enviados', 'Expulsões'],
+            'Value': [100, 75, 25, 10, 2]
+        }
+        df = pd.DataFrame(data)
+        
+        # Criar um arquivo Excel em memória
+        output = BytesIO()
+        writer = pd.ExcelWriter(output, engine='xlsxwriter')
+        df.to_excel(writer, sheet_name='Relatório', index=False)
+        writer.save()
+        output.seek(0)
+        
+        web_logger.info("Download de relatório de inatividade solicitado")
+        return send_file(
+            output,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True,
+            download_name='relatorio_inatividade.xlsx'
+        )
+    except Exception as e:
+        web_logger.error(f"Erro em /api/download_report: {e}", exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 async def run_bot_async():
