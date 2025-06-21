@@ -349,3 +349,17 @@
         margin-bottom: 15px;
     }
 }
+/* Adicione ao seu CSS */
+.btn-action {
+    transition: all 0.3s ease;
+}
+
+.btn-action:disabled {
+    opacity: 0.7;
+    cursor: not-allowed;
+}
+
+.loading-spinner {
+    display: none;
+    margin-right: 5px;
+}

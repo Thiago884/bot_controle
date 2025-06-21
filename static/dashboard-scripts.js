@@ -69,27 +69,20 @@ function showToast(message, type = 'info') {
 
 // Função para alternar o estado de carregamento de um botão
 function toggleLoading(buttonId, isLoading) {
-    try {
-        const button = document.getElementById(buttonId);
-        if (!button) {
-            console.error(`Botão com ID ${buttonId} não encontrado`);
-            return;
-        }
-        
-        const spinner = button.querySelector('.loading-spinner');
-        const icon = button.querySelector('i');
-        
-        if (isLoading) {
-            if (spinner) spinner.style.display = 'inline-block';
-            if (icon) icon.style.display = 'none';
-            button.disabled = true;
-        } else {
-            if (spinner) spinner.style.display = 'none';
-            if (icon) icon.style.display = 'inline-block';
-            button.disabled = false;
-        }
-    } catch (error) {
-        console.error('Erro ao alternar estado de carregamento:', error);
+    const button = document.getElementById(buttonId);
+    if (!button) return;
+
+    const spinner = button.querySelector('.loading-spinner');
+    const icon = button.querySelector('i');
+
+    if (isLoading) {
+        button.disabled = true;
+        if (spinner) spinner.style.display = 'inline-block';
+        if (icon) icon.style.display = 'none';
+    } else {
+        button.disabled = false;
+        if (spinner) spinner.style.display = 'none';
+        if (icon) icon.style.display = 'inline-block';
     }
 }
 
@@ -1333,6 +1326,137 @@ async function saveWarningSettings() {
     }
 }
 
+// Função para executar comandos do bot
+async function handleBotCommands() {
+    // Sincronizar Comandos
+    document.getElementById('sync-commands-btn').addEventListener('click', async () => {
+        try {
+            toggleLoading('sync-commands-btn', true);
+            const result = await runBotCommand('sync_commands');
+            if (result && result.status === 'success') {
+                showToast('Comandos sincronizados com sucesso!', 'success');
+            }
+        } finally {
+            toggleLoading('sync-commands-btn', false);
+        }
+    });
+
+    // Limpar Dados Antigos
+    document.getElementById('cleanup-data-btn').addEventListener('click', async () => {
+        const days = prompt('Quantos dias de dados você deseja manter?', '60');
+        if (days) {
+            try {
+                toggleLoading('cleanup-data-btn', true);
+                const result = await runBotCommand('cleanup_data', { days: parseInt(days) || 60 });
+                if (result && result.status === 'success') {
+                    showToast(`Dados antigos (acima de ${days} dias) foram limpos!`, 'success');
+                }
+            } finally {
+                toggleLoading('cleanup-data-btn', false);
+            }
+        }
+    });
+
+    // Verificar Inatividade
+    document.getElementById('force-check-btn').addEventListener('click', async () => {
+        const userId = document.getElementById('force-check-user').value;
+        if (!userId) {
+            showToast('Por favor, insira um ID de usuário válido', 'warning');
+            return;
+        }
+
+        try {
+            toggleLoading('force-check-btn', true);
+            const result = await runBotCommand('force_check', { member_id: userId });
+            if (result && result.status === 'success') {
+                showToast(`Verificação de inatividade executada para o usuário ${userId}`, 'success');
+                
+                // Mostrar modal com resultados
+                const modal = new bootstrap.Modal(document.getElementById('forceCheckResultModal'));
+                const modalBody = document.getElementById('forceCheckResultModalBody');
+                modalBody.innerHTML = `
+                    <h5>Resultado da Verificação</h5>
+                    <pre>${JSON.stringify(result.result, null, 2)}</pre>
+                `;
+                modal.show();
+            }
+        } finally {
+            toggleLoading('force-check-btn', false);
+        }
+    });
+
+    // Configurar Avisos
+    document.getElementById('set-warning-days-btn').addEventListener('click', async () => {
+        const firstWarningDays = document.getElementById('first-warning-days').value;
+        const secondWarningDays = document.getElementById('second-warning-days').value;
+
+        if (!firstWarningDays || !secondWarningDays) {
+            showToast('Por favor, preencha ambos os campos de dias', 'warning');
+            return;
+        }
+
+        try {
+            toggleLoading('set-warning-days-btn', true);
+            await fetchWithErrorHandling('/api/warning_settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    first_warning: firstWarningDays,
+                    second_warning: secondWarningDays
+                })
+            });
+            showToast('Configurações de aviso atualizadas!', 'success');
+        } finally {
+            toggleLoading('set-warning-days-btn', false);
+        }
+    });
+
+    // Editar Mensagem de Aviso
+    document.getElementById('edit-warning-message-btn').addEventListener('click', async () => {
+        const warningType = document.getElementById('warning-type-select').value;
+        const modal = new bootstrap.Modal(document.getElementById('warningMessageModal'));
+        
+        // Carregar mensagem atual
+        try {
+            const settings = await fetchWithErrorHandling('/api/warning_settings');
+            document.getElementById('warning-message-text').value = 
+                settings.messages[`${warningType}_warning`] || '';
+            
+            document.getElementById('warningMessageModalTitle').textContent = 
+                `Editar Mensagem de ${warningType === 'first' ? 'Primeiro' : 
+                 warningType === 'second' ? 'Segundo' : 'Aviso Final'}`;
+            
+            modal.show();
+        } catch (error) {
+            console.error('Erro ao cargar mensagem:', error);
+            showToast('Erro ao carregar mensagem', 'error');
+        }
+    });
+
+    // Salvar Mensagem de Aviso
+    document.getElementById('save-warning-message').addEventListener('click', async () => {
+        const warningType = document.getElementById('warning-type-select').value;
+        const message = document.getElementById('warning-message-text').value;
+
+        try {
+            toggleLoading('save-warning-message', true);
+            await fetchWithErrorHandling('/api/warning_settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    message_type: `${warningType}_warning`,
+                    message_content: message
+                })
+            });
+            
+            showToast('Mensagem de aviso salva!', 'success');
+            bootstrap.Modal.getInstance(document.getElementById('warningMessageModal')).hide();
+        } finally {
+            toggleLoading('save-warning-message', false);
+        }
+    });
+}
+
 // Configurar eventos dos botões
 function setupEventListeners() {
     try {
@@ -1520,6 +1644,7 @@ function initializeDashboard() {
         loadActivityRanking();
         initCharts();
         setupEventListeners();
+        handleBotCommands(); // Adicionado para inicializar os comandos do bot
         
         // Configurar atualizações periódicas
         refreshIntervals.push(setInterval(loadSystemStatus, 10000)); // 10 segundos
