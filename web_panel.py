@@ -2,7 +2,7 @@ from gevent import monkey
 monkey.patch_all()
 import nest_asyncio
 nest_asyncio.apply()
-from flask import Flask, jsonify, render_template, request, redirect, url_for, Response
+from flask import Flask, jsonify, render_template, request, redirect, url_for, Response, send_from_directory
 from threading import Thread
 from main import bot
 import asyncio
@@ -37,7 +37,8 @@ console_handler = logging.StreamHandler()
 console_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
 web_logger.addHandler(console_handler)
 
-app = Flask(__name__)
+# Configure o diretório de templates
+app = Flask(__name__, template_folder='templates')
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
 # Configuração de autenticação
@@ -46,6 +47,16 @@ WEB_AUTH_PASS = os.getenv('WEB_AUTH_PASS', 'admin123')
 
 # Variável global para controlar o estado do bot
 bot_running = False
+
+# Rota para servir arquivos estáticos
+@app.route('/static/<path:filename>')
+def static_files(filename):
+    return send_from_directory('static', filename)
+
+# Tratamento de erro para rotas não encontradas
+@app.errorhandler(404)
+def not_found(error):
+    return render_template('error.html', error_message="Página não encontrada"), 404
 
 def basic_auth_required(f):
     @wraps(f)
@@ -94,14 +105,16 @@ def get_main_guild():
         return None
     return bot.guilds[0]  # Assumindo que o bot está em apenas uma guilda
 
+# Verifique se o bot está realmente pronto
 @app.before_request
 def check_bot_ready():
-    """Verifica se o bot está pronto antes de processar requisições"""
-    if request.endpoint in ['static', 'panel_status']:
+    if request.path.startswith('/static'):
+        return
+    if request.endpoint == 'panel_status':
         return
     
-    if not hasattr(bot, 'is_ready') or not bot.is_ready():
-        return jsonify({'status': 'error', 'message': 'Bot ainda não está pronto'}), 503
+    if request.path.startswith('/api') and not getattr(bot, 'is_ready', lambda: False)():
+        return jsonify({'status': 'error', 'message': 'Bot não está pronto'}), 503
 
 @app.route('/')
 @basic_auth_required
@@ -1223,7 +1236,13 @@ if __name__ != '__main__':
     run_app()
 
 if __name__ == '__main__':
-    # Para execução local durante o desenvolvimento
+    # Crie a pasta static se não existir
+    os.makedirs('static', exist_ok=True)
+    os.makedirs('templates', exist_ok=True)
+    
+    # Inicie o bot e o servidor web
     bot_thread = Thread(target=start_bot, daemon=True)
     bot_thread.start()
-    app.run(host='0.0.0.0', port=8080)
+    
+    # Use o servidor de desenvolvimento do Flask para depuração
+    app.run(host='0.0.0.0', port=8080, debug=True)
