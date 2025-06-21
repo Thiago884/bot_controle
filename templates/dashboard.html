@@ -6,7 +6,7 @@
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.8.1/font/bootstrap-icons.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <link rel="stylesheet" href="static/dashboard-styles.css">
-    <link rel="icon" href="data:,"> <!-- Isso evita a requisição do favicon -->
+    <link rel="icon" href="data:,">
 </head>
 <body>
     <!-- Container de Toast para notificações -->
@@ -117,6 +117,31 @@
                     </div>
                 </div>
 
+                <!-- Cargos Monitorados -->
+                <div class="card">
+                    <div class="card-header">
+                        <i class="bi bi-eye"></i> Cargos Monitorados
+                    </div>
+                    <div class="card-body">
+                        <div id="tracked-roles-list">
+                            <div class="spinner-border spinner-border-sm" role="status">
+                                <span class="visually-hidden">Carregando...</span>
+                            </div>
+                        </div>
+                        <div class="input-group mt-2">
+                            <input type="text" class="form-control" id="tracked-role-id" placeholder="ID do Cargo">
+                            <button class="btn btn-success" id="add-tracked-role">
+                                <span class="spinner-border spinner-border-sm loading-spinner" id="add-tracked-role-spinner"></span>
+                                <i class="bi bi-plus" id="add-tracked-role-icon"></i>
+                            </button>
+                        </div>
+                        <div class="form-text">Insira o ID do cargo e clique em +</div>
+                        <button class="btn btn-primary mt-2 w-100" id="check-tracked-roles">
+                            <i class="bi bi-search"></i> Verificar Todos os Membros
+                        </button>
+                    </div>
+                </div>
+
                 <!-- Status das Tarefas -->
                 <div class="card">
                     <div class="card-header">
@@ -203,6 +228,29 @@
                                 </div>
                             </div>
                         </div>
+                        <div class="row mt-2">
+                            <div class="col-md-6">
+                                <div class="input-group mb-2">
+                                    <input type="number" class="form-control" id="first-warning-days" placeholder="Primeiro aviso (dias)">
+                                    <input type="number" class="form-control" id="second-warning-days" placeholder="Segundo aviso (dias)">
+                                    <button class="btn btn-info" id="set-warning-days-btn">
+                                        <i class="bi bi-save"></i> Salvar Avisos
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="input-group mb-2">
+                                    <select class="form-select" id="warning-type-select">
+                                        <option value="first">Primeiro Aviso</option>
+                                        <option value="second">Segundo Aviso</option>
+                                        <option value="final">Aviso Final</option>
+                                    </select>
+                                    <button class="btn btn-info" id="edit-warning-message-btn">
+                                        <i class="bi bi-pencil"></i> Editar Mensagem
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
                 
@@ -218,6 +266,9 @@
                             </li>
                             <li class="nav-item" role="presentation">
                                 <button class="nav-link" id="logs-tab" data-bs-toggle="tab" data-bs-target="#logs" type="button" role="tab">Logs</button>
+                            </li>
+                            <li class="nav-item" role="presentation">
+                                <button class="nav-link" id="ranking-tab" data-bs-toggle="tab" data-bs-target="#ranking" type="button" role="tab">Ranking</button>
                             </li>
                         </ul>
                     </div>
@@ -265,6 +316,29 @@
                                     </div>
                                 </div>
                             </div>
+                            <div class="tab-pane fade" id="ranking" role="tabpanel">
+                                <div class="row mb-3">
+                                    <div class="col-md-4">
+                                        <input type="number" class="form-control" id="ranking-days" value="7" min="1" max="30" placeholder="Dias">
+                                    </div>
+                                    <div class="col-md-4">
+                                        <input type="number" class="form-control" id="ranking-limit" value="5" min="3" max="10" placeholder="Limite">
+                                    </div>
+                                    <div class="col-md-4">
+                                        <button class="btn btn-primary w-100" id="generate-ranking-btn">
+                                            <i class="bi bi-graph-up"></i> Gerar Ranking
+                                        </button>
+                                    </div>
+                                </div>
+                                <div id="ranking-results">
+                                    <div class="text-center py-4">
+                                        <div class="spinner-border text-primary" role="status">
+                                            <span class="visually-hidden">Carregando...</span>
+                                        </div>
+                                        <p class="mt-2">Clique em "Gerar Ranking" para exibir os resultados</p>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -282,6 +356,9 @@
                             <li class="nav-item" role="presentation">
                                 <button class="nav-link" id="kicks-tab" data-bs-toggle="tab" data-bs-target="#kicks" type="button">Expulsões</button>
                             </li>
+                            <li class="nav-item" role="presentation">
+                                <button class="nav-link" id="role-removals-tab" data-bs-toggle="tab" data-bs-target="#role-removals" type="button">Remoções de Cargo</button>
+                            </li>
                         </ul>
                         <div class="tab-content mt-3" id="historyTabContent">
                             <div class="tab-pane fade show active" id="warnings" role="tabpanel">
@@ -292,11 +369,12 @@
                                                 <th>Usuário</th>
                                                 <th>Tipo</th>
                                                 <th>Data</th>
+                                                <th>Mensagem</th>
                                             </tr>
                                         </thead>
                                         <tbody id="warnings-table">
                                             <tr>
-                                                <td colspan="3" class="text-center">
+                                                <td colspan="4" class="text-center">
                                                     <div class="spinner-border text-primary" role="status">
                                                         <span class="visually-hidden">Carregando...</span>
                                                     </div>
@@ -319,6 +397,29 @@
                                         <tbody id="kicks-table">
                                             <tr>
                                                 <td colspan="3" class="text-center">
+                                                    <div class="spinner-border text-primary" role="status">
+                                                        <span class="visually-hidden">Carregando...</span>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                            <div class="tab-pane fade" id="role-removals" role="tabpanel">
+                                <div class="table-responsive">
+                                    <table class="table table-hover">
+                                        <thead>
+                                            <tr>
+                                                <th>Usuário</th>
+                                                <th>Cargos Removidos</th>
+                                                <th>Data</th>
+                                                <th>Executado por</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="role-removals-table">
+                                            <tr>
+                                                <td colspan="4" class="text-center">
                                                     <div class="spinner-border text-primary" role="status">
                                                         <span class="visually-hidden">Carregando...</span>
                                                     </div>
@@ -443,6 +544,51 @@
                     <button type="button" class="btn btn-primary" id="refresh-guild-details">
                         <i class="bi bi-arrow-repeat"></i> Atualizar
                     </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Editor de Mensagens de Aviso (modal) -->
+    <div class="modal fade" id="warningMessageModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="warningMessageModalTitle">Editar Mensagem de Aviso</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label for="warning-message-text" class="form-label">Mensagem:</label>
+                        <textarea class="form-control" id="warning-message-text" rows="6"></textarea>
+                        <div class="form-text">Variáveis disponíveis: {user}, {days}, {required_minutes}, {required_days}</div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+                    <button type="button" class="btn btn-primary" id="save-warning-message">Salvar</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Resultado da Verificação (modal) -->
+    <div class="modal fade" id="forceCheckResultModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="forceCheckResultModalTitle">Resultado da Verificação</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body" id="forceCheckResultModalBody">
+                    <div class="text-center py-4">
+                        <div class="spinner-border text-primary" role="status">
+                            <span class="visually-hidden">Carregando...</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Fechar</button>
                 </div>
             </div>
         </div>

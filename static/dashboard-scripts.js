@@ -1154,6 +1154,105 @@ async function runBotCommand(command, data = {}) {
     }
 }
 
+// Carregar cargos monitorados
+async function loadTrackedRoles() {
+    try {
+        const data = await fetchWithErrorHandling('/api/tracked_roles');
+        
+        // Preencher select
+        const select = document.getElementById('tracked-roles-select');
+        if (select) {
+            select.innerHTML = '<option selected>Selecione um cargo...</option>';
+            data.available_roles.forEach(role => {
+                select.innerHTML += `<option value="${role.id}">${role.name}</option>`;
+            });
+        }
+        
+        // Listar cargos monitorados
+        const listContainer = document.getElementById('tracked-roles-list');
+        if (listContainer) {
+            if (data.tracked_roles.length > 0) {
+                let html = '<ul class="list-group">';
+                data.tracked_roles.forEach(role => {
+                    html += `
+                        <li class="list-group-item d-flex justify-content-between align-items-center">
+                            ${role.name}
+                            <span class="badge bg-primary rounded-pill">
+                                ${role.member_count} membros
+                            </span>
+                        </li>`;
+                });
+                html += '</ul>';
+                listContainer.innerHTML = html;
+            } else {
+                listContainer.innerHTML = '<p class="text-muted">Nenhum cargo sendo monitorado</p>';
+            }
+        }
+    } catch (error) {
+        console.error('Erro ao carregar cargos monitorados:', error);
+        showToast('Erro ao carregar cargos monitorados', 'error');
+    }
+}
+
+// Gerenciar cargos monitorados
+async function updateTrackedRoles(action, roleId) {
+    try {
+        await fetchWithErrorHandling('/api/tracked_roles', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action, role_id: roleId })
+        });
+        
+        await loadTrackedRoles();
+        showToast(`Cargo ${action === 'add' ? 'adicionado' : 'removido'} com sucesso!`, 'success');
+    } catch (error) {
+        console.error(`Erro ao ${action} cargo monitorado:`, error);
+        showToast(`Erro ao ${action} cargo monitorado`, 'error');
+    }
+}
+
+// Carregar configurações de avisos
+async function loadWarningSettings() {
+    try {
+        const settings = await fetchWithErrorHandling('/api/warning_settings');
+        
+        document.getElementById('first-warning-days').value = settings.first_warning || '';
+        document.getElementById('second-warning-days').value = settings.second_warning || '';
+        
+        // Carregar mensagens
+        const messageTypeSelect = document.getElementById('warning-message-type');
+        if (messageTypeSelect) {
+            messageTypeSelect.addEventListener('change', function() {
+                document.getElementById('warning-message-content').value = 
+                    settings.messages[this.value] || '';
+            });
+        }
+    } catch (error) {
+        console.error('Erro ao carregar configurações de aviso:', error);
+    }
+}
+
+// Salvar configurações de avisos
+async function saveWarningSettings() {
+    try {
+        await fetchWithErrorHandling('/api/warning_settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                first_warning: document.getElementById('first-warning-days').value,
+                second_warning: document.getElementById('second-warning-days').value,
+                message_type: document.getElementById('warning-message-type').value,
+                message_content: document.getElementById('warning-message-content').value
+            })
+        });
+        
+        showToast('Configurações de aviso salvas!', 'success');
+    } catch (error) {
+        console.error('Erro ao salvar configurações de aviso:', error);
+        showToast('Erro ao salvar configurações de aviso', 'error');
+    }
+}
+
 // Configurar eventos dos botões
 function setupEventListeners() {
     try {
@@ -1191,6 +1290,35 @@ function setupEventListeners() {
                     updateAllowedRoles('add', roleId);
                 } else {
                     showToast('Por favor, insira um ID de cargo válido', 'warning');
+                }
+            });
+        }
+        
+        // Cargos monitorados
+        const addTrackedRoleBtn = document.getElementById('add-tracked-role');
+        if (addTrackedRoleBtn) {
+            addTrackedRoleBtn.addEventListener('click', () => {
+                const roleId = document.getElementById('tracked-role-id')?.value;
+                if (roleId) {
+                    updateTrackedRoles('add', roleId);
+                } else {
+                    showToast('Por favor, insira um ID de cargo válido', 'warning');
+                }
+            });
+        }
+        
+        // Configurações de avisos
+        const saveWarningSettingsBtn = document.getElementById('save-warning-settings');
+        if (saveWarningSettingsBtn) {
+            saveWarningSettingsBtn.addEventListener('click', saveWarningSettings);
+        }
+        
+        // Verificar todos os membros
+        const checkTrackedRolesBtn = document.getElementById('check-tracked-roles');
+        if (checkTrackedRolesBtn) {
+            checkTrackedRolesBtn.addEventListener('click', () => {
+                if (confirm('Deseja verificar todos os membros com cargos monitorados agora?')) {
+                    runBotCommand('check_all_tracked_roles');
                 }
             });
         }
@@ -1290,6 +1418,8 @@ function initializeDashboard() {
         loadGuilds();
         loadWhitelist();
         loadAllowedRoles();
+        loadTrackedRoles();
+        loadWarningSettings();
         loadRecentEvents();
         loadLogs();
         loadConfig();

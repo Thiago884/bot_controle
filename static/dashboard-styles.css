@@ -80,6 +80,17 @@
     align-items: center;
     padding: 8px 0;
     border-bottom: 1px solid #eee;
+    transition: background-color 0.2s;
+}
+.whitelist-item:hover {
+    background-color: #f8f9fa;
+}
+.whitelist-item button {
+    opacity: 0;
+    transition: opacity 0.2s;
+}
+.whitelist-item:hover button {
+    opacity: 1;
 }
 .badge-queue {
     margin-right: 5px;
@@ -95,6 +106,14 @@
 }
 .btn-action {
     min-width: 100px;
+    transition: all 0.2s;
+}
+.btn-action:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+}
+.btn-action:active {
+    transform: translateY(0);
 }
 #toast-container {
     position: fixed;
@@ -114,6 +133,16 @@
 .history-table {
     max-height: 400px;
     overflow-y: auto;
+    font-size: 0.9rem;
+}
+.history-table th {
+    position: sticky;
+    top: 0;
+    background-color: white;
+    z-index: 10;
+}
+.history-table tbody tr:last-child {
+    border-bottom: 1px solid #dee2e6;
 }
 .command-btn {
     margin-bottom: 10px;
@@ -155,6 +184,17 @@
 }
 .modal-footer {
     justify-content: space-between;
+    border-top: 1px solid #eee;
+}
+.modal-body {
+    padding: 25px;
+}
+.modal-content {
+    border: none;
+    box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+}
+.modal-header {
+    border-bottom: 1px solid #eee;
 }
 .guild-stats-grid {
     display: grid;
@@ -185,4 +225,127 @@
     border-bottom: 1px solid #eee;
     padding-bottom: 8px;
     margin-bottom: 15px;
+}
+.status-card {
+    border-left: 4px solid #0d6efd;
+}
+.status-card.operational {
+    border-left-color: #28a745;
+}
+.status-card.error {
+    border-left-color: #dc3545;
+}
+.status-card.warning {
+    border-left-color: #ffc107;
+}
+.loading-placeholder {
+    min-height: 100px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background-color: #f8f9fa;
+    border-radius: 5px;
+    margin: 10px 0;
+}
+.spinner-border {
+    width: 1.5rem;
+    height: 1.5rem;
+    border-width: 0.2em;
+}
+#ranking-results {
+    max-height: 400px;
+    overflow-y: auto;
+    padding: 15px;
+    background-color: #f8f9fa;
+    border-radius: 5px;
+}
+.ranking-item {
+    display: flex;
+    justify-content: space-between;
+    padding: 10px;
+    margin-bottom: 8px;
+    background-color: white;
+    border-radius: 4px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+.ranking-position {
+    font-weight: bold;
+    color: #2c3e50;
+    margin-right: 10px;
+}
+.ranking-user {
+    flex-grow: 1;
+}
+.ranking-value {
+    font-weight: bold;
+    color: #28a745;
+}
+.form-control:focus, .form-select:focus {
+    border-color: #86b7fe;
+    box-shadow: 0 0 0 0.25rem rgba(13, 110, 253, 0.25);
+}
+.input-group-text {
+    background-color: #f8f9fa;
+}
+.chartjs-tooltip {
+    background-color: rgba(0, 0, 0, 0.7);
+    border-radius: 3px;
+    color: white;
+    padding: 5px 10px;
+    font-size: 12px;
+}
+.chartjs-tooltip-key {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    margin-right: 5px;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+    .guild-stats-grid {
+        grid-template-columns: 1fr 1fr;
+    }
+    
+    .card-body {
+        padding: 15px;
+    }
+    
+    .modal-dialog {
+        margin: 0.5rem;
+    }
+    
+    .config-input {
+        max-width: none;
+        width: 100%;
+    }
+}
+
+@media (max-width: 576px) {
+    .guild-stats-grid {
+        grid-template-columns: 1fr;
+    }
+    
+    .btn-action {
+        width: 100%;
+        margin-bottom: 10px;
+    }
+    
+    .input-group {
+        flex-wrap: wrap;
+    }
+    
+    .input-group > .form-control {
+        margin-bottom: 5px;
+    }
+    
+    .guild-header {
+        flex-direction: column;
+        text-align: center;
+    }
+    
+    .guild-modal-icon {
+        margin-right: 0;
+        margin-bottom: 15px;
+    }
 }
