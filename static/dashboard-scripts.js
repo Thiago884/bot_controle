@@ -3,13 +3,27 @@ let activityChart, usageChart;
 let refreshIntervals = [];
 let currentGuildId = null;
 
+// Verificar se Chart.js está carregado
+if (typeof Chart === 'undefined') {
+    console.error('Chart.js não foi carregado corretamente');
+    document.addEventListener('DOMContentLoaded', function() {
+        showToast('Erro ao carregar biblioteca de gráficos', 'error');
+    });
+}
+
 // Função para mostrar toast (notificação)
 function showToast(message, type = 'info') {
     try {
-        const toastContainer = document.getElementById('toast-container');
+        let toastContainer = document.getElementById('toast-container');
         if (!toastContainer) {
-            console.error('Toast container não encontrado');
-            return;
+            console.warn('Toast container não encontrado, criando novo container');
+            toastContainer = document.createElement('div');
+            toastContainer.id = 'toast-container';
+            toastContainer.style.position = 'fixed';
+            toastContainer.style.top = '20px';
+            toastContainer.style.right = '20px';
+            toastContainer.style.zIndex = '9999';
+            document.body.appendChild(toastContainer);
         }
         
         const toastId = 'toast-' + Date.now();
@@ -79,28 +93,39 @@ function toggleLoading(buttonId, isLoading) {
     }
 }
 
+// Função auxiliar para chamadas API com tratamento de erros
+async function fetchWithErrorHandling(url, options = {}) {
+    try {
+        const response = await fetch(url, options);
+        
+        if (!response.ok) {
+            let errorData;
+            try {
+                errorData = await response.json();
+            } catch {
+                errorData = { error: `HTTP error! status: ${response.status}` };
+            }
+            throw new Error(errorData.error || `Erro na requisição: ${response.status}`);
+        }
+        
+        return await response.json();
+    } catch (error) {
+        console.error('Erro na requisição:', error);
+        showToast('Erro ao comunicar com o servidor', 'error');
+        throw error;
+    }
+}
+
 // Carregar configurações atuais
 async function loadConfig() {
     try {
-        const response = await fetch('/api/guilds');
-        if (!response.ok) {
-            const errorData = await response.json().catch(() => ({}));
-            throw new Error(errorData.error || `Erro ao carregar guildas: ${response.status}`);
-        }
-        
-        const guilds = await response.json();
+        const guilds = await fetchWithErrorHandling('/api/guilds');
         if (!Array.isArray(guilds)) {
             throw new Error('Resposta inválida do servidor: guilds não é um array');
         }
 
         if (guilds.length > 0) {
-            const guildResponse = await fetch(`/api/guild/${guilds[0].id}`);
-            if (!guildResponse.ok) {
-                const errorData = await guildResponse.json().catch(() => ({}));
-                throw new Error(errorData.error || `Erro ao carregar configurações: ${guildResponse.status}`);
-            }
-            
-            const config = await guildResponse.json();
+            const config = await fetchWithErrorHandling(`/api/guild/${guilds[0].id}`);
             if (!config || !config.config) {
                 throw new Error('Configurações inválidas retornadas pelo servidor');
             }
@@ -135,13 +160,7 @@ async function loadConfig() {
 // Carregar lista de servidores
 async function loadGuilds() {
     try {
-        const response = await fetch('/api/guilds');
-        if (!response.ok) {
-            const errorData = await response.json().catch(() => ({}));
-            throw new Error(errorData.error || `Erro ao carregar servidores: ${response.status}`);
-        }
-        
-        const guilds = await response.json();
+        const guilds = await fetchWithErrorHandling('/api/guilds');
         if (!Array.isArray(guilds)) {
             throw new Error('Resposta inválida do servidor: guilds não é um array');
         }
@@ -224,31 +243,7 @@ async function loadGuildDetails(guildId) {
         
         modal.show();
         
-        const response = await fetch(`/api/guild/${guildId}`);
-        if (!response.ok) {
-            const errorData = await response.json().catch(() => ({}));
-            let errorMessage = errorData.error || `Erro desconhecido: ${response.status}`;
-            
-            if (errorData.error === 'Guild not found') {
-                errorMessage = 'Servidor não encontrado. Verifique se:';
-                errorMessage += '<ul>';
-                errorMessage += '<li>O bot ainda está no servidor</li>';
-                errorMessage += '<li>O servidor está disponível</li>';
-                errorMessage += '<li>Você tem permissões para visualizar</li>';
-                errorMessage += '</ul>';
-            }
-            
-            modalBody.innerHTML = `
-                <div class="alert alert-danger">
-                    ${errorMessage}
-                    <button class="btn btn-sm btn-outline-primary mt-2" onclick="loadGuilds()">
-                        <i class="bi bi-arrow-repeat"></i> Atualizar lista de servidores
-                    </button>
-                </div>`;
-            return;
-        }
-        
-        const guild = await response.json();
+        const guild = await fetchWithErrorHandling(`/api/guild/${guildId}`);
         if (!guild || !guild.id) {
             throw new Error('Dados do servidor inválidos');
         }
@@ -437,9 +432,20 @@ async function loadGuildDetails(guildId) {
         
         const modalBody = document.getElementById('guildModalBody');
         if (modalBody) {
+            let errorMessage = error.message || 'Erro desconhecido';
+            
+            if (error.message === 'Guild not found') {
+                errorMessage = 'Servidor não encontrado. Verifique se:';
+                errorMessage += '<ul>';
+                errorMessage += '<li>O bot ainda está no servidor</li>';
+                errorMessage += '<li>O servidor está disponível</li>';
+                errorMessage += '<li>Você tem permissões para visualizar</li>';
+                errorMessage += '</ul>';
+            }
+            
             modalBody.innerHTML = `
                 <div class="alert alert-danger">
-                    Erro ao carregar detalhes: ${error.message || 'Erro desconhecido'}
+                    ${errorMessage}
                     <button class="btn btn-sm btn-outline-primary mt-2" onclick="loadGuilds()">
                         <i class="bi bi-arrow-repeat"></i> Atualizar lista de servidores
                     </button>
@@ -451,16 +457,7 @@ async function loadGuildDetails(guildId) {
 // Carregar whitelist
 async function loadWhitelist() {
     try {
-        const response = await fetch('/api/whitelist');
-        if (!response.ok) {
-            const errorData = await response.json().catch(() => ({}));
-            throw new Error(errorData.error || `Erro ao carregar whitelist: ${response.status}`);
-        }
-        
-        const data = await response.json();
-        if (!data) {
-            throw new Error('Dados da whitelist inválidos');
-        }
+        const data = await fetchWithErrorHandling('/api/whitelist');
         
         // Usuários
         let usersHtml = '';
@@ -516,7 +513,6 @@ async function loadWhitelist() {
         });
     } catch (error) {
         console.error('Erro ao carregar whitelist:', error);
-        showToast('Erro ao carregar whitelist: ' + (error.message || 'Erro desconhecido'), 'error');
         
         const usersContainer = document.getElementById('whitelist-users');
         const rolesContainer = document.getElementById('whitelist-roles');
@@ -524,14 +520,14 @@ async function loadWhitelist() {
         if (usersContainer) {
             usersContainer.innerHTML = `
                 <div class="alert alert-danger">
-                    Erro ao carregar usuários da whitelist
+                    Erro ao carregar usuários da whitelist: ${error.message || 'Erro desconhecido'}
                 </div>`;
         }
         
         if (rolesContainer) {
             rolesContainer.innerHTML = `
                 <div class="alert alert-danger">
-                    Erro ao carregar cargos da whitelist
+                    Erro ao carregar cargos da whitelist: ${error.message || 'Erro desconhecido'}
                 </div>`;
         }
     }
@@ -546,7 +542,7 @@ async function updateWhitelist(action, targetType, targetId) {
         
         toggleLoading(targetType === 'user' ? 'add-user-whitelist' : 'add-role-whitelist', true);
         
-        const response = await fetch('/api/whitelist', {
+        await fetchWithErrorHandling('/api/whitelist', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -557,11 +553,6 @@ async function updateWhitelist(action, targetType, targetId) {
                 id: targetId
             })
         });
-        
-        if (!response.ok) {
-            const errorData = await response.json().catch(() => ({}));
-            throw new Error(errorData.error || `Erro ao atualizar whitelist: ${response.status}`);
-        }
         
         await loadWhitelist();
         
@@ -597,16 +588,7 @@ async function loadRecentEvents() {
                 </div>
             </div>`;
         
-        const response = await fetch('/api/events');
-        if (!response.ok) {
-            const errorData = await response.json().catch(() => ({}));
-            throw new Error(errorData.error || `Erro ao carregar eventos: ${response.status}`);
-        }
-        
-        const data = await response.json();
-        if (!data) {
-            throw new Error('Dados de eventos inválidos');
-        }
+        const data = await fetchWithErrorHandling('/api/events');
         
         let html = '<h5>Eventos Recentes</h5>';
         
@@ -657,19 +639,10 @@ async function loadLogs() {
                 </div>
             </div>`;
         
-        const response = await fetch(`/api/logs?lines=${lines}`);
-        if (!response.ok) {
-            const errorData = await response.json().catch(() => ({}));
-            throw new Error(errorData.error || `Erro ao carregar logs: ${response.status}`);
-        }
-        
-        const data = await response.json();
-        if (!data || !Array.isArray(data.logs)) {
-            throw new Error('Dados de logs inválidos');
-        }
+        const data = await fetchWithErrorHandling(`/api/logs?lines=${lines}`);
         
         let html = '';
-        if (data.logs.length > 0) {
+        if (data.logs && data.logs.length > 0) {
             data.logs.forEach(log => {
                 const logClass = log.includes('ERROR') ? 'log-error' : 
                                 log.includes('WARNING') ? 'log-warning' : 'log-info';
@@ -702,6 +675,14 @@ function initCharts() {
         const activityCtx = document.getElementById('activityChart')?.getContext('2d');
         if (!activityCtx) {
             throw new Error('Elemento activityChart não encontrado');
+        }
+        
+        // Destruir gráficos existentes antes de criar novos
+        if (activityChart) {
+            activityChart.destroy();
+        }
+        if (usageChart) {
+            usageChart.destroy();
         }
         
         activityChart = new Chart(activityCtx, {
@@ -790,32 +771,26 @@ function initCharts() {
 // Atualizar gráficos com dados reais
 async function updateCharts() {
     try {
-        const response = await fetch('/api/activity_stats');
-        if (!response.ok) {
-            const errorData = await response.json().catch(() => ({}));
-            throw new Error(errorData.error || `Erro ao carregar estatísticas: ${response.status}`);
+        const data = await fetchWithErrorHandling('/api/activity_stats');
+        
+        if (!activityChart || !usageChart) {
+            initCharts(); // Re-inicializa se os gráficos não existirem
+            return;
         }
         
-        const data = await response.json();
-        if (!data) {
-            throw new Error('Dados de estatísticas inválidos');
-        }
+        // Atualizar gráfico de atividade (dados simulados)
+        const newData = Array(7).fill().map(() => Math.floor(Math.random() * 200) + 50);
+        activityChart.data.datasets[0].data = newData;
+        activityChart.update();
         
-        if (activityChart && usageChart) {
-            // Atualizar gráfico de atividade (dados simulados)
-            const newData = Array(7).fill().map(() => Math.floor(Math.random() * 200) + 50);
-            activityChart.data.datasets[0].data = newData;
-            activityChart.update();
-            
-            // Atualizar gráfico de uso
-            if (data.total_users > 0) {
-                usageChart.data.datasets[0].data = [
-                    data.active_users || 0,
-                    data.inactive_users || 0,
-                    data.warned_users || 0
-                ];
-                usageChart.update();
-            }
+        // Atualizar gráfico de uso
+        if (data.total_users > 0) {
+            usageChart.data.datasets[0].data = [
+                data.active_users || 0,
+                data.inactive_users || 0,
+                data.warned_users || 0
+            ];
+            usageChart.update();
         }
     } catch (error) {
         console.error('Erro ao atualizar gráficos:', error);
@@ -826,15 +801,7 @@ async function updateCharts() {
 // Carregar status do sistema
 async function loadSystemStatus() {
     try {
-        const response = await fetch('/api/status');
-        if (!response.ok) {
-            throw new Error(`Erro HTTP! status: ${response.status}`);
-        }
-        
-        const data = await response.json();
-        if (!data) {
-            throw new Error('Dados de status inválidos');
-        }
+        const data = await fetchWithErrorHandling('/api/status');
         
         // Atualizar nome do bot
         const botNameElement = document.getElementById('bot-name');
@@ -928,18 +895,13 @@ async function saveConfig() {
             timezone: document.getElementById('timezone')?.value || ''
         };
 
-        const response = await fetch('/api/update_config', {
+        await fetchWithErrorHandling('/api/update_config', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
             },
             body: JSON.stringify(config)
         });
-        
-        if (!response.ok) {
-            const errorData = await response.json().catch(() => ({}));
-            throw new Error(errorData.error || `Erro ao salvar configurações: ${response.status}`);
-        }
         
         showToast('Configurações salvas com sucesso!', 'success');
     } catch (error) {
@@ -959,16 +921,10 @@ async function createBackup() {
             return;
         }
         
-        const response = await fetch('/api/backup', {
+        const data = await fetchWithErrorHandling('/api/backup', {
             method: 'POST'
         });
         
-        if (!response.ok) {
-            const errorData = await response.json().catch(() => ({}));
-            throw new Error(errorData.error || `Erro ao criar backup: ${response.status}`);
-        }
-        
-        const data = await response.json();
         showToast(data.message || 'Backup criado com sucesso!', 'success');
     } catch (error) {
         console.error('Erro ao criar backup:', error);
@@ -985,16 +941,10 @@ async function restartBot() {
             return;
         }
         
-        const response = await fetch('/api/restart', {
+        const data = await fetchWithErrorHandling('/api/restart', {
             method: 'POST'
         });
         
-        if (!response.ok) {
-            const errorData = await response.json().catch(() => ({}));
-            throw new Error(errorData.error || `Erro ao reiniciar o bot: ${response.status}`);
-        }
-        
-        const data = await response.json();
         showToast(data.message || 'Reinicialização iniciada', 'success');
         
         // Mostrar mensagem de reinicialização
@@ -1020,16 +970,7 @@ function exportReport() {
 // Funções para cargos permitidos
 async function loadAllowedRoles() {
     try {
-        const response = await fetch('/api/allowed_roles');
-        if (!response.ok) {
-            const errorData = await response.json().catch(() => ({}));
-            throw new Error(errorData.error || `Erro ao carregar cargos permitidos: ${response.status}`);
-        }
-        
-        const roles = await response.json();
-        if (!Array.isArray(roles)) {
-            throw new Error('Dados de cargos permitidos inválidos');
-        }
+        const roles = await fetchWithErrorHandling('/api/allowed_roles');
         
         let html = '';
         
@@ -1086,7 +1027,7 @@ async function updateAllowedRoles(action, roleId) {
         const buttonId = action === 'add' ? 'add-allowed-role' : null;
         if (buttonId) toggleLoading(buttonId, true);
         
-        const response = await fetch('/api/allowed_roles', {
+        await fetchWithErrorHandling('/api/allowed_roles', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -1096,11 +1037,6 @@ async function updateAllowedRoles(action, roleId) {
                 id: roleId
             })
         });
-        
-        if (!response.ok) {
-            const errorData = await response.json().catch(() => ({}));
-            throw new Error(errorData.error || `Erro desconhecido: ${response.status}`);
-        }
         
         await loadAllowedRoles();
         showToast(`Cargo ${action === 'add' ? 'adicionado' : 'removido'} com sucesso!`, 'success');
@@ -1120,16 +1056,7 @@ async function updateAllowedRoles(action, roleId) {
 // Funções para histórico
 async function loadWarningsHistory() {
     try {
-        const response = await fetch('/api/warnings_history?days=30&limit=50');
-        if (!response.ok) {
-            const errorData = await response.json().catch(() => ({}));
-            throw new Error(errorData.error || `Erro ao carregar histórico de avisos: ${response.status}`);
-        }
-        
-        const warnings = await response.json();
-        if (!Array.isArray(warnings)) {
-            throw new Error('Dados de avisos inválidos');
-        }
+        const warnings = await fetchWithErrorHandling('/api/warnings_history?days=30&limit=50');
         
         let html = '';
         if (warnings.length > 0) {
@@ -1162,16 +1089,7 @@ async function loadWarningsHistory() {
 
 async function loadKicksHistory() {
     try {
-        const response = await fetch('/api/kicks_history?days=30&limit=50');
-        if (!response.ok) {
-            const errorData = await response.json().catch(() => ({}));
-            throw new Error(errorData.error || `Erro ao carregar histórico de expulsões: ${response.status}`);
-        }
-        
-        const kicks = await response.json();
-        if (!Array.isArray(kicks)) {
-            throw new Error('Dados de expulsões inválidos');
-        }
+        const kicks = await fetchWithErrorHandling('/api/kicks_history?days=30&limit=50');
         
         let html = '';
         if (kicks.length > 0) {
@@ -1209,7 +1127,7 @@ async function runBotCommand(command, data = {}) {
             throw new Error('Nenhum comando especificado');
         }
         
-        const response = await fetch('/api/run_command', {
+        const result = await fetchWithErrorHandling('/api/run_command', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -1219,13 +1137,6 @@ async function runBotCommand(command, data = {}) {
                 ...data
             })
         });
-        
-        if (!response.ok) {
-            const errorData = await response.json().catch(() => ({}));
-            throw new Error(errorData.error || `Erro ao executar comando: ${response.status}`);
-        }
-        
-        const result = await response.json();
         
         if (result.status === 'success') {
             showToast(`Comando ${command} executado com sucesso!`, 'success');
@@ -1403,6 +1314,12 @@ window.addEventListener('beforeunload', () => {
     } catch (error) {
         console.error('Erro ao limpar intervalos:', error);
     }
+});
+
+// Gerenciador de erros global
+window.addEventListener('error', function(event) {
+    console.error('Erro global:', event.error);
+    showToast('Ocorreu um erro inesperado', 'error');
 });
 
 // Inicializar o dashboard quando o DOM estiver carregado
