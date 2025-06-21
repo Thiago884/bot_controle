@@ -1547,6 +1547,48 @@ def download_report():
         web_logger.error(f"Erro em /api/download_report: {e}", exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
+# Novas rotas adicionadas
+@app.route('/api/tracked_roles', methods=['GET'])
+@basic_auth_required
+def get_tracked_roles():
+    try:
+        if not hasattr(bot, 'guilds') or not bot.guilds:
+            return jsonify({'status': 'error', 'message': 'Nenhuma guilda disponível'}), 400
+            
+        guild = bot.guilds[0]
+        tracked_roles = []
+        
+        if hasattr(bot, 'config') and 'tracked_roles' in bot.config:
+            for role_id in bot.config['tracked_roles']:
+                role = guild.get_role(role_id)
+                if role:
+                    tracked_roles.append({
+                        'id': str(role.id),
+                        'name': role.name,
+                        'color': str(role.color),
+                        'member_count': len(role.members)
+                    })
+        
+        return jsonify({'status': 'success', 'tracked_roles': tracked_roles})
+    except Exception as e:
+        web_logger.error(f"Erro em /api/tracked_roles: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/warning_settings', methods=['GET'])
+@basic_auth_required
+def get_warning_settings():
+    try:
+        if not hasattr(bot, 'config') or 'warnings' not in bot.config:
+            return jsonify({'status': 'error', 'message': 'Configurações de aviso não encontradas'}), 404
+            
+        return jsonify({
+            'status': 'success',
+            'settings': bot.config['warnings']
+        })
+    except Exception as e:
+        web_logger.error(f"Erro em /api/warning_settings: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
 async def run_bot_async():
     """Executa o bot Discord em uma corrotina separada"""
     global bot_running

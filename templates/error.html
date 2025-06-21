@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Erro</title>
+    <meta charset="utf-8">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            color: #333;
+        }
+        .error-container {
+            max-width: 600px;
+            margin: 50px auto;
+            padding: 20px;
+            border: 1px solid #e0e0e0;
+            border-radius: 5px;
+            background-color: #f9f9f9;
+        }
+        h1 {
+            color: #d32f2f;
+        }
+    </style>
+</head>
+<body>
+    <div class="error-container">
+        <h1>Erro</h1>
+        <p>{{ error_message }}</p>
+        <p><a href="/dashboard">Voltar ao painel</a></p>
+    </div>
+</body>
+</html>
