@@ -230,7 +230,7 @@ def monitor():
         except Exception as e:
             web_logger.error(f"Erro ao ler arquivo de log para o monitor: {e}", exc_info=True)
             log_lines = [f"Erro ao carregar logs: {str(e)}"]
-
+        
         bot_user_name = bot.user.name if hasattr(bot, 'user') and bot.user else "Inactivity Bot"
         
         return render_template('monitor.html',
@@ -1187,6 +1187,145 @@ def get_ranking():
     except Exception as e:
         web_logger.error(f"Erro em /api/get_ranking: {e}", exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
+# Nova rota para cargos monitorados
+@app.route('/api/tracked_roles', methods=['GET', 'POST'])
+@basic_auth_required
+def manage_tracked_roles():
+    try:
+        if not hasattr(bot, 'guilds') or not bot.guilds:
+            web_logger.warning("Bot não conectado a nenhuma guilda ao gerenciar tracked_roles.")
+            return jsonify({'status': 'error', 'message': 'Nenhuma guilda disponível. O bot precisa estar conectado a pelo menos uma guilda.'}), 400
+        
+        guild = bot.guilds[0]
+        
+        if request.method == 'GET':
+            # Lista de cargos disponíveis
+            available_roles = []
+            for role in guild.roles:
+                if role.name != "@everyone":
+                    available_roles.append({
+                        'id': str(role.id),
+                        'name': role.name,
+                        'color': str(role.color),
+                        'position': role.position,
+                        'member_count': len(role.members)
+                    })
+            
+            # Lista de cargos monitorados
+            tracked_roles = []
+            if hasattr(bot, 'config') and 'tracked_roles' in bot.config:
+                for role_id in bot.config['tracked_roles']:
+                    role = guild.get_role(role_id)
+                    if role:
+                        tracked_roles.append({
+                            'id': str(role.id),
+                            'name': role.name,
+                            'color': str(role.color),
+                            'position': role.position,
+                            'member_count': len(role.members)
+                        })
+            
+            return jsonify({
+                'available_roles': available_roles,
+                'tracked_roles': tracked_roles
+            })
+        
+        elif request.method == 'POST':
+            data = request.json
+            action = data.get('action')
+            role_id_str = data.get('role_id')
+            
+            if not all([action, role_id_str]):
+                web_logger.warning("Parâmetros ausentes na requisição de tracked_roles.")
+                return jsonify({'status': 'error', 'message': 'Parâmetros ausentes (action, role_id)'}), 400
+            
+            try:
+                role_id = int(role_id_str)
+            except ValueError:
+                web_logger.warning(f"ID de role inválido fornecido: {role_id_str}")
+                return jsonify({'status': 'error', 'message': 'Formato de ID inválido. Deve ser um número inteiro.'}), 400
+            
+            if not hasattr(bot, 'config'):
+                bot.config = {}
+
+            if 'tracked_roles' not in bot.config:
+                bot.config['tracked_roles'] = []
+
+            if action == 'add':
+                if role_id not in bot.config['tracked_roles']:
+                    bot.config['tracked_roles'].append(role_id)
+                    web_logger.info(f"Adicionado role {role_id} aos tracked_roles.")
+                else:
+                    web_logger.info(f"Tentativa de adicionar role {role_id} já existente nos tracked_roles.")
+                    return jsonify({'status': 'info', 'message': f'Role {role_id} já está nos tracked_roles.'}), 200
+            elif action == 'remove':
+                if role_id in bot.config['tracked_roles']:
+                    bot.config['tracked_roles'].remove(role_id)
+                    web_logger.info(f"Removido role {role_id} dos tracked_roles.")
+                else:
+                    web_logger.info(f"Tentativa de remover role {role_id} não existente nos tracked_roles.")
+                    return jsonify({'status': 'info', 'message': f'Role {role_id} não encontrado nos tracked_roles.'}), 200
+            else:
+                web_logger.warning(f"Ação inválida para tracked_roles: {action}")
+                return jsonify({'status': 'error', 'message': 'Ação inválida. Deve ser "add" ou "remove".'}), 400
+            
+            run_coroutine_in_bot_loop(bot.save_config())
+            return jsonify({'status': 'success', 'message': 'Tracked roles atualizados com sucesso.'})
+    
+    except Exception as e:
+        web_logger.error(f"Erro em /api/tracked_roles: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': f"Erro ao gerenciar tracked roles: {str(e)}"}), 500
+
+# Nova rota para configurações de aviso
+@app.route('/api/warning_settings', methods=['GET', 'POST'])
+@basic_auth_required
+def manage_warning_settings():
+    try:
+        if not hasattr(bot, 'config'):
+            bot.config = {}
+
+        if 'warning_settings' not in bot.config:
+            bot.config['warning_settings'] = {
+                'first_warning': 7,
+                'second_warning': 14,
+                'messages': {
+                    'first_warning': 'Você está sendo avisado por inatividade. Por favor, seja mais ativo para evitar ações futuras.',
+                    'second_warning': 'Este é seu segundo aviso por inatividade. Sua situação está se tornando crítica.',
+                    'final_warning': 'Este é seu aviso final. Se não melhorar sua atividade, você será removido dos cargos.'
+                }
+            }
+
+        if request.method == 'GET':
+            return jsonify(bot.config['warning_settings'])
+        
+        elif request.method == 'POST':
+            data = request.json
+            updated = False
+
+            if 'first_warning' in data and isinstance(data['first_warning'], (int, str)):
+                bot.config['warning_settings']['first_warning'] = int(data['first_warning'])
+                updated = True
+            
+            if 'second_warning' in data and isinstance(data['second_warning'], (int, str)):
+                bot.config['warning_settings']['second_warning'] = int(data['second_warning'])
+                updated = True
+            
+            if 'message_type' in data and 'message_content' in data:
+                message_type = data['message_type']
+                if message_type in ['first_warning', 'second_warning', 'final_warning']:
+                    bot.config['warning_settings']['messages'][message_type] = data['message_content']
+                    updated = True
+            
+            if updated:
+                run_coroutine_in_bot_loop(bot.save_config())
+                return jsonify({'status': 'success', 'message': 'Configurações de aviso atualizadas com sucesso.'})
+            else:
+                return jsonify({'status': 'info', 'message': 'Nenhuma configuração válida para atualizar.'}), 200
+    
+    except Exception as e:
+        web_logger.error(f"Erro em /api/warning_settings: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': f"Erro ao gerenciar configurações de aviso: {str(e)}"}), 500
 
 async def run_bot_async():
     """Executa o bot Discord em uma corrotina separada"""
