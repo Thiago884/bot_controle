@@ -225,13 +225,16 @@ async function loadGuildDetails(guildId) {
         }
         
         currentGuildId = guildId;
-        const modal = new bootstrap.Modal(document.getElementById('guildModal'));
+        const modalElement = document.getElementById('guildModal');
+        
+        if (!modalElement) {
+            throw new Error('Elemento do modal não encontrado');
+        }
+        
+        // Inicializar o modal do Bootstrap
+        const modal = new bootstrap.Modal(modalElement);
         const modalTitle = document.getElementById('guildModalTitle');
         const modalBody = document.getElementById('guildModalBody');
-        
-        if (!modal || !modalTitle || !modalBody) {
-            throw new Error('Elementos do modal não encontrados');
-        }
         
         modalTitle.textContent = 'Carregando...';
         modalBody.innerHTML = `
