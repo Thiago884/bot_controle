@@ -229,6 +229,7 @@ async def process_member_inactivity(member: discord.Member, guild: discord.Guild
                         await member.remove_roles(*manageable_roles)
                         perf_metrics.record_api_call(time.time() - start_time)
                         
+                        # Enviar mensagem de aviso final via DM
                         await bot.send_warning(member, 'final')
                         
                         start_time = time.time()
@@ -570,8 +571,7 @@ async def report_metrics():
         await bot.log_action(
             "Relatório de Métricas Diárias",
             None,
-            "\n".join(metrics_report)
-        )
+            "\n".join(metrics_report))
         
         # Reset counts for the new day
         task_metrics.error_counts.clear()
