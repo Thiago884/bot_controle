@@ -16,6 +16,7 @@ class PerformanceMetrics:
     def __init__(self):
         self.db_query_times = []
         self.api_call_times = []
+        self.task_execution_times = []  # Adicionando para rastrear tempos de execução de tasks
         self.last_flush = time.time()
     
     def record_db_query(self, duration):
@@ -24,6 +25,11 @@ class PerformanceMetrics:
     
     def record_api_call(self, duration):
         self.api_call_times.append(duration)
+        self._maybe_flush()
+    
+    def record_execution(self, task_name, duration):
+        """Registra o tempo de execução de uma task"""
+        self.task_execution_times.append((task_name, duration))
         self._maybe_flush()
     
     def _maybe_flush(self):
@@ -43,6 +49,22 @@ class PerformanceMetrics:
             max_api = max(self.api_call_times)
             logger.info(f"Métricas API: Avg={avg_api:.3f}s, Max={max_api:.3f}s, Samples={len(self.api_call_times)}")
             self.api_call_times = []
+        
+        if self.task_execution_times:
+            # Agrupar por nome de task
+            task_stats = {}
+            for task_name, duration in self.task_execution_times:
+                if task_name not in task_stats:
+                    task_stats[task_name] = []
+                task_stats[task_name].append(duration)
+            
+            # Logar estatísticas por task
+            for task_name, durations in task_stats.items():
+                avg = sum(durations) / len(durations)
+                max_d = max(durations)
+                logger.info(f"Métricas Task {task_name}: Avg={avg:.3f}s, Max={max_d:.3f}s, Samples={len(durations)}")
+            
+            self.task_execution_times = []
 
 # Global instance
 perf_metrics = PerformanceMetrics()
@@ -84,16 +106,16 @@ def log_task_metrics(task_name: str):
     """Decorator to log task execution metrics"""
     def decorator(func):
         async def wrapper(*args, **kwargs):
-            start_time = datetime.now()
+            start_time = time.time()
             try:
                 result = await func(*args, **kwargs)
-                duration = (datetime.now() - start_time).total_seconds()
-                task_metrics.record_execution(task_name, duration)
+                duration = time.time() - start_time
+                perf_metrics.record_execution(task_name, duration)
                 task_metrics.record_success(task_name)
                 return result
             except Exception as e:
-                duration = (datetime.now() - start_time).total_seconds()
-                task_metrics.record_execution(task_name, duration)
+                duration = time.time() - start_time
+                perf_metrics.record_execution(task_name, duration)
                 task_metrics.record_error(task_name)
                 logger.error(f"Error in {task_name}: {e}", exc_info=True)
                 raise
