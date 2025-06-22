@@ -363,3 +363,9 @@
     display: none;
     margin-right: 5px;
 }
+.modal-blocking {
+    z-index: 1060 !important;
+}
+.modal-backdrop {
+    z-index: 1040 !important;
+}

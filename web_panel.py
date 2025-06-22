@@ -867,7 +867,7 @@ def get_warnings_history():
         
         if not hasattr(bot, 'guilds') or not bot.guilds:
             web_logger.warning("Nenhuma guilda disponível para buscar histórico de avisos.")
-            return jsonify({'status': 'error', 'message': 'Nenhuma guilda disponível'}), 400
+            return jsonify({'status': 'error', 'message': 'Nenhuma guilda disponível', 'warnings': []}), 400
         
         guild_id = bot.guilds[0].id
         
@@ -944,7 +944,11 @@ def get_warnings_history():
     
     except Exception as e:
         web_logger.error(f"Erro em /api/warnings_history: {e}", exc_info=True)
-        return jsonify({'status': 'error', 'message': f"Erro ao carregar histórico de avisos: {str(e)}"}), 500
+        return jsonify({
+            'status': 'error',
+            'message': f"Erro ao carregar histórico de avisos: {str(e)}",
+            'warnings': []
+        }), 500
 
 @app.route('/api/kicks_history', methods=['GET'])
 @basic_auth_required
@@ -956,7 +960,7 @@ def get_kicks_history():
         
         if not hasattr(bot, 'guilds') or not bot.guilds:
             web_logger.warning("Nenhuma guilda disponível para buscar histórico de expulsões.")
-            return jsonify({'status': 'error', 'message': 'Nenhuma guilda disponível'}), 400
+            return jsonify({'status': 'error', 'message': 'Nenhuma guilda disponível', 'kicks': []}), 400
         
         guild_id = bot.guilds[0].id
         
@@ -1032,7 +1036,11 @@ def get_kicks_history():
     
     except Exception as e:
         web_logger.error(f"Erro em /api/kicks_history: {e}", exc_info=True)
-        return jsonify({'status': 'error', 'message': f"Erro ao carregar histórico de expulsões: {str(e)}"}), 500
+        return jsonify({
+            'status': 'error',
+            'message': f"Erro ao carregar histórico de expulsões: {str(e)}",
+            'kicks': []
+        }), 500
 
 @app.route('/api/get_role_removals', methods=['GET'])
 @basic_auth_required

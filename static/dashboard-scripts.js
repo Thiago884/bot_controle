@@ -210,7 +210,7 @@ async function loadGuilds() {
     }
 }
 
-// Carregar detalhes da guilda
+// Carregar detalhes da guilda - Atualizada
 async function loadGuildDetails(guildId) {
     try {
         if (!guildId) {
@@ -224,10 +224,19 @@ async function loadGuildDetails(guildId) {
             throw new Error('Elemento do modal não encontrado');
         }
         
+        // Garantir que qualquer modal existente seja fechado primeiro
+        const existingModal = bootstrap.Modal.getInstance(modalElement);
+        if (existingModal) {
+            existingModal.hide();
+        }
+
         // Inicializar o modal do Bootstrap
         const modal = new bootstrap.Modal(modalElement);
         const modalTitle = document.getElementById('guildModalTitle');
         const modalBody = document.getElementById('guildModalBody');
+        
+        // Adicionar classe para evitar interação com o fundo
+        modalElement.classList.add('modal-blocking');
         
         modalTitle.textContent = 'Carregando...';
         modalBody.innerHTML = `
@@ -446,6 +455,12 @@ async function loadGuildDetails(guildId) {
                         <i class="bi bi-arrow-repeat"></i> Atualizar lista de servidores
                     </button>
                 </div>`;
+        }
+    } finally {
+        // Remover classe de bloqueio após carregamento ou erro
+        const modalElement = document.getElementById('guildModal');
+        if (modalElement) {
+            modalElement.classList.remove('modal-blocking');
         }
     }
 }
@@ -1049,14 +1064,26 @@ async function updateAllowedRoles(action, roleId) {
     }
 }
 
-// Funções para histórico
+// Funções para histórico de avisos - Atualizadas
 async function loadWarningsHistory() {
     try {
+        const warningsContainer = document.getElementById('warnings-table');
+        if (!warningsContainer) return;
+        
+        warningsContainer.innerHTML = `
+            <tr>
+                <td colspan="3" class="text-center py-3">
+                    <div class="spinner-border text-primary" role="status">
+                        <span class="visually-hidden">Carregando...</span>
+                    </div>
+                </td>
+            </tr>`;
+        
         const warnings = await fetchWithErrorHandling('/api/warnings_history?days=30&limit=50');
         
         let html = '';
-        if (warnings.length > 0) {
-            warnings.forEach(warning => {
+        if (warnings.warnings && warnings.warnings.length > 0) {
+            warnings.warnings.forEach(warning => {
                 html += `
                     <tr>
                         <td>${warning.user_name || warning.user_id || 'ID desconhecido'}</td>
@@ -1068,28 +1095,43 @@ async function loadWarningsHistory() {
             html = '<tr><td colspan="3" class="text-center">Nenhum aviso registrado</td></tr>';
         }
         
-        const warningsTable = document.getElementById('warnings-table');
-        if (warningsTable) {
-            warningsTable.innerHTML = html;
-        }
+        warningsContainer.innerHTML = html;
     } catch (error) {
         console.error('Erro ao carregar histórico de avisos:', error);
         
-        const warningsTable = document.getElementById('warnings-table');
-        if (warningsTable) {
-            warningsTable.innerHTML = `
-                <tr><td colspan="3" class="text-center text-danger">Erro ao carregar avisos: ${error.message || 'Erro desconhecido'}</td></tr>`;
+        const warningsContainer = document.getElementById('warnings-table');
+        if (warningsContainer) {
+            warningsContainer.innerHTML = `
+                <tr><td colspan="3" class="text-center text-danger">
+                    Erro ao carregar avisos: ${error.message || 'Erro desconhecido'}
+                    <button class="btn btn-sm btn-outline-primary mt-2" onclick="loadWarningsHistory()">
+                        <i class="bi bi-arrow-repeat"></i> Tentar novamente
+                    </button>
+                </td></tr>`;
         }
     }
 }
 
+// Funções para histórico de expulsões - Atualizadas
 async function loadKicksHistory() {
     try {
+        const kicksContainer = document.getElementById('kicks-table');
+        if (!kicksContainer) return;
+        
+        kicksContainer.innerHTML = `
+            <tr>
+                <td colspan="3" class="text-center py-3">
+                    <div class="spinner-border text-primary" role="status">
+                        <span class="visually-hidden">Carregando...</span>
+                    </div>
+                </td>
+            </tr>`;
+        
         const kicks = await fetchWithErrorHandling('/api/kicks_history?days=30&limit=50');
         
         let html = '';
-        if (kicks.length > 0) {
-            kicks.forEach(kick => {
+        if (kicks.kicks && kicks.kicks.length > 0) {
+            kicks.kicks.forEach(kick => {
                 html += `
                     <tr>
                         <td>${kick.user_name || kick.user_id || 'ID desconhecido'}</td>
@@ -1101,17 +1143,19 @@ async function loadKicksHistory() {
             html = '<tr><td colspan="3" class="text-center">Nenhuma expulsão registrada</td></tr>';
         }
         
-        const kicksTable = document.getElementById('kicks-table');
-        if (kicksTable) {
-            kicksTable.innerHTML = html;
-        }
+        kicksContainer.innerHTML = html;
     } catch (error) {
         console.error('Erro ao carregar histórico de expulsões:', error);
         
-        const kicksTable = document.getElementById('kicks-table');
-        if (kicksTable) {
-            kicksTable.innerHTML = `
-                <tr><td colspan="3" class="text-center text-danger">Erro ao carregar expulsões: ${error.message || 'Erro desconhecido'}</td></tr>`;
+        const kicksContainer = document.getElementById('kicks-table');
+        if (kicksContainer) {
+            kicksContainer.innerHTML = `
+                <tr><td colspan="3" class="text-center text-danger">
+                    Erro ao carregar expulsões: ${error.message || 'Erro desconhecido'}
+                    <button class="btn btn-sm btn-outline-primary mt-2" onclick="loadKicksHistory()">
+                        <i class="bi bi-arrow-repeat"></i> Tentar novamente
+                    </button>
+                </td></tr>`;
         }
     }
 }
@@ -1196,7 +1240,7 @@ async function loadActivityRanking() {
     }
 }
 
-// Funções para executar comandos
+// Função para executar comandos do bot
 async function runBotCommand(command, data = {}) {
     try {
         if (!command) {
@@ -1591,12 +1635,34 @@ function setupEventListeners() {
         // Carregar históricos quando as abas são clicadas
         const warningsTab = document.getElementById('warnings-tab');
         if (warningsTab) {
-            warningsTab.addEventListener('click', loadWarningsHistory);
+            warningsTab.addEventListener('click', function(e) {
+                e.preventDefault();
+                loadWarningsHistory();
+                // Ativar a aba corretamente
+                const tab = new bootstrap.Tab(warningsTab);
+                tab.show();
+            });
+            
+            // Carregar automaticamente se já estiver ativa
+            if (warningsTab.classList.contains('active')) {
+                loadWarningsHistory();
+            }
         }
         
         const kicksTab = document.getElementById('kicks-tab');
         if (kicksTab) {
-            kicksTab.addEventListener('click', loadKicksHistory);
+            kicksTab.addEventListener('click', function(e) {
+                e.preventDefault();
+                loadKicksHistory();
+                // Ativar a aba corretamente
+                const tab = new bootstrap.Tab(kicksTab);
+                tab.show();
+            });
+            
+            // Carregar automaticamente se já estiver ativa
+            if (kicksTab.classList.contains('active')) {
+                loadKicksHistory();
+            }
         }
         
         // Botão de atualizar detalhes da guilda
