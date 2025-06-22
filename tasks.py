@@ -27,7 +27,7 @@ class PerformanceMetrics:
         self.api_call_times.append(duration)
         self._maybe_flush()
     
-    def record_execution(self, task_name, duration):
+    def record_task_execution(self, task_name, duration):
         """Registra o tempo de execução de uma task"""
         self.task_execution_times.append((task_name, duration))
         self._maybe_flush()
@@ -110,12 +110,12 @@ def log_task_metrics(task_name: str):
             try:
                 result = await func(*args, **kwargs)
                 duration = time.time() - start_time
-                perf_metrics.record_execution(task_name, duration)
+                perf_metrics.record_task_execution(task_name, duration)
                 task_metrics.record_success(task_name)
                 return result
             except Exception as e:
                 duration = time.time() - start_time
-                perf_metrics.record_execution(task_name, duration)
+                perf_metrics.record_task_execution(task_name, duration)
                 task_metrics.record_error(task_name)
                 logger.error(f"Error in {task_name}: {e}", exc_info=True)
                 raise
@@ -148,7 +148,7 @@ async def execute_task_with_persistent_interval(task_name: str, monitoring_perio
             if should_execute:
                 start_time = time.time()
                 await task_func()
-                perf_metrics.record_execution(task_name, time.time() - start_time)
+                perf_metrics.record_task_execution(task_name, time.time() - start_time)
                 await bot.db.log_task_execution(task_name, monitoring_period)
             
             # Esperar 1 hora antes de verificar novamente
