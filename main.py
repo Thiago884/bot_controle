@@ -171,11 +171,12 @@ DEFAULT_CONFIG = {
         "first_warning": 3,
         "second_warning": 1,
         "messages": {
-            "first": "⚠️ **Aviso de Inatividade** ⚠️\nVocê está prestes a perder seus cargos por inatividade. Entre em um canal de voz por pelo menos 15 minutos em 2 dias diferentes nos próximos {days} dias para evitar isso.",
-            "second": "🔴 **Último Aviso** 🔴\nVocê perderá seus cargos AMANHÃ por inatividade se não cumprir os requisitos de atividade em voz.",
-            "final": "❌ **Cargos Removidos** ❌\nVocê perdeu seus cargos no servidor {guild} por inatividade. Você não cumpriu os requisitos de atividade de voz (15 minutos em 2 dias diferentes dentro de {monitoring_period} dias)."
+            "first": "⚠️ **Aviso de Inatividade** ⚠️\nVocê está prestes a perder seus cargos por inatividade. Entre em um canal de voz por pelo menos {required_minutes} minutos em {required_days} dias diferentes nos próximos {days} dias para evitar isso.",
+            "second": "🔴 **Último Aviso** 🔴\nVocê perderá seus cargos AMANHÃ por inatividade se não cumprir os requisitos de atividade em voz ({required_minutes} minutos em {required_days} dias diferentes).",
+            "final": "❌ **Cargos Removidos** ❌\nVocê perdeu seus cargos no servidor {guild} por inatividade. Você não cumpriu os requisitos de atividade de voz ({required_minutes} minutos em {required_days} dias diferentes dentro de {monitoring_period} dias)."
+        }
     }
-}}
+}
 
 class SmartPriorityQueue:
     def __init__(self):
@@ -957,31 +958,22 @@ class InactivityBot(commands.Bot):
     async def _handle_audio_change(self, member, before, after):
         audio_key = (member.id, member.guild.id)
         if audio_key not in self.active_sessions:
+            # Se não há sessão ativa mas o usuário está em um canal de voz,
+            # cria uma sessão (pode acontecer se o bot reiniciou)
+            if after.channel is not None:
+                self.active_sessions[audio_key] = {
+                    'start_time': datetime.utcnow(),
+                    'last_audio_time': datetime.utcnow(),
+                    'audio_disabled': after.self_deaf or after.deaf,
+                    'total_audio_off_time': 0
+                }
             return
 
-        audio_was_on = not (before.self_deaf or before.deaf)
+        audio_was_off = before.self_deaf or before.deaf
         audio_is_off = after.self_deaf or after.deaf
 
-        if audio_was_on and audio_is_off:
-            self.active_sessions[audio_key]['audio_disabled'] = True
-            self.active_sessions[audio_key]['audio_off_time'] = datetime.utcnow()
-            
-            time_in_voice = (datetime.utcnow() - self.active_sessions[audio_key]['start_time']).total_seconds()
-            embed = discord.Embed(
-                title="🔇 Áudio Desativado",
-                color=discord.Color.orange(),
-                timestamp=datetime.now(self.timezone))
-            embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
-            embed.add_field(name="Usuário", value=member.mention, inline=True)
-            embed.add_field(name="Canal", value=after.channel.name, inline=True)
-            embed.add_field(name="Tempo em voz", 
-                          value=f"{int(time_in_voice//60)} minutos {int(time_in_voice%60)} segundos", 
-                          inline=False)
-            embed.set_footer(text=f"ID: {member.id}")
-            
-            await self.log_action(None, None, embed=embed)
-        
-        elif not audio_was_on and not audio_is_off:
+        # Se o áudio estava desligado e agora está ligado
+        if audio_was_off and not audio_is_off:
             self.active_sessions[audio_key]['audio_disabled'] = False
             if 'audio_off_time' in self.active_sessions[audio_key]:
                 audio_off_duration = (datetime.utcnow() - self.active_sessions[audio_key]['audio_off_time']).total_seconds()
@@ -1006,6 +998,26 @@ class InactivityBot(commands.Bot):
                 embed.set_footer(text=f"ID: {member.id}")
                 
                 await self.log_action(None, None, embed=embed)
+        
+        # Se o áudio estava ligado e agora está desligado
+        elif not audio_was_off and audio_is_off:
+            self.active_sessions[audio_key]['audio_disabled'] = True
+            self.active_sessions[audio_key]['audio_off_time'] = datetime.utcnow()
+            
+            time_in_voice = (datetime.utcnow() - self.active_sessions[audio_key]['start_time']).total_seconds()
+            embed = discord.Embed(
+                title="🔇 Áudio Desativado",
+                color=discord.Color.orange(),
+                timestamp=datetime.now(self.timezone))
+            embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
+            embed.add_field(name="Usuário", value=member.mention, inline=True)
+            embed.add_field(name="Canal", value=after.channel.name, inline=True)
+            embed.add_field(name="Tempo em voz", 
+                          value=f"{int(time_in_voice//60)} minutos {int(time_in_voice%60)} segundos", 
+                          inline=False)
+            embed.set_footer(text=f"ID: {member.id}")
+            
+            await self.log_action(None, None, embed=embed)
 
     async def process_voice_events(self):
         while True:
@@ -1150,13 +1162,19 @@ class InactivityBot(commands.Bot):
             if warning_type == 'first' and 'first' in messages:
                 message = messages['first'].format(
                     days=self.config['warnings']['first_warning'],
-                    monitoring_period=self.config['monitoring_period'])
+                    monitoring_period=self.config['monitoring_period'],
+                    required_minutes=self.config['required_minutes'],
+                    required_days=self.config['required_days'])
             elif warning_type == 'second' and 'second' in messages:
-                message = messages['second']
+                message = messages['second'].format(
+                    required_minutes=self.config['required_minutes'],
+                    required_days=self.config['required_days'])
             elif warning_type == 'final' and 'final' in messages:
                 message = messages['final'].format(
                     guild=member.guild.name,
-                    monitoring_period=self.config['monitoring_period'])
+                    monitoring_period=self.config['monitoring_period'],
+                    required_minutes=self.config['required_minutes'],
+                    required_days=self.config['required_days'])
             else:
                 return
             

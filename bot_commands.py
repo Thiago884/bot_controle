@@ -440,6 +440,23 @@ async def set_warning_message(interaction: discord.Interaction, warning_type: st
             await interaction.response.send_message(embed=embed)
             return
         
+        # Verificar placeholders necessários
+        required_placeholders = {
+            'first': ['{days}', '{required_minutes}', '{required_days}'],
+            'second': ['{required_minutes}', '{required_days}'],
+            'final': ['{guild}', '{monitoring_period}', '{required_minutes}', '{required_days}']
+        }
+        
+        missing = [ph for ph in required_placeholders[warning_type] if ph not in message]
+        if missing:
+            embed = discord.Embed(
+                title="❌ Placeholders Faltando",
+                description=f"A mensagem deve conter os seguintes placeholders: {', '.join(missing)}",
+                color=discord.Color.red()
+            )
+            await interaction.response.send_message(embed=embed)
+            return
+        
         bot.config['warnings']['messages'][warning_type] = message
         await bot.save_config()
         
@@ -461,6 +478,46 @@ async def set_warning_message(interaction: discord.Interaction, warning_type: st
         embed = discord.Embed(
             title="❌ Erro",
             description="Ocorreu um erro ao atualizar a mensagem. Por favor, tente novamente.",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="show_warning_messages", description="Mostra as mensagens de aviso atuais")
+@allowed_roles_only()
+async def show_warning_messages(interaction: discord.Interaction):
+    """Mostra as mensagens de aviso configuradas"""
+    try:
+        warnings_config = bot.config.get('warnings', {})
+        messages = warnings_config.get('messages', {})
+        
+        embed = discord.Embed(
+            title="⚠️ Mensagens de Aviso Configuradas",
+            color=discord.Color.blue()
+        )
+        
+        for msg_type, message in messages.items():
+            # Substituir placeholders com valores atuais para visualização
+            preview = message.format(
+                days=warnings_config.get('first_warning', 3),
+                monitoring_period=bot.config.get('monitoring_period', 14),
+                required_minutes=bot.config.get('required_minutes', 15),
+                required_days=bot.config.get('required_days', 2),
+                guild=interaction.guild.name
+            )
+            
+            embed.add_field(
+                name=f"Tipo: {msg_type.capitalize()}",
+                value=f"```\n{preview}\n```",
+                inline=False
+            )
+        
+        await interaction.response.send_message(embed=embed)
+        logger.info("Mensagens de aviso exibidas com sucesso")
+    except Exception as e:
+        logger.error(f"Erro ao exibir mensagens de aviso: {e}")
+        embed = discord.Embed(
+            title="❌ Erro",
+            description="Ocorreu um erro ao exibir as mensagens de aviso.",
             color=discord.Color.red()
         )
         await interaction.response.send_message(embed=embed)
