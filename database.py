@@ -113,7 +113,7 @@ class DatabaseBackup:
                     logger.warning(f"Erro ao remover backup antigo {old_backup}: {e}")
         except Exception as e:
             logger.warning(f"Erro ao limpar backups antigos: {e}")
-
+            
 class Database:
     def __init__(self):
         self.pool = None
@@ -370,6 +370,16 @@ class Database:
                         INDEX idx_date (log_date)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci''')
                     
+                    # Tabela de execuções de tasks
+                    await cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS task_executions (
+                        task_name VARCHAR(50) PRIMARY KEY,
+                        last_execution DATETIME,
+                        monitoring_period INT,
+                        INDEX idx_last_execution (last_execution)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                    ''')
+                    
                     # Reativar warnings
                     await cursor.execute("SET sql_notes = 1;")
                     await conn.commit()
@@ -382,7 +392,7 @@ class Database:
                     self.pool.release(conn)
 
     async def execute_query(self, query: str, params: tuple = None, timeout: int = 30):
-        """Executa uma query com tratamento de timeout e retry"""
+        """Executa uma query com tratamento de timeout và retry"""
         async with self.semaphore:
             max_retries = 3
             conn = None
@@ -905,5 +915,50 @@ class Database:
             logger.error(f"Erro ao limpar logs de rate limit: {e}")
             return 0
         finally:
+            if conn:
+                self.pool.release(conn)
+
+    async def get_last_task_execution(self, task_name: str) -> Optional[Dict]:
+        """Obtém a última execução de uma task"""
+        cursor = None
+        conn = None
+        try:
+            cursor, conn = await self.execute_query('''
+                SELECT last_execution, monitoring_period 
+                FROM task_executions 
+                WHERE task_name = %s
+            ''', (task_name,))
+            
+            return await cursor.fetchone()
+        except Exception as e:
+            logger.error(f"Erro ao obter última execução da task: {e}")
+            return None
+        finally:
+            if cursor:
+                await cursor.close()
+            if conn:
+                self.pool.release(conn)
+
+    async def log_task_execution(self, task_name: str, monitoring_period: int):
+        """Registra execução de uma task"""
+        cursor = None
+        conn = None
+        try:
+            cursor, conn = await self.execute_query('''
+                INSERT INTO task_executions 
+                (task_name, last_execution, monitoring_period) 
+                VALUES (%s, %s, %s)
+                ON DUPLICATE KEY UPDATE 
+                    last_execution = VALUES(last_execution),
+                    monitoring_period = VALUES(monitoring_period)
+            ''', (task_name, datetime.utcnow(), monitoring_period))
+            
+            await conn.commit()
+        except Exception as e:
+            logger.error(f"Erro ao registrar execução da task: {e}")
+            raise
+        finally:
+            if cursor:
+                await cursor.close()
             if conn:
                 self.pool.release(conn)

@@ -100,9 +100,44 @@ def log_task_metrics(task_name: str):
         return wrapper
     return decorator
 
-@tasks.loop(hours=24)
+async def execute_task_with_persistent_interval(task_name: str, monitoring_period: int, task_func: callable):
+    """Executa a task mantendo intervalo persistente"""
+    await bot.wait_until_ready()
+    
+    while True:
+        try:
+            # Verificar última execução
+            last_exec = await bot.db.get_last_task_execution(task_name)
+            now = datetime.utcnow()
+            
+            # Calcular se deve executar agora
+            should_execute = False
+            
+            if not last_exec:  # Primeira execução
+                should_execute = True
+            else:
+                # Verificar se o período de monitoramento foi reduzido
+                if last_exec['monitoring_period'] > monitoring_period:
+                    should_execute = True
+                # Ou se passaram 24 horas desde a última execução
+                elif (now - last_exec['last_execution']) >= timedelta(hours=24):
+                    should_execute = True
+            
+            if should_execute:
+                start_time = time.time()
+                await task_func()
+                perf_metrics.record_execution(task_name, time.time() - start_time)
+                await bot.db.log_task_execution(task_name, monitoring_period)
+            
+            # Esperar 1 hora antes de verificar novamente
+            await asyncio.sleep(3600)
+                
+        except Exception as e:
+            logger.error(f"Erro na task {task_name}: {e}")
+            await asyncio.sleep(600)  # Esperar 10 minutos antes de tentar novamente
+
 @log_task_metrics("inactivity_check")
-async def inactivity_check():
+async def _inactivity_check():
     """Verifica a inatividade dos membros e remove cargos se necessário"""
     await bot.wait_until_ready()
     
@@ -151,6 +186,15 @@ async def inactivity_check():
             continue
     
     logger.info(f"Verificação de inatividade concluída. Membros processados: {processed_members}, Cargos removidos: {members_with_roles_removed}")
+
+async def inactivity_check():
+    """Wrapper para a task com intervalo persistente"""
+    monitoring_period = bot.config['monitoring_period']
+    await execute_task_with_persistent_interval(
+        "inactivity_check", 
+        monitoring_period,
+        _inactivity_check
+    )
 
 async def process_member_inactivity(member: discord.Member, guild: discord.Guild, 
                                   required_minutes: int, required_days: int, 
@@ -284,10 +328,9 @@ async def process_member_inactivity(member: discord.Member, guild: discord.Guild
     
     return result
 
-@tasks.loop(hours=24)
 @log_task_metrics("check_warnings")
-async def check_warnings():
-    """Verifica e envia avisos de inatividade para membros"""
+async def _check_warnings():
+    """Lógica original da task"""
     await bot.wait_until_ready()
     
     required_minutes = bot.config['required_minutes']
@@ -316,6 +359,15 @@ async def check_warnings():
             await asyncio.sleep(bot.rate_limit_delay)
     
     logger.info(f"Verificação de avisos concluída. Avisos enviados: Primeiro={warnings_sent['first']}, Segundo={warnings_sent['second']}")
+
+async def check_warnings():
+    """Wrapper para a task com intervalo persistente"""
+    monitoring_period = bot.config['monitoring_period']
+    await execute_task_with_persistent_interval(
+        "check_warnings", 
+        monitoring_period,
+        _check_warnings
+    )
 
 async def process_member_warnings(member: discord.Member, guild: discord.Guild, 
                                 tracked_roles: List[int], first_warning_days: int, 
@@ -362,10 +414,9 @@ async def process_member_warnings(member: discord.Member, guild: discord.Guild,
     except Exception as e:
         logger.error(f"Erro ao verificar avisos para {member}: {e}")
 
-@tasks.loop(hours=24)
 @log_task_metrics("cleanup_members")
-async def cleanup_members():
-    """Remove membros inativos que estão sem cargos há muito tempo"""
+async def _cleanup_members():
+    """Lógica original da task"""
     await bot.wait_until_ready()
     
     kick_after_days = bot.config['kick_after_days']
@@ -387,6 +438,15 @@ async def cleanup_members():
             await asyncio.sleep(bot.rate_limit_delay)
     
     logger.info(f"Limpeza de membros concluída. Membros expulsos: {members_kicked}")
+
+async def cleanup_members():
+    """Wrapper para a task com intervalo persistente"""
+    monitoring_period = bot.config['monitoring_period']
+    await execute_task_with_persistent_interval(
+        "cleanup_members", 
+        monitoring_period,
+        _cleanup_members
+    )
 
 async def process_member_cleanup(member: discord.Member, guild: discord.Guild, 
                                cutoff_date: datetime, kick_after_days: int, 
@@ -428,10 +488,9 @@ async def process_member_cleanup(member: discord.Member, guild: discord.Guild,
     except Exception as e:
         logger.error(f"Erro ao verificar membro para expulsão {member}: {e}")
 
-@tasks.loop(hours=24)
 @log_task_metrics("database_backup")
-async def database_backup():
-    """Executa backup diário do banco de dados"""
+async def _database_backup():
+    """Lógica original da task"""
     await bot.wait_until_ready()
     if not hasattr(bot, 'db_backup'):
         from database import DatabaseBackup
@@ -451,10 +510,18 @@ async def database_backup():
         logger.error(f"Erro ao executar backup do banco de dados: {e}")
         await bot.log_action("Erro no Backup", None, f"Falha ao criar backup: {str(e)}")
 
-@tasks.loop(hours=24)
+async def database_backup():
+    """Wrapper para a task com intervalo persistente"""
+    monitoring_period = 1  # Backup should run daily regardless of monitoring period
+    await execute_task_with_persistent_interval(
+        "database_backup", 
+        monitoring_period,
+        _database_backup
+    )
+
 @log_task_metrics("cleanup_old_data")
-async def cleanup_old_data():
-    """Limpa dados antigos do banco de dados"""
+async def _cleanup_old_data():
+    """Lógica original da task"""
     await bot.wait_until_ready()
     
     try:
@@ -496,10 +563,18 @@ async def cleanup_old_data():
         logger.error(f"Erro ao limpar dados antigos: {e}")
         await bot.log_action("Erro na Limpeza de Dados", None, f"Falha ao limpar dados antigos: {str(e)}")
 
-@tasks.loop(minutes=1)
+async def cleanup_old_data():
+    """Wrapper para a task com intervalo persistente"""
+    monitoring_period = 1  # Cleanup should run daily regardless of monitoring period
+    await execute_task_with_persistent_interval(
+        "cleanup_old_data", 
+        monitoring_period,
+        _cleanup_old_data
+    )
+
 @log_task_metrics("monitor_rate_limits")
-async def monitor_rate_limits():
-    """Monitora e ajusta dinamicamente os rate limits"""
+async def _monitor_rate_limits():
+    """Lógica original da task"""
     await bot.wait_until_ready()
     
     try:
@@ -549,10 +624,18 @@ async def monitor_rate_limits():
     except Exception as e:
         logger.error(f"Erro no monitoramento de rate limits: {e}")
 
-@tasks.loop(hours=24)
+async def monitor_rate_limits():
+    """Wrapper para a task com intervalo persistente"""
+    monitoring_period = 1  # Rate limit monitoring should run frequently regardless of monitoring period
+    await execute_task_with_persistent_interval(
+        "monitor_rate_limits", 
+        monitoring_period,
+        _monitor_rate_limits
+    )
+
 @log_task_metrics("report_metrics")
-async def report_metrics():
-    """Report daily task metrics"""
+async def _report_metrics():
+    """Lógica original da task"""
     await bot.wait_until_ready()
     
     try:
@@ -578,6 +661,15 @@ async def report_metrics():
         task_metrics.success_counts.clear()
     except Exception as e:
         logger.error(f"Erro ao gerar relatório de métricas: {e}")
+
+async def report_metrics():
+    """Wrapper para a task com intervalo persistente"""
+    monitoring_period = 1  # Metrics reporting should run daily regardless of monitoring period
+    await execute_task_with_persistent_interval(
+        "report_metrics", 
+        monitoring_period,
+        _report_metrics
+    )
 
 async def generate_activity_report(member: discord.Member, sessions: list) -> Optional[discord.File]:
     """Gera um relatório gráfico de atividade e retorna como discord.File"""
@@ -652,13 +744,14 @@ async def start_tasks_when_ready():
     
     logger.info("Bot está pronto - iniciando tarefas agendadas")
     
-    inactivity_check.start()
-    check_warnings.start()
-    cleanup_members.start()
-    database_backup.start()
-    cleanup_old_data.start()
-    monitor_rate_limits.start()
-    report_metrics.start()
+    # Inicia todas as tasks com a nova lógica
+    bot.loop.create_task(inactivity_check())
+    bot.loop.create_task(check_warnings())
+    bot.loop.create_task(cleanup_members())
+    bot.loop.create_task(database_backup())
+    bot.loop.create_task(cleanup_old_data())
+    bot.loop.create_task(monitor_rate_limits())
+    bot.loop.create_task(report_metrics())
 
 def setup_tasks():
     """Configura e inicia todas as tarefas agendadas"""
