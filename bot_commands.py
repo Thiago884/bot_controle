@@ -981,13 +981,6 @@ async def force_check(interaction: discord.Interaction, member: discord.Member):
         tracked_roles = bot.config['tracked_roles']
         member_tracked_roles = [role for role in member.roles if role.id in tracked_roles]
         
-        # Obter o cargo mais alto do bot
-        bot_member = interaction.guild.get_member(bot.user.id)
-        bot_top_role = bot_member.top_role
-        
-        # Filtrar apenas cargos que o bot pode gerenciar
-        manageable_roles = [role for role in member_tracked_roles if role < bot_top_role]
-        
         embed = discord.Embed(
             title=f"Verificação de Atividade - {member.display_name}",
             color=discord.Color.blue()
@@ -1027,7 +1020,7 @@ async def force_check(interaction: discord.Interaction, member: discord.Member):
             )
             
             # Criar view com botões se o usuário tiver cargos monitorados e não cumprir requisitos
-            if manageable_roles:
+            if member_tracked_roles:
                 view = discord.ui.View()
                 button = discord.ui.Button(
                     style=discord.ButtonStyle.danger,
@@ -1044,14 +1037,14 @@ async def force_check(interaction: discord.Interaction, member: discord.Member):
                     
                     try:
                         start_time = time.time()
-                        await member.remove_roles(*manageable_roles)
+                        await member.remove_roles(*member_tracked_roles)
                         perf_metrics.record_api_call(time.time() - start_time)
                         
                         start_time = time.time()
-                        await bot.db.log_removed_roles(member.id, member.guild.id, [r.id for r in manageable_roles])
+                        await bot.db.log_removed_roles(member.id, member.guild.id, [r.id for r in member_tracked_roles])
                         perf_metrics.record_db_query(time.time() - start_time)
                         
-                        removed_roles = ", ".join([f"`{role.name}`" for role in manageable_roles])
+                        removed_roles = ", ".join([f"`{role.name}`" for role in member_tracked_roles])
                         await interaction.response.send_message(
                             f"✅ Cargos removidos com sucesso: {removed_roles}",
                             ephemeral=True)
