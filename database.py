@@ -715,13 +715,15 @@ class Database:
                 self.pool.release(conn)
 
     async def log_removed_roles(self, user_id: int, guild_id: int, role_ids: List[int]):
-        """Registra cargos removidos por inatividade"""
-        now = datetime.utcnow()
+        """Registra cargos removidos por inatividade (COM transação)."""
         conn = None
         try:
+            # 1. Adquire uma conexão do pool e INICIA uma transação
             conn = await self.pool.acquire()
+            await conn.begin()  # ⚠️ Tudo a partir daqui é "temporário" até o commit
+            
+            # 2. Executa todas as operações dentro da transação
             async with conn.cursor() as cursor:
-                # Usar uma única transação para múltiplos inserts
                 for role_id in role_ids:
                     await cursor.execute('''
                         INSERT INTO removed_roles 
@@ -729,13 +731,19 @@ class Database:
                         VALUES (%s, %s, %s, %s)
                         ON DUPLICATE KEY UPDATE 
                             removal_date = VALUES(removal_date)
-                    ''', (user_id, guild_id, role_id, now))
+                    ''', (user_id, guild_id, role_id, datetime.utcnow()))
                 
-                await conn.commit()
+                # 3. Se tudo deu certo, CONFIRMA as alterações no banco
+                await conn.commit()  # ✅ Agora os dados são persistentes
+
         except Exception as e:
-            logger.error(f"Erro ao registrar cargos removidos: {e}")
-            raise
+            # 4. Se algo falhar, REVERTE a transação inteira
+            if conn:
+                await conn.rollback()  # 🔄 Nenhum dado é alterado no banco
+            raise  # Propaga o erro para ser tratado pela task
+
         finally:
+            # 5. Libera a conexão de volta para o pool
             if conn:
                 self.pool.release(conn)
 

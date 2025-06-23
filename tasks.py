@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 import asyncio
 import logging
 from main import bot
-from discord.ext import tasks
+from discord.ext import tasks, commands
 import discord
 from io import BytesIO
 from typing import Optional, Dict, List
@@ -157,6 +157,132 @@ async def execute_task_with_persistent_interval(task_name: str, monitoring_perio
         except Exception as e:
             logger.error(f"Erro na task {task_name}: {e}")
             await asyncio.sleep(600)  # Esperar 10 minutos antes de tentar novamente
+
+async def execute_task_with_retry(task_name: str, task_func: callable, max_retries: int = 3):
+    """Executa uma task com tentativas de recuperação."""
+    retries = 0
+    while retries < max_retries:
+        try:
+            await task_func()
+            break
+        except Exception as e:
+            retries += 1
+            logger.error(f"Falha na task {task_name} (tentativa {retries}/{max_retries}): {e}")
+            if retries >= max_retries:
+                logger.error(f"Task {task_name} falhou após {max_retries} tentativas.")
+                await bot.log_action(
+                    "Falha na Task",
+                    None,
+                    f"Task {task_name} falhou após {max_retries} tentativas: {e}"
+                )
+            await asyncio.sleep(60 * retries)  # Espera exponencial
+
+@bot.event
+async def on_shutdown():
+    """Executa ações de limpeza antes do desligamento do bot."""
+    logger.info("Bot está sendo desligado - executando limpeza...")
+    await bot.log_action("Desligamento", None, "Bot está sendo desligado")
+    await save_task_states()
+    await emergency_backup()
+
+@bot.event
+async def on_resumed():
+    """Executa ações quando o bot reconecta após uma queda."""
+    logger.info("Bot reconectado - reiniciando tarefas...")
+    await bot.log_action("Reconexão", None, "Bot reconectado após queda")
+    await start_tasks_when_ready()  # Reinicia as tasks
+
+@bot.event
+async def on_disconnect():
+    """Executa ações quando o bot é desconectado."""
+    logger.warning("Bot desconectado - realizando backup emergencial...")
+    await emergency_backup()
+
+def handle_exception(loop, context):
+    """Captura exceções não tratadas."""
+    logger.error(f"Exceção não tratada: {context['message']}", exc_info=context.get('exception'))
+    asyncio.create_task(bot.log_action(
+        "Exceção Não Tratada",
+        None,
+        f"Exceção: {context.get('exception')}\nMensagem: {context['message']}"
+    ))
+
+async def save_task_states():
+    """Salva o estado atual das tasks no banco de dados."""
+    try:
+        for task_name in ['inactivity_check', 'check_warnings', 'cleanup_members']:
+            last_exec = await bot.db.get_last_task_execution(task_name)
+            if last_exec:
+                await bot.db.log_task_execution(task_name, last_exec['monitoring_period'])
+        logger.info("Estados das tasks salvos com sucesso.")
+    except Exception as e:
+        logger.error(f"Erro ao salvar estados das tasks: {e}")
+
+async def load_task_states():
+    """Carrega o estado das tasks do banco de dados."""
+    try:
+        for task_name in ['inactivity_check', 'check_warnings', 'cleanup_members']:
+            last_exec = await bot.db.get_last_task_execution(task_name)
+            if last_exec:
+                await bot.db.log_task_execution(task_name, last_exec['monitoring_period'])
+        logger.info("Estados das tasks carregados com sucesso.")
+    except Exception as e:
+        logger.error(f"Erro ao carregar estados das tasks: {e}")
+
+async def emergency_backup():
+    """Realiza um backup emergencial dos dados críticos."""
+    try:
+        logger.info("Iniciando backup emergencial...")
+        if not hasattr(bot, 'db_backup'):
+            from database import DatabaseBackup
+            bot.db_backup = DatabaseBackup(bot.db)
+        await bot.db_backup.create_backup()
+        logger.info("Backup emergencial concluído com sucesso.")
+    except Exception as e:
+        logger.error(f"Falha no backup emergencial: {e}")
+
+@log_task_metrics("health_check")
+async def _health_check():
+    """Verifica a saúde do bot e reinicia tasks se necessário."""
+    await bot.wait_until_ready()
+    try:
+        # Verifica se as tasks estão rodando
+        active_tasks = {task.get_name() for task in asyncio.all_tasks() if task.get_name()}
+        expected_tasks = {'inactivity_check', 'check_warnings', 'cleanup_members', 
+                         'database_backup', 'cleanup_old_data', 'monitor_rate_limits', 
+                         'report_metrics', 'health_check'}
+
+        for task_name in expected_tasks:
+            if task_name not in active_tasks:
+                logger.warning(f"Task {task_name} não está ativa - reiniciando...")
+                if task_name == 'inactivity_check':
+                    bot.loop.create_task(execute_task_with_retry("inactivity_check", inactivity_check))
+                elif task_name == 'check_warnings':
+                    bot.loop.create_task(execute_task_with_retry("check_warnings", check_warnings))
+                elif task_name == 'cleanup_members':
+                    bot.loop.create_task(execute_task_with_retry("cleanup_members", cleanup_members))
+                elif task_name == 'database_backup':
+                    bot.loop.create_task(execute_task_with_retry("database_backup", database_backup))
+                elif task_name == 'cleanup_old_data':
+                    bot.loop.create_task(execute_task_with_retry("cleanup_old_data", cleanup_old_data))
+                elif task_name == 'monitor_rate_limits':
+                    bot.loop.create_task(execute_task_with_retry("monitor_rate_limits", monitor_rate_limits))
+                elif task_name == 'report_metrics':
+                    bot.loop.create_task(execute_task_with_retry("report_metrics", report_metrics))
+                elif task_name == 'health_check':
+                    bot.loop.create_task(execute_task_with_retry("health_check", health_check))
+
+        await bot.log_action("Verificação de Saúde", None, f"Tasks ativas: {', '.join(active_tasks)}")
+    except Exception as e:
+        logger.error(f"Erro na verificação de saúde: {e}")
+
+async def health_check():
+    """Wrapper para a task de verificação de saúde."""
+    await execute_task_with_persistent_interval(
+        "health_check",
+        1,  # Verifica a cada hora
+        _health_check
+    )
 
 @log_task_metrics("inactivity_check")
 async def _inactivity_check():
@@ -740,7 +866,6 @@ async def start_tasks_when_ready():
     """Espera o bot estar pronto antes de iniciar as tasks"""
     await bot.wait_until_ready()
     
-    # Verifique se o bot está realmente conectado
     if not bot.is_ready():
         logger.warning("Bot não está pronto - tentando novamente em 10 segundos")
         await asyncio.sleep(10)
@@ -748,16 +873,23 @@ async def start_tasks_when_ready():
     
     logger.info("Bot está pronto - iniciando tarefas agendadas")
     
-    # Inicia todas as tasks com a nova lógica
-    bot.loop.create_task(inactivity_check())
-    bot.loop.create_task(check_warnings())
-    bot.loop.create_task(cleanup_members())
-    bot.loop.create_task(database_backup())
-    bot.loop.create_task(cleanup_old_data())
-    bot.loop.create_task(monitor_rate_limits())
-    bot.loop.create_task(report_metrics())
+    # Carrega estados salvos
+    await load_task_states()
+    
+    # Inicia todas as tasks
+    bot.loop.create_task(execute_task_with_retry("inactivity_check", inactivity_check))
+    bot.loop.create_task(execute_task_with_retry("check_warnings", check_warnings))
+    bot.loop.create_task(execute_task_with_retry("cleanup_members", cleanup_members))
+    bot.loop.create_task(execute_task_with_retry("database_backup", database_backup))
+    bot.loop.create_task(execute_task_with_retry("cleanup_old_data", cleanup_old_data))
+    bot.loop.create_task(execute_task_with_retry("monitor_rate_limits", monitor_rate_limits))
+    bot.loop.create_task(execute_task_with_retry("report_metrics", report_metrics))
+    bot.loop.create_task(execute_task_with_retry("health_check", health_check))
 
 def setup_tasks():
     """Configura e inicia todas as tarefas agendadas"""
+    # Configura o handler de exceções globais
+    bot.loop.set_exception_handler(handle_exception)
+    
     # Não inicie as tasks imediatamente, espere o bot estar pronto
     bot.loop.create_task(start_tasks_when_ready())
