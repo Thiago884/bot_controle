@@ -122,6 +122,7 @@ class Database:
         self.heartbeat_task = None
         self._config_cache = {}  # Cache para configurações
         self._last_config_update = None
+        self._active_tasks = set()  # Track active tasks
 
     async def initialize(self):
         """Inicializa o pool de conexões com configurações otimizadas para HostGator"""
@@ -171,6 +172,8 @@ class Database:
                     
                 # Iniciar task de heartbeat
                 self.heartbeat_task = asyncio.create_task(self._db_heartbeat(interval=300))  # 5 minutos
+                self.heartbeat_task._name = 'database_heartbeat'
+                self._active_tasks.add(self.heartbeat_task)
                 logger.info("Task de heartbeat do banco de dados iniciada")
                 
                 # Aquecer o pool (criar algumas conexões iniciais)
@@ -970,3 +973,28 @@ class Database:
                 await cursor.close()
             if conn:
                 self.pool.release(conn)
+
+    async def health_check(self):
+        """Verifica a saúde do banco de dados e reinicia tasks se necessário"""
+        try:
+            # Verifica se as tasks estão rodando
+            active_tasks = {t._name for t in asyncio.all_tasks() if hasattr(t, '_name') and t._name}
+            expected_tasks = {'database_heartbeat'}
+            
+            for task_name in expected_tasks:
+                if task_name not in active_tasks:
+                    logger.warning(f"Task {task_name} não está ativa - reiniciando...")
+                    if task_name == 'database_heartbeat':
+                        self.heartbeat_task = asyncio.create_task(self._db_heartbeat(interval=300))
+                        self.heartbeat_task._name = 'database_heartbeat'
+                        self._active_tasks.add(self.heartbeat_task)
+            
+            # Verifica o status do pool de conexões
+            pool_status = await self.check_pool_status()
+            if pool_status:
+                logger.info(f"Status do pool de conexões: {pool_status}")
+            
+            return True
+        except Exception as e:
+            logger.error(f"Erro na verificação de saúde do banco de dados: {e}")
+            return False
