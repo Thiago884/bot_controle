@@ -1179,3 +1179,117 @@ async def cleanup_data(interaction: discord.Interaction, days: int = 60):
         logger.error(f"Erro ao limpar dados antigos: {e}")
         await interaction.followup.send(
             "❌ Ocorreu um erro ao limpar os dados. Por favor, tente novamente.")
+
+@bot.tree.command(name="server_monitoring_status", description="Mostra o status global do monitoramento no servidor")
+@allowed_roles_only()
+async def server_monitoring_status(interaction: discord.Interaction):
+    """Mostra informações globais sobre o monitoramento no servidor"""
+    try:
+        await interaction.response.defer(thinking=True)
+        
+        # Obter informações da última execução da task
+        last_exec = await bot.db.get_last_task_execution("inactivity_check")
+        now = datetime.now(bot.timezone)
+        monitoring_period = bot.config['monitoring_period']
+        
+        embed = discord.Embed(
+            title="🔄 Status Global do Monitoramento",
+            color=discord.Color.blue(),
+            timestamp=now
+        )
+        
+        # Informações básicas de configuração
+        embed.add_field(
+            name="⚙️ Configuração Atual",
+            value=(
+                f"**Período de monitoramento:** {monitoring_period} dias\n"
+                f"**Minutos necessários:** {bot.config['required_minutes']} min/dia\n"
+                f"**Dias necessários:** {bot.config['required_days']} dias\n"
+                f"**Cargos monitorados:** {len(bot.config['tracked_roles'])}"
+            ),
+            inline=False
+        )
+        
+        # Cálculo do ciclo de monitoramento
+        if last_exec:
+            last_exec_time = last_exec['last_execution'].replace(tzinfo=bot.timezone)
+            next_check = last_exec_time + timedelta(hours=24)
+            time_to_next_check = next_check - now
+            
+            # Calcular o término do período atual de monitoramento
+            period_end = last_exec_time + timedelta(days=monitoring_period)
+            time_to_period_end = period_end - now
+            
+            # Calcular quando ocorrerá a próxima remoção de cargos
+            next_removal = None
+            if now < period_end:
+                next_removal = period_end
+                time_to_removal = period_end - now
+            else:
+                # Se o período já terminou, a remoção ocorrerá na próxima execução
+                next_removal = next_check
+                time_to_removal = time_to_next_check
+            
+            embed.add_field(
+                name="⏳ Ciclo Atual",
+                value=(
+                    f"**Última verificação:** {last_exec_time.strftime('%d/%m/%Y %H:%M')}\n"
+                    f"**Próxima verificação:** {next_check.strftime('%d/%m/%Y %H:%M')}\n"
+                    f"**Faltam:** {time_to_next_check.days}d {time_to_next_check.seconds//3600}h\n"
+                    f"**Término do período:** {period_end.strftime('%d/%m/%Y %H:%M')}\n"
+                    f"**Faltam:** {time_to_period_end.days}d {time_to_period_end.seconds//3600}h"
+                ),
+                inline=False
+            )
+            
+            embed.add_field(
+                name="⚠️ Próxima Remoção de Cargos",
+                value=(
+                    f"**Ocorrerá em:** {next_removal.strftime('%d/%m/%Y %H:%M')}\n"
+                    f"**Faltam:** {time_to_removal.days}d {time_to_removal.seconds//3600}h\n"
+                    f"(Na próxima verificação após término do período)"
+                ),
+                inline=False
+            )
+            
+            # Estatísticas do último ciclo
+            async with bot.db.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    # Contar verificações no último período
+                    await cursor.execute('''
+                        SELECT 
+                            SUM(CASE WHEN meets_requirements = 1 THEN 1 ELSE 0 END) as compliant,
+                            SUM(CASE WHEN meets_requirements = 0 THEN 1 ELSE 0 END) as non_compliant
+                        FROM checked_periods
+                        WHERE guild_id = %s 
+                        AND period_start >= %s
+                    ''', (interaction.guild.id, last_exec_time))
+                    stats = await cursor.fetchone()
+                    
+                    if stats:
+                        total = stats['compliant'] + stats['non_compliant']
+                        if total > 0:
+                            embed.add_field(
+                                name="📊 Estatísticas do Último Ciclo",
+                                value=(
+                                    f"**Membros verificados:** {total}\n"
+                                    f"**Cumprem requisitos:** {stats['compliant']} ({stats['compliant']/total:.0%})\n"
+                                    f"**Não cumprem:** {stats['non_compliant']} ({stats['non_compliant']/total:.0%})"
+                                ),
+                                inline=False
+                            )
+        
+        else:
+            embed.description = (
+                "ℹ️ O sistema de monitoramento ainda não foi executado neste servidor.\n"
+                "A primeira verificação ocorrerá em até 24 horas após a ativação."
+            )
+        
+        embed.set_footer(text=f"Servidor: {interaction.guild.name}")
+        await interaction.followup.send(embed=embed)
+        
+    except Exception as e:
+        logger.error(f"Erro ao verificar status global do monitoramento: {e}")
+        await interaction.followup.send(
+            "❌ Ocorreu um erro ao verificar o status do monitoramento no servidor.",
+            ephemeral=True)
