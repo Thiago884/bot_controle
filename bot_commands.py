@@ -1258,8 +1258,8 @@ async def server_monitoring_status(interaction: discord.Interaction):
                     # Contar verificações no último período
                     await cursor.execute('''
                         SELECT 
-                            SUM(CASE WHEN meets_requirements = 1 THEN 1 ELSE 0 END) as compliant,
-                            SUM(CASE WHEN meets_requirements = 0 THEN 1 ELSE 0 END) as non_compliant
+                            COALESCE(SUM(CASE WHEN meets_requirements = 1 THEN 1 ELSE 0 END), 0) as compliant,
+                            COALESCE(SUM(CASE WHEN meets_requirements = 0 THEN 1 ELSE 0 END), 0) as non_compliant
                         FROM checked_periods
                         WHERE guild_id = %s 
                         AND period_start >= %s
