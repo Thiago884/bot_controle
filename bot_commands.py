@@ -1182,10 +1182,14 @@ async def cleanup_data(interaction: discord.Interaction, days: int = 60):
 
 @bot.tree.command(name="server_monitoring_status", description="Mostra o status global do monitoramento no servidor")
 @allowed_roles_only()
+@app_commands.checks.cooldown(1, 30.0, key=lambda i: (i.guild_id, i.user.id))
 async def server_monitoring_status(interaction: discord.Interaction):
     """Mostra informações globais sobre o monitoramento no servidor"""
     try:
         await interaction.response.defer(thinking=True)
+        
+        # Pequeno delay para evitar rate limit
+        await asyncio.sleep(1)
         
         # Obter informações da última execução da task
         last_exec = await bot.db.get_last_task_execution("inactivity_check")

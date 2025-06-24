@@ -335,15 +335,6 @@ async def _inactivity_check():
     
     logger.info(f"Verificação de inatividade concluída. Membros processados: {processed_members}, Cargos removidos: {members_with_roles_removed}")
 
-async def inactivity_check():
-    """Wrapper para a task com intervalo persistente"""
-    monitoring_period = bot.config['monitoring_period']
-    await execute_task_with_persistent_interval(
-        "inactivity_check", 
-        monitoring_period,
-        _inactivity_check
-    )
-
 async def process_member_inactivity(member: discord.Member, guild: discord.Guild, 
                                   required_minutes: int, required_days: int, 
                                   monitoring_period: int, tracked_roles: List[int]) -> Dict:
@@ -369,94 +360,101 @@ async def process_member_inactivity(member: discord.Member, guild: discord.Guild
         
         now = datetime.now(bot.timezone)
         
-        if last_check:
-            last_period_end = last_check['period_end'].replace(tzinfo=bot.timezone)
-            if now < last_period_end:
-                return result
+        # Definir novo período de verificação (futuro)
+        new_period_end = now + timedelta(days=monitoring_period)
+        new_period_start = now
         
-        # Definir período de verificação
-        period_end = now
-        period_start = period_end - timedelta(days=monitoring_period)
-        
-        # Obter sessões de voz no período
+        # Registrar novo período de verificação
         start_time = time.time()
-        sessions = await bot.db.get_voice_sessions(member.id, guild.id, period_start, period_end)
+        await bot.db.log_period_check(member.id, guild.id, new_period_start, new_period_end, False)
         perf_metrics.record_db_query(time.time() - start_time)
         
-        # Verificar requisitos
-        meets_requirements = False
-        valid_days = set()
-        
-        if sessions:
-            for session in sessions:
-                if session['duration'] >= required_minutes * 60:
-                    day = session['join_time'].replace(tzinfo=bot.timezone).date()
-                    valid_days.add(day)
+        # Verificar se estamos no final de um período anterior para remover cargos
+        if last_check and now >= last_check['period_end'].replace(tzinfo=bot.timezone):
+            # Obter sessões do período que acabou
+            start_time = time.time()
+            sessions = await bot.db.get_voice_sessions(
+                member.id, guild.id, 
+                last_check['period_start'].replace(tzinfo=bot.timezone),
+                last_check['period_end'].replace(tzinfo=bot.timezone))
+            perf_metrics.record_db_query(time.time() - start_time)
             
-            meets_requirements = len(valid_days) >= required_days
-        else:
+            # Verificar requisitos do período que acabou
             meets_requirements = False
-        
-        # Registrar verificação
-        start_time = time.time()
-        await bot.db.log_period_check(member.id, guild.id, period_start, period_end, meets_requirements)
-        perf_metrics.record_db_query(time.time() - start_time)
-        
-        # Ações para quem não cumpriu os requisitos
-        if not meets_requirements:
-            roles_to_remove = [role for role in member.roles if role.id in tracked_roles]
+            valid_days = set()
             
-            if roles_to_remove:
-                try:
-                    start_time = time.time()
-                    await member.remove_roles(*roles_to_remove)
-                    perf_metrics.record_api_call(time.time() - start_time)
-                    
-                    # Enviar mensagem de aviso final via DM
-                    await bot.send_warning(member, 'final')
-                    
-                    start_time = time.time()
-                    await bot.db.log_removed_roles(member.id, guild.id, [r.id for r in roles_to_remove])
-                    perf_metrics.record_db_query(time.time() - start_time)
-                    
-                    # Gerar relatório gráfico
-                    report_file = await generate_activity_report(member, sessions)
-                    
-                    log_message = (
-                        f"Cargos removidos: {', '.join([r.name for r in roles_to_remove])}\n"
-                        f"Sessões no período: {len(sessions)}\n"
-                        f"Dias válidos: {len(valid_days)}/{required_days}"
-                    )
-                    
-                    if report_file:
-                        await bot.log_action(
-                            "Cargo Removido",
-                            member,
-                            log_message,
-                            file=report_file
+            if sessions:
+                for session in sessions:
+                    if session['duration'] >= required_minutes * 60:
+                        day = session['join_time'].replace(tzinfo=bot.timezone).date()
+                        valid_days.add(day)
+                
+                meets_requirements = len(valid_days) >= required_days
+            
+            # Ações para quem não cumpriu os requisitos
+            if not meets_requirements:
+                roles_to_remove = [role for role in member.roles if role.id in tracked_roles]
+                
+                if roles_to_remove:
+                    try:
+                        start_time = time.time()
+                        await member.remove_roles(*roles_to_remove)
+                        perf_metrics.record_api_call(time.time() - start_time)
+                        
+                        # Enviar mensagem de aviso final via DM
+                        await bot.send_warning(member, 'final')
+                        
+                        start_time = time.time()
+                        await bot.db.log_removed_roles(member.id, guild.id, [r.id for r in roles_to_remove])
+                        perf_metrics.record_db_query(time.time() - start_time)
+                        
+                        # Gerar relatório gráfico
+                        report_file = await generate_activity_report(member, sessions)
+                        
+                        log_message = (
+                            f"Cargos removidos: {', '.join([r.name for r in roles_to_remove])}\n"
+                            f"Sessões no período: {len(sessions)}\n"
+                            f"Dias válidos: {len(valid_days)}/{required_days}"
                         )
-                    else:
-                        await bot.log_action(
-                            "Cargo Removido",
-                            member,
-                            log_message
-                        )
-                    
-                    await bot.notify_roles(
-                        f"🚨 Cargos removidos de {member.mention} por inatividade: " +
-                        ", ".join([f"`{r.name}`" for r in roles_to_remove]))
-                    
-                    result['removed'] = 1
-                    
-                except discord.Forbidden:
-                    await bot.log_action("Erro ao Remover Cargo", member, "Permissões insuficientes")
-                except Exception as e:
-                    logger.error(f"Erro ao remover cargos de {member}: {e}")
+                        
+                        if report_file:
+                            await bot.log_action(
+                                "Cargo Removido",
+                                member,
+                                log_message,
+                                file=report_file
+                            )
+                        else:
+                            await bot.log_action(
+                                "Cargo Removido",
+                                member,
+                                log_message
+                            )
+                        
+                        await bot.notify_roles(
+                            f"🚨 Cargos removidos de {member.mention} por inatividade: " +
+                            ", ".join([f"`{r.name}`" for r in roles_to_remove]))
+                        
+                        result['removed'] = 1
+                        
+                    except discord.Forbidden:
+                        await bot.log_action("Erro ao Remover Cargo", member, "Permissões insuficientes")
+                    except Exception as e:
+                        logger.error(f"Erro ao remover cargos de {member}: {e}")
     
     except Exception as e:
         logger.error(f"Erro ao verificar inatividade para {member}: {e}")
     
     return result
+
+async def inactivity_check():
+    """Wrapper para a task com intervalo persistente"""
+    monitoring_period = bot.config['monitoring_period']
+    await execute_task_with_persistent_interval(
+        "inactivity_check", 
+        monitoring_period,
+        _inactivity_check
+    )
 
 @log_task_metrics("check_warnings")
 async def _check_warnings():
