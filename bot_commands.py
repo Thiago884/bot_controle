@@ -1004,23 +1004,38 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
 @activity_ranking.error
 async def activity_ranking_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     """Trata erros específicos do comando activity_ranking"""
-    if isinstance(error, app_commands.CommandOnCooldown):
-        await interaction.response.send_message(
-            f"⏳ Este comando está em cooldown. Tente novamente em {error.retry_after:.1f} segundos.",
-            ephemeral=True)
-    elif isinstance(error, discord.errors.HTTPException) and error.status == 429:
-        retry_after = float(error.response.headers.get('Retry-After', 60))
-        await interaction.response.send_message(
-            f"⚠️ O bot está sendo limitado pelo Discord. Por favor, tente novamente em {retry_after:.1f} segundos.",
-            ephemeral=True)
-    else:
-        logger.error(f"Erro no comando activity_ranking: {error}")
-        try:
-            await interaction.response.send_message(
-                "❌ Ocorreu um erro ao executar este comando.",
-                ephemeral=True)
-        except:
-            pass
+    try:
+        if isinstance(error, app_commands.CommandOnCooldown):
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    f"⏳ Este comando está em cooldown. Tente novamente em {error.retry_after:.1f} segundos.",
+                    ephemeral=True)
+            else:
+                await interaction.followup.send(
+                    f"⏳ Este comando está em cooldown. Tente novamente em {error.retry_after:.1f} segundos.",
+                    ephemeral=True)
+        elif isinstance(error, discord.errors.HTTPException) and error.status == 429:
+            retry_after = float(error.response.headers.get('Retry-After', 60))
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    f"⚠️ O bot está sendo limitado pelo Discord. Por favor, tente novamente em {retry_after:.1f} segundos.",
+                    ephemeral=True)
+            else:
+                await interaction.followup.send(
+                    f"⚠️ O bot está sendo limitado pelo Discord. Por favor, tente novamente em {retry_after:.1f} segundos.",
+                    ephemeral=True)
+        else:
+            logger.error(f"Erro no comando activity_ranking: {error}")
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "❌ Ocorreu um erro ao executar este comando.",
+                    ephemeral=True)
+            else:
+                await interaction.followup.send(
+                    "❌ Ocorreu um erro ao executar este comando.",
+                    ephemeral=True)
+    except Exception as e:
+        logger.error(f"Erro ao tratar erro do comando activity_ranking: {e}")
 
 @bot.tree.command(name="force_check", description="Força uma verificação imediata de inatividade para um usuário")
 @app_commands.checks.cooldown(1, 30.0, key=lambda i: (i.guild_id, i.user.id))
@@ -1143,15 +1158,28 @@ async def force_check(interaction: discord.Interaction, member: discord.Member):
 @force_check.error
 async def force_check_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     """Trata erros específicos do comando force_check"""
-    if isinstance(error, app_commands.CommandOnCooldown):
-        await interaction.response.send_message(
-            f"⏳ Este comando está em cooldown. Tente novamente em {error.retry_after:.1f} segundos.",
-            ephemeral=True)
-    else:
-        logger.error(f"Erro no comando force_check: {error}")
-        await interaction.response.send_message(
-            "❌ Ocorreu um erro ao executar este comando.",
-            ephemeral=True)
+    try:
+        if isinstance(error, app_commands.CommandOnCooldown):
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    f"⏳ Este comando está em cooldown. Tente novamente em {error.retry_after:.1f} segundos.",
+                    ephemeral=True)
+            else:
+                await interaction.followup.send(
+                    f"⏳ Este comando está em cooldown. Tente novamente em {error.retry_after:.1f} segundos.",
+                    ephemeral=True)
+        else:
+            logger.error(f"Erro no comando force_check: {error}")
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "❌ Ocorreu um erro ao executar este comando.",
+                    ephemeral=True)
+            else:
+                await interaction.followup.send(
+                    "❌ Ocorreu um erro ao executar este comando.",
+                    ephemeral=True)
+    except Exception as e:
+        logger.error(f"Erro ao tratar erro do comando force_check: {e}")
 
 @bot.tree.command(name="cleanup_data", description="Limpa dados antigos do banco de dados")
 @allowed_roles_only()
