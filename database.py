@@ -5,7 +5,6 @@ import logging
 import glob
 import zipfile
 import json
-import random
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Union
 import aiomysql
@@ -118,22 +117,20 @@ class DatabaseBackup:
 class Database:
     def __init__(self):
         self.pool = None
-        self.semaphore = asyncio.Semaphore(25)
+        self.semaphore = asyncio.Semaphore(25)  # Aumentado para 25 conexões simultâneas
         self._is_initialized = False
         self.heartbeat_task = None
-        self._config_cache = {}
+        self._config_cache = {}  # Cache para configurações
         self._last_config_update = None
-        self._active_tasks = set()
+        self._active_tasks = set()  # Track active tasks
 
     async def initialize(self):
         """Inicializa o pool de conexões com configurações otimizadas"""
         if self._is_initialized:
             return
             
-        max_retries = 10
+        max_retries = 5
         initial_delay = 2
-        last_error = None
-        
         for attempt in range(max_retries):
             try:
                 self.pool = await aiomysql.create_pool(
@@ -142,39 +139,31 @@ class Database:
                     user=os.getenv('DB_USER'),
                     password=os.getenv('DB_PASS'),
                     db=os.getenv('DB_NAME'),
-                    minsize=2,
-                    maxsize=20,
-                    connect_timeout=20,
+                    minsize=5,
+                    maxsize=25,
+                    connect_timeout=30,  # Aumentado para 30 segundos
                     autocommit=True,
                     cursorclass=DictCursor,
                     pool_recycle=300,
-                    echo=False
+                    echo=False,
+                    sql_mode='NO_ENGINE_SUBSTITUTION' # Adicionado para maior compatibilidade
                 )
                 
-                # Testar conexão com timeout reduzido
+                # Testar conexão com timeout
                 try:
-                    async with asyncio.timeout(5):
-                        conn = await self.pool.acquire()
-                        try:
-                            async with conn.cursor() as cursor:
-                                await cursor.execute("SELECT 1")
-                                await cursor.fetchone()
-                        finally:
-                            self.pool.release(conn)
+                    async with self.pool.acquire() as conn:
+                        await conn.ping(reconnect=True)
+                        async with conn.cursor() as cursor:
+                            await cursor.execute("SELECT 1")
+                            await cursor.fetchone()
                 except asyncio.TimeoutError:
-                    logger.warning("Timeout ao testar conexão - tentando novamente...")
-                    continue
-                    
-                # Verificar e criar tabelas se não estiverem inicializadas
-                if not self._is_initialized:
-                    try:
-                        await self.create_tables()
-                        self._is_initialized = True
-                        logger.info("Banco de dados inicializado com sucesso")
-                    except Exception as e:
-                        logger.error(f"Erro ao criar tabelas: {e}")
-                        continue
+                    raise Exception("Timeout ao testar conexão com o banco de dados")
                 
+                # Verificar e criar tabelas
+                await self.create_tables()
+                self._is_initialized = True
+                logger.info("Banco de dados inicializado com sucesso")
+                    
                 # Iniciar task de heartbeat
                 self.heartbeat_task = asyncio.create_task(self._db_heartbeat(interval=300))
                 self.heartbeat_task._name = 'database_heartbeat'
@@ -184,26 +173,29 @@ class Database:
                 # Aquecer o pool
                 await self._warmup_pool()
                 
-                return
+                return # Sai do loop se a conexão for bem sucedida
                 
-            except Exception as e:
-                last_error = e
+            except aiomysql.OperationalError as e:
                 logger.error(f"Erro ao conectar ao MySQL (tentativa {attempt + 1}/{max_retries}): {e}")
+                if "Can't connect to MySQL server" in str(e):
+                    logger.critical("CAUSA PROVÁVEL: Firewall bloqueando a conexão ou credenciais/IP incorretos.")
                 if attempt < max_retries - 1:
-                    sleep_time = min(initial_delay * (2 ** attempt) + random.uniform(0, 1), 60)
-                    logger.info(f"Tentando novamente em {sleep_time:.2f} segundos...")
+                    sleep_time = initial_delay * (2 ** attempt)
+                    logger.info(f"Tentando novamente em {sleep_time} segundos...")
                     await asyncio.sleep(sleep_time)
-        
-        raise Exception(f"Falha ao conectar ao MySQL após {max_retries} tentativas. Último erro: {str(last_error)}")
+                else:
+                    logger.error("Falha ao conectar ao banco de dados após várias tentativas.")
+                    raise
 
     async def _warmup_pool(self):
         """Cria algumas conexões iniciais para aquecer o pool"""
         try:
             warmup_conns = []
-            for _ in range(min(2, self.pool.minsize)):
+            for _ in range(self.pool.minsize):
                 conn = await self.pool.acquire()
                 warmup_conns.append(conn)
             
+            # Liberar conexões após aquecimento
             for conn in warmup_conns:
                 self.pool.release(conn)
                 
@@ -215,40 +207,16 @@ class Database:
         """Envia um ping periódico para manter conexões ativas"""
         while True:
             try:
-                # Tentar adquirir conexão com timeout
-                try:
-                    async with asyncio.timeout(10):
-                        conn = await self.pool.acquire()
-                except asyncio.TimeoutError:
-                    logger.warning("Timeout ao adquirir conexão para heartbeat")
-                    await asyncio.sleep(60)
-                    continue
-                    
-                try:
+                async with self.pool.acquire() as conn:
                     async with conn.cursor() as cursor:
-                        await cursor.execute("SELECT 1")
+                        await asyncio.wait_for(cursor.execute("SELECT 1"), timeout=10)
                         await cursor.fetchone()
-                    logger.debug("Heartbeat do banco de dados executado com sucesso")
-                except Exception as e:
-                    logger.error(f"Erro durante heartbeat: {e}")
-                    # Tentar reiniciar o pool se o erro for grave
-                    if isinstance(e, (aiomysql.OperationalError, aiomysql.InterfaceError)):
-                        try:
-                            self.pool.close()
-                            await self.pool.wait_closed()
-                            logger.warning("Pool fechado devido a erro no heartbeat")
-                        except:
-                            pass
-                        # Tentar reinicializar
-                        try:
-                            await self.initialize()
-                        except Exception as init_error:
-                            logger.error(f"Falha ao reinicializar pool: {init_error}")
-                finally:
-                    self.pool.release(conn)
-                    
-                await asyncio.sleep(interval)
                 
+                logger.debug("Heartbeat do banco de dados executado com sucesso")
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                logger.info("Heartbeat do banco de dados cancelado.")
+                break
             except Exception as e:
                 logger.error(f"Erro no heartbeat do banco de dados: {e}")
                 await asyncio.sleep(60)
@@ -279,25 +247,6 @@ class Database:
             }
         return None
 
-    async def check_pool_health(self):
-        """Verifica a saúde do pool de conexões"""
-        if not self.pool or self.pool.closed:
-            return False
-            
-        try:
-            async with asyncio.timeout(10):
-                conn = await self.pool.acquire()
-                try:
-                    async with conn.cursor() as cursor:
-                        await cursor.execute("SELECT 1")
-                        await cursor.fetchone()
-                    return True
-                finally:
-                    self.pool.release(conn)
-        except Exception as e:
-            logger.error(f"Verificação de saúde do pool falhou: {e}")
-            return False
-
     async def create_tables(self):
         """Cria tabelas necessárias com índices otimizados"""
         async with self.semaphore:
@@ -305,8 +254,10 @@ class Database:
             try:
                 conn = await self.pool.acquire()
                 async with conn.cursor() as cursor:
+                    # Suprimir warnings de tabelas existentes
                     await cursor.execute("SET sql_notes = 0;")
                     
+                    # Tabela de atividade do usuário
                     await cursor.execute('''
                     CREATE TABLE IF NOT EXISTS user_activity (
                         user_id BIGINT,
@@ -322,6 +273,7 @@ class Database:
                         INDEX idx_activity_composite (guild_id, user_id, last_voice_join, last_voice_leave)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci''')
                     
+                    # Tabela de sessões de voz
                     await cursor.execute('''
                     CREATE TABLE IF NOT EXISTS voice_sessions (
                         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -338,6 +290,7 @@ class Database:
                         INDEX idx_session_composite (user_id, guild_id, join_time, leave_time, duration)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci''')
                     
+                    # Tabela de avisos
                     await cursor.execute('''
                     CREATE TABLE IF NOT EXISTS user_warnings (
                         user_id BIGINT,
@@ -349,6 +302,7 @@ class Database:
                         INDEX idx_user_guild_warning (user_id, guild_id, warning_type, warning_date)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci''')
                     
+                    # Tabela de cargos removidos
                     await cursor.execute('''
                     CREATE TABLE IF NOT EXISTS removed_roles (
                         user_id BIGINT,
@@ -360,6 +314,7 @@ class Database:
                         INDEX idx_removal_composite (user_id, guild_id, role_id, removal_date)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci''')
                     
+                    # Tabela de membros expulsos
                     await cursor.execute('''
                     CREATE TABLE IF NOT EXISTS kicked_members (
                         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -371,6 +326,7 @@ class Database:
                         INDEX idx_kick_date (kick_date)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci''')
                     
+                    # Tabela de períodos verificados
                     await cursor.execute('''
                     CREATE TABLE IF NOT EXISTS checked_periods (
                         user_id BIGINT,
@@ -384,6 +340,7 @@ class Database:
                         INDEX idx_user_guild_period (user_id, guild_id, period_start, period_end)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci''')
                     
+                    # Tabela de configuração do bot
                     await cursor.execute('''
                     CREATE TABLE IF NOT EXISTS bot_config (
                         guild_id BIGINT PRIMARY KEY,
@@ -392,6 +349,7 @@ class Database:
                         INDEX idx_last_updated (last_updated)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci''')
                     
+                    # Tabela de logs de rate limit
                     await cursor.execute('''
                     CREATE TABLE IF NOT EXISTS rate_limit_logs (
                         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -411,6 +369,7 @@ class Database:
                         INDEX idx_date (log_date)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci''')
                     
+                    # Tabela de execuções de tasks
                     await cursor.execute('''
                     CREATE TABLE IF NOT EXISTS task_executions (
                         task_name VARCHAR(50) PRIMARY KEY,
@@ -420,6 +379,7 @@ class Database:
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                     ''')
                     
+                    # Reativar warnings
                     await cursor.execute("SET sql_notes = 1;")
                     await conn.commit()
                     logger.info("Tabelas criadas/verificadas com sucesso")
@@ -433,75 +393,64 @@ class Database:
     async def execute_query(self, query: str, params: tuple = None, timeout: int = 30):
         """Executa uma query com tratamento de timeout và retry"""
         async with self.semaphore:
-            max_retries = 5
+            max_retries = 3
             conn = None
-            last_error = None
-            
             for attempt in range(max_retries):
                 try:
-                    # Verificar se o pool está disponível
-                    if not self.pool or self.pool.closed:
-                        logger.warning("Pool não disponível - tentando reinicializar")
-                        try:
-                            await self.initialize()
-                        except Exception as e:
-                            logger.error(f"Falha ao reinicializar pool: {e}")
-                            await asyncio.sleep(5)
-                            continue
+                    # Adquirir conexão com timeout
+                    conn = await asyncio.wait_for(self.pool.acquire(), timeout=timeout)
                     
-                    # Adquirir conexão com timeout reduzido
-                    try:
-                        async with asyncio.timeout(min(timeout, 15)):
-                            conn = await self.pool.acquire()
-                    except asyncio.TimeoutError:
-                        logger.error(f"Timeout ao adquirir conexão (tentativa {attempt + 1})")
-                        continue
-                        
                     # Executar query com timeout
-                    try:
-                        async with asyncio.timeout(timeout):
-                            cursor = await conn.cursor()
-                            await cursor.execute(query, params or ())
-                            return cursor, conn
-                    except asyncio.TimeoutError:
-                        logger.error(f"Timeout ao executar query (tentativa {attempt + 1})")
-                        if conn:
-                            self.pool.release(conn)
-                            conn = None
+                    cursor = await conn.cursor()
+                    await asyncio.wait_for(cursor.execute(query, params or ()), timeout=timeout)
+                    
+                    return cursor, conn
+                    
+                except (aiomysql.OperationalError, aiomysql.InterfaceError) as e:
+                    if "max_user_connections" in str(e):
+                        logger.error(f"Limite de conexões excedido (tentativa {attempt + 1}/{max_retries})")
+                        await asyncio.sleep(5 * (attempt + 1))  # Backoff exponencial
                         continue
                         
-                except (aiomysql.OperationalError, aiomysql.InterfaceError) as e:
-                    last_error = e
                     logger.error(f"Erro de conexão (tentativa {attempt + 1}/{max_retries}): {e}")
                     if conn:
                         self.pool.release(conn)
                         conn = None
                         
-                    if "max_user_connections" in str(e):
-                        await asyncio.sleep(10 * (attempt + 1))
-                    else:
-                        await asyncio.sleep(5 * (attempt + 1))
-                    continue
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(3 * (attempt + 1))  # Backoff exponencial
+                        continue
+                        
+                    raise
+                    
+                except asyncio.TimeoutError:
+                    logger.error(f"Timeout ao executar query (tentativa {attempt + 1})")
+                    if conn:
+                        self.pool.release(conn)
+                        conn = None
+                        
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(3 * (attempt + 1))  # Backoff exponencial
+                        continue
+                        
+                    raise TimeoutError("Timeout ao executar query no banco de dados")
                     
                 except Exception as e:
-                    last_error = e
                     logger.error(f"Erro ao executar query: {e}")
                     if conn:
                         self.pool.release(conn)
-                    break
-                    
-            if last_error:
-                raise last_error
-            raise TimeoutError(f"Timeout ao executar query após {max_retries} tentativas")
+                    raise
 
     async def save_config(self, guild_id: int, config: dict):
         """Salva configuração com cache"""
         cursor = None
         conn = None
         try:
+            # Atualizar cache
             self._config_cache[guild_id] = config
             self._last_config_update = datetime.utcnow()
             
+            # Serializar para JSON
             config_json = json.dumps(config)
             
             cursor, conn = await self.execute_query('''
@@ -517,6 +466,7 @@ class Database:
             return True
         except Exception as e:
             logger.error(f"Erro ao salvar configuração: {e}")
+            # Remover do cache em caso de erro
             if guild_id in self._config_cache:
                 del self._config_cache[guild_id]
             return False
@@ -528,7 +478,9 @@ class Database:
 
     async def load_config(self, guild_id: int) -> Optional[dict]:
         """Carrega configuração com cache"""
+        # Verificar cache primeiro
         if guild_id in self._config_cache:
+            # Se a configuração foi atualizada recentemente, retornar do cache
             if self._last_config_update and (datetime.utcnow() - self._last_config_update).total_seconds() < 300:
                 logger.debug(f"Retornando configuração do cache para guild {guild_id}")
                 return self._config_cache[guild_id]
@@ -544,6 +496,7 @@ class Database:
             result = await cursor.fetchone()
             if result:
                 config = json.loads(result['config_json'])
+                # Atualizar cache
                 self._config_cache[guild_id] = config
                 self._last_config_update = datetime.utcnow()
                 
@@ -590,6 +543,7 @@ class Database:
         try:
             conn = await self.pool.acquire()
             async with conn.cursor() as cursor:
+                # Atualizar atividade do usuário
                 await cursor.execute('''
                     UPDATE user_activity 
                     SET last_voice_leave = %s,
@@ -597,6 +551,7 @@ class Database:
                     WHERE user_id = %s AND guild_id = %s
                 ''', (now, duration, user_id, guild_id))
                 
+                # Registrar sessão de voz
                 join_time = now - timedelta(seconds=duration)
                 await cursor.execute('''
                     INSERT INTO voice_sessions
@@ -762,9 +717,11 @@ class Database:
         """Registra cargos removidos por inatividade (COM transação)."""
         conn = None
         try:
+            # 1. Adquire uma conexão do pool e INICIA uma transação
             conn = await self.pool.acquire()
-            await conn.begin()
+            await conn.begin()  # ⚠️ Tudo a partir daqui é "temporário" até o commit
             
+            # 2. Executa todas as operações dentro da transação
             async with conn.cursor() as cursor:
                 for role_id in role_ids:
                     await cursor.execute('''
@@ -775,13 +732,17 @@ class Database:
                             removal_date = VALUES(removal_date)
                     ''', (user_id, guild_id, role_id, datetime.utcnow()))
                 
-                await conn.commit()
+                # 3. Se tudo deu certo, CONFIRMA as alterações no banco
+                await conn.commit()  # ✅ Agora os dados são persistentes
 
         except Exception as e:
+            # 4. Se algo falhar, REVERTE a transação inteira
             if conn:
-                await conn.rollback()
-            raise
+                await conn.rollback()  # 🔄 Nenhum dado é alterado no banco
+            raise  # Propaga o erro para ser tratado pela task
+
         finally:
+            # 5. Libera a conexão de volta para o pool
             if conn:
                 self.pool.release(conn)
 
@@ -812,6 +773,7 @@ class Database:
         cursor = None
         conn = None
         try:
+            # Precisamos usar uma query mais complexa para verificar múltiplos cargos
             placeholders = ','.join(['%s'] * len(role_ids))
             cursor, conn = await self.execute_query(f'''
                 SELECT DISTINCT u.user_id 
@@ -848,18 +810,23 @@ class Database:
             
             conn = await self.pool.acquire()
             async with conn.cursor() as cursor:
+                # Limpar sessões de voz antigas
                 await cursor.execute("DELETE FROM voice_sessions WHERE leave_time < %s", (cutoff_date,))
                 voice_deleted = cursor.rowcount
                 
+                # Limpar avisos antigos
                 await cursor.execute("DELETE FROM user_warnings WHERE warning_date < %s", (cutoff_date,))
                 warnings_deleted = cursor.rowcount
                 
+                # Limpar registros de cargos removidos antigos
                 await cursor.execute("DELETE FROM removed_roles WHERE removal_date < %s", (cutoff_date,))
                 roles_deleted = cursor.rowcount
                 
+                # Limpar membros expulsos antigos
                 await cursor.execute("DELETE FROM kicked_members WHERE kick_date < %s", (cutoff_date,))
                 kicks_deleted = cursor.rowcount
                 
+                # Limpar logs de rate limit antigos
                 await cursor.execute("DELETE FROM rate_limit_logs WHERE log_date < %s", (cutoff_date,))
                 rate_limits_deleted = cursor.rowcount
                 
@@ -887,6 +854,7 @@ class Database:
         cursor = None
         conn = None
         try:
+            # Converter reset timestamp para datetime se existir
             reset_at = datetime.utcfromtimestamp(data['reset']) if data.get('reset') else None
             
             cursor, conn = await self.execute_query('''
@@ -1005,6 +973,7 @@ class Database:
     async def health_check(self):
         """Verifica a saúde do banco de dados e reinicia tasks se necessário"""
         try:
+            # Verifica se as tasks estão rodando
             active_tasks = {t._name for t in asyncio.all_tasks() if hasattr(t, '_name') and t._name}
             expected_tasks = {'database_heartbeat'}
             
@@ -1016,6 +985,7 @@ class Database:
                         self.heartbeat_task._name = 'database_heartbeat'
                         self._active_tasks.add(self.heartbeat_task)
             
+            # Verifica o status do pool de conexões
             pool_status = await self.check_pool_status()
             if pool_status:
                 logger.info(f"Status do pool de conexões: {pool_status}")
