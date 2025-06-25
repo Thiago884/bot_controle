@@ -148,9 +148,7 @@ class Database:
                     autocommit=True,
                     cursorclass=DictCursor,
                     pool_recycle=300,
-                    echo=False,
-                    reconnect_interval=60,
-                    reconnect_max_attempts=10
+                    echo=False
                 )
                 
                 # Testar conexão com timeout reduzido
