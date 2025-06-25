@@ -141,7 +141,7 @@ class Database:
                     db=os.getenv('DB_NAME'),
                     minsize=5,
                     maxsize=25,
-                    connect_timeout=30,  # Aumentado para 30 segundos
+                    connect_timeout=60,  # Aumentado para 30 segundos
                     autocommit=True,
                     cursorclass=DictCursor,
                     pool_recycle=300,
