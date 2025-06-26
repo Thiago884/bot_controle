@@ -270,7 +270,8 @@ class Database:
                         INDEX idx_guild_user (guild_id, user_id),
                         INDEX idx_last_join (last_voice_join),
                         INDEX idx_last_leave (last_voice_leave),
-                        INDEX idx_activity_composite (guild_id, user_id, last_voice_join, last_voice_leave)
+                        INDEX idx_activity_composite (guild_id, user_id, last_voice_join, last_voice_leave),
+                        INDEX idx_voice_time_composite (guild_id, user_id, total_voice_time)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci''')
                     
                     # Tabela de sessões de voz
@@ -287,7 +288,8 @@ class Database:
                         INDEX idx_leave_time (leave_time),
                         INDEX idx_user_guild_time (user_id, guild_id, join_time, leave_time),
                         INDEX idx_duration (duration),
-                        INDEX idx_session_composite (user_id, guild_id, join_time, leave_time, duration)
+                        INDEX idx_session_composite (user_id, guild_id, join_time, leave_time, duration),
+                        INDEX idx_user_guild_duration (user_id, guild_id, duration)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci''')
                     
                     # Tabela de avisos
@@ -506,6 +508,41 @@ class Database:
         except Exception as e:
             logger.error(f"Erro ao carregar configuração: {e}")
             return None
+        finally:
+            if cursor:
+                await cursor.close()
+            if conn:
+                self.pool.release(conn)
+
+    async def load_configs(self, guild_ids: List[int]) -> Dict[int, dict]:
+        """Carrega configurações para múltiplas guilds de uma vez"""
+        if not guild_ids:
+            return {}
+
+        cursor = None
+        conn = None
+        try:
+            placeholders = ','.join(['%s'] * len(guild_ids))
+            cursor, conn = await self.execute_query(f'''
+                SELECT guild_id, config_json FROM bot_config
+                WHERE guild_id IN ({placeholders})
+            ''', guild_ids)
+            
+            results = await cursor.fetchall()
+            configs = {}
+            for row in results:
+                try:
+                    configs[row['guild_id']] = json.loads(row['config_json'])
+                    # Atualizar cache
+                    self._config_cache[row['guild_id']] = configs[row['guild_id']]
+                except json.JSONDecodeError as e:
+                    logger.error(f"Erro ao decodificar JSON para guild {row['guild_id']}: {e}")
+            
+            self._last_config_update = datetime.utcnow()
+            return configs
+        except Exception as e:
+            logger.error(f"Erro ao carregar configurações múltiplas: {e}")
+            return {}
         finally:
             if cursor:
                 await cursor.close()
@@ -773,23 +810,17 @@ class Database:
         cursor = None
         conn = None
         try:
-            # Precisamos usar uma query mais complexa para verificar múltiplos cargos
+            if not role_ids:
+                return []
+
             placeholders = ','.join(['%s'] * len(role_ids))
             cursor, conn = await self.execute_query(f'''
                 SELECT DISTINCT u.user_id 
                 FROM user_activity u
-                JOIN voice_sessions v ON u.user_id = v.user_id AND u.guild_id = v.guild_id
+                JOIN removed_roles r ON u.user_id = r.user_id AND u.guild_id = r.guild_id
                 WHERE u.guild_id = %s
-                AND EXISTS (
-                    SELECT 1 FROM voice_sessions 
-                    WHERE user_id = u.user_id 
-                    AND guild_id = u.guild_id
-                )
-                UNION
-                SELECT user_id FROM user_activity
-                WHERE guild_id = %s
-                AND last_voice_join IS NOT NULL
-            ''', (guild_id, guild_id))
+                AND r.role_id IN ({placeholders})
+            ''', [guild_id] + role_ids)
             
             results = await cursor.fetchall()
             return [r['user_id'] for r in results] if results else []
