@@ -1250,6 +1250,8 @@ async def on_ready():
     
     await bot.log_action(None, None, embed=embed)
 
+    bot.loop.create_task(check_missed_periods())
+
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
     if member.bot:

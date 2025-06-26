@@ -190,6 +190,7 @@ async def on_resumed():
     """Executa ações quando o bot reconecta após uma queda."""
     logger.info("Bot reconectado - reiniciando tarefas...")
     await bot.log_action("Reconexão", None, "Bot reconectado após queda")
+    await check_missed_periods()  # Verificar períodos perdidos durante a queda
     await start_tasks_when_ready()  # Reinicia as tasks
 
 @bot.event
@@ -360,24 +361,14 @@ async def process_member_inactivity(member: discord.Member, guild: discord.Guild
         
         now = datetime.now(bot.timezone)
         
-        # Definir novo período de verificação (futuro)
-        new_period_end = now + timedelta(days=monitoring_period)
-        new_period_start = now
-        
-        # Registrar novo período de verificação
-        start_time = time.time()
-        await bot.db.log_period_check(member.id, guild.id, new_period_start, new_period_end, False)
-        perf_metrics.record_db_query(time.time() - start_time)
-        
-        # Verificar se estamos no final de um período anterior para remover cargos
-        if last_check and now >= last_check['period_end'].replace(tzinfo=bot.timezone):
-            # Obter sessões do período que acabou
-            start_time = time.time()
+        # Nova verificação: Se existir um período vencido não verificado
+        if last_check and now > last_check['period_end'].replace(tzinfo=bot.timezone):
+            # Forçar verificação do período vencido
             sessions = await bot.db.get_voice_sessions(
-                member.id, guild.id, 
+                member.id, guild.id,
                 last_check['period_start'].replace(tzinfo=bot.timezone),
-                last_check['period_end'].replace(tzinfo=bot.timezone))
-            perf_metrics.record_db_query(time.time() - start_time)
+                last_check['period_end'].replace(tzinfo=bot.timezone)
+            )
             
             # Verificar requisitos do período que acabou
             meets_requirements = False
@@ -441,6 +432,15 @@ async def process_member_inactivity(member: discord.Member, guild: discord.Guild
                         await bot.log_action("Erro ao Remover Cargo", member, "Permissões insuficientes")
                     except Exception as e:
                         logger.error(f"Erro ao remover cargos de {member}: {e}")
+        
+        # Definir novo período de verificação (futuro)
+        new_period_end = now + timedelta(days=monitoring_period)
+        new_period_start = now
+        
+        # Registrar novo período de verificação
+        start_time = time.time()
+        await bot.db.log_period_check(member.id, guild.id, new_period_start, new_period_end, False)
+        perf_metrics.record_db_query(time.time() - start_time)
     
     except Exception as e:
         logger.error(f"Erro ao verificar inatividade para {member}: {e}")
@@ -859,6 +859,35 @@ async def _execute_force_check(member: discord.Member):
     except Exception as e:
         logger.error(f"Erro na verificação forçada para {member}: {e}")
         raise
+
+async def check_missed_periods():
+    """Verifica e processa períodos que deveriam ter sido verificados durante a queda do bot"""
+    await bot.wait_until_ready()
+    
+    required_minutes = bot.config['required_minutes']
+    required_days = bot.config['required_days']
+    monitoring_period = bot.config['monitoring_period']
+    tracked_roles = bot.config['tracked_roles']
+    
+    if not tracked_roles:
+        return
+
+    for guild in bot.guilds:
+        members = [m for m in guild.members if any(r.id in tracked_roles for r in m.roles)]
+        
+        for member in members:
+            try:
+                last_check = await bot.db.get_last_period_check(member.id, guild.id)
+                now = datetime.now(bot.timezone)
+                
+                if last_check and now > last_check['period_end'].replace(tzinfo=bot.timezone):
+                    # Período vencido durante a queda - forçar verificação
+                    await process_member_inactivity(
+                        member, guild, required_minutes, 
+                        required_days, monitoring_period, tracked_roles
+                    )
+            except Exception as e:
+                logger.error(f"Erro ao verificar períodos perdidos para {member}: {e}")
 
 async def start_tasks_when_ready():
     """Espera o bot estar pronto antes de iniciar as tasks"""
