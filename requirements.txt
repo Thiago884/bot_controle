@@ -11,5 +11,5 @@ tzlocal>=4.3
 flask-cors>=3.0.10
 psutil>=5.9.0
 gunicorn>=21.2.0
-gevent>=1.4  # Add this line
-nest-asyncio
+gevent>=1.4
+nest-asyncio>=1.5.8

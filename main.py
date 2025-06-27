@@ -290,6 +290,21 @@ class InactivityBot(commands.Bot):
         self.flask_app = Flask(__name__)
         self.setup_api_routes()
 
+    async def on_error(self, event, *args, **kwargs):
+        """Tratamento de erros e reconexão automática"""
+        logger.error(f'Erro no evento {event}: {args[0] if args else "Sem detalhes"}')
+        
+        # Tentar reconectar após um pequeno delay
+        await asyncio.sleep(5)
+        try:
+            logger.info("Tentando reconectar...")
+            await self.start(os.getenv('DISCORD_TOKEN'))
+        except Exception as e:
+            logger.error(f"Falha na reconexão: {e}")
+            # Tentar novamente após um tempo maior
+            await asyncio.sleep(30)
+            await self.start(os.getenv('DISCORD_TOKEN'))
+
     def setup_api_routes(self):
         """Configura as rotas da API Flask"""
         @self.flask_app.route('/api/guild/<guild_id>')
@@ -883,8 +898,7 @@ class InactivityBot(commands.Bot):
                         await self.log_action(
                             "Erro DB - Saída de voz",
                             member,
-                            str(e)
-                        )
+                            str(e))
                 
                 embed = discord.Embed(
                     title="🚪 Saiu de Voz",

@@ -73,6 +73,15 @@ def basic_auth_required(f):
         return f(*args, **kwargs)
     return decorated
 
+# Novo endpoint de health check
+@app.route('/health')
+def health_check():
+    return jsonify({
+        'status': 'ok', 
+        'bot_running': bot_running,
+        'bot_ready': bot.is_ready() if hasattr(bot, 'is_ready') else False
+    }), 200
+
 def run_coroutine_in_bot_loop(coro):
     """Executa uma corrotina no loop de eventos do bot e espera pelo resultado."""
     if not hasattr(bot, 'loop') or not bot.loop.is_running():
@@ -112,7 +121,7 @@ def get_main_guild():
 def check_bot_ready():
     if request.path.startswith('/static'):
         return
-    if request.endpoint == 'panel_status':
+    if request.endpoint == 'panel_status' or request.endpoint == 'health_check':
         return
     
     if request.path.startswith('/api') and not getattr(bot, 'is_ready', lambda: False)():
