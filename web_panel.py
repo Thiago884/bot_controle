@@ -55,22 +55,38 @@ if not DISCORD_TOKEN:
     web_logger.critical("Token do Discord não encontrado! Verifique a variável de ambiente DISCORD_TOKEN")
     sys.exit(1)
 
-# Rota para servir arquivos estáticos
-@app.route('/static/<path:filename>')
-def static_files(filename):
-    return send_from_directory('static', filename)
+# --- Lógica de Inicialização do Bot ---
 
-# Rota keepalive para evitar timeout no Render
-@app.route('/keepalive')
-def keepalive():
-    return jsonify({'status': 'alive'})
+def run_bot_in_thread():
+    """Configura um loop de eventos asyncio dedicado e executa o bot nele."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    try:
+        web_logger.info("Iniciando o loop de eventos do bot no thread de background.")
+        global bot_running
+        bot_running = True
+        loop.run_until_complete(bot.start(DISCORD_TOKEN))
+    except discord.LoginFailure:
+        web_logger.critical("Falha no login: Token do Discord inválido.")
+    except Exception as e:
+        web_logger.critical(f"Erro fatal ao executar o bot Discord no thread: {e}", exc_info=True)
+    finally:
+        web_logger.warning("O loop do bot foi finalizado. Fechando o bot.")
+        bot_running = False
+        if not bot.is_closed():
+            loop.run_until_complete(bot.close())
+        loop.close()
 
-# Tratamento de erro para rotas não encontradas
-@app.errorhandler(404)
-def not_found(error):
-    web_logger.warning(f"Página não encontrada: {request.path}")
-    return render_template('error.html', error_message="Página não encontrada"), 404
+# Inicia o bot em uma thread de background.
+web_logger.info("Iniciando o thread do bot...")
+bot_thread = Thread(target=run_bot_in_thread)
+bot_thread.daemon = True
+bot_thread.start()
 
+# --- Rotas Web do Flask ---
+
+# Decorator para autenticação
 def basic_auth_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -78,21 +94,10 @@ def basic_auth_required(f):
         if not auth or auth.username != WEB_AUTH_USER or auth.password != WEB_AUTH_PASS:
             web_logger.warning(f"Tentativa de acesso não autorizado ao painel web. IP: {request.remote_addr}")
             return Response(
-                'Acesso não autorizado',
-                401,
-                {'WWW-Authenticate': 'Basic realm="Login Required"'}
+                'Acesso não autorizado', 401, {'WWW-Authenticate': 'Basic realm="Login Required"'}
             )
         return f(*args, **kwargs)
     return decorated
-
-# Novo endpoint de health check
-@app.route('/health')
-def health_check():
-    return jsonify({
-        'status': 'ok', 
-        'bot_running': bot_running,
-        'bot_ready': bot.is_ready() if hasattr(bot, 'is_ready') else False
-    }), 200
 
 def run_coroutine_in_bot_loop(coro):
     """Executa uma corrotina no loop de eventos do bot e espera pelo resultado."""
@@ -128,7 +133,7 @@ def get_main_guild():
         return None
     return bot.guilds[0]  # Assumindo que o bot está em apenas uma guilda
 
-# Verifique se o bot está realmente pronto
+# Middleware para verificar se o bot está pronto
 @app.before_request
 def check_bot_ready():
     if request.path.startswith('/static') or request.path == '/keepalive':
@@ -139,6 +144,31 @@ def check_bot_ready():
     if request.path.startswith('/api') and not getattr(bot, 'is_ready', lambda: False)():
         web_logger.warning(f"Bot não pronto para atender requisição à {request.path}")
         return jsonify({'status': 'error', 'message': 'Bot não está pronto'}), 503
+
+# Rota para servir arquivos estáticos
+@app.route('/static/<path:filename>')
+def static_files(filename):
+    return send_from_directory('static', filename)
+
+# Rota keepalive para evitar timeout no Render
+@app.route('/keepalive')
+def keepalive():
+    return jsonify({'status': 'alive'})
+
+# Tratamento de erro para rotas não encontradas
+@app.errorhandler(404)
+def not_found(error):
+    web_logger.warning(f"Página não encontrada: {request.path}")
+    return render_template('error.html', error_message="Página não encontrada"), 404
+
+# Novo endpoint de health check
+@app.route('/health')
+def health_check():
+    return jsonify({
+        'status': 'ok', 
+        'bot_running': bot_running,
+        'bot_ready': bot.is_ready() if hasattr(bot, 'is_ready') else False
+    }), 200
 
 @app.route('/')
 @basic_auth_required
@@ -1356,60 +1386,9 @@ def manage_warning_settings():
         web_logger.error(f"Erro em /api/warning_settings: {e}", exc_info=True)
         return jsonify({'status': 'error', 'message': f"Erro ao gerenciar configurações de aviso: {str(e)}"}), 500
 
-async def run_bot_async():
-    """Executa o bot Discord em uma corrotina separada"""
-    global bot_running
-    try:
-        web_logger.info(f"Conectando ao Discord com token: {os.getenv('DISCORD_TOKEN')[:5]}...")  # Log parcial do token
-        bot_running = True
-        
-        # Ensure we have a valid event loop
-        if not hasattr(bot, 'loop') or bot.loop is None:
-            bot.loop = asyncio.get_event_loop()
-        
-        # Garante que o bot não está rodando antes de iniciar
-        if not bot.is_closed():
-            await bot.close()
-            
-        await bot.start(DISCORD_TOKEN)
-    except discord.LoginFailure:
-        web_logger.critical("Token do Discord inválido!")
-        bot_running = False
-        raise
-    except Exception as e:
-        web_logger.critical(f"Erro fatal ao iniciar o bot Discord: {e}", exc_info=True)
-        bot_running = False
-        raise
-    finally:
-        bot_running = False
-        if not bot.is_closed():
-            await bot.close()
-
-async def run_web_server():
-    """Executa o servidor web Flask"""
-    http_server = WSGIServer(('0.0.0.0', 8080), app)
-    web_logger.info("Servidor web iniciado na porta 8080")
-    http_server.serve_forever()
-
-async def run_both():
-    """Executa tanto o bot quanto o servidor web"""
-    bot_task = asyncio.create_task(run_bot_async())
-    web_task = asyncio.create_task(run_web_server())
-    
-    try:
-        await asyncio.gather(bot_task, web_task)
-    except Exception as e:
-        web_logger.critical(f"Erro fatal ao executar serviços: {e}", exc_info=True)
-        raise
-
-if __name__ != '__main__':
-    # Inicia o bot e o servidor web
-    asyncio.run(run_both())
-
+# Este bloco é útil para testes locais sem o Gunicorn
 if __name__ == '__main__':
-    # Crie a pasta static se não existir
-    os.makedirs('static', exist_ok=True)
-    os.makedirs('templates', exist_ok=True)
-    
-    # Inicie o bot e o servidor web
-    asyncio.run(run_both())
+    web_logger.info("Iniciando o servidor Flask em modo de desenvolvimento local.")
+    # O bot já foi iniciado na thread de background.
+    # Isto executará o servidor embutido do Flask, que não é para produção.
+    app.run(host='0.0.0.0', port=8080, debug=False)
