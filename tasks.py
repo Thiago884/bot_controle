@@ -916,7 +916,8 @@ async def start_tasks_when_ready():
 def setup_tasks():
     """Configura e inicia todas as tarefas agendadas"""
     # Configura o handler de exceções globais
-    bot.loop.set_exception_handler(handle_exception)
+    loop = asyncio.get_running_loop()
+    loop.set_exception_handler(handle_exception)
     
     # Não inicie as tasks imediatamente, espere o bot estar pronto
     bot.loop.create_task(start_tasks_when_ready())
