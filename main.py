@@ -16,6 +16,8 @@ import random
 from collections import defaultdict
 from collections import deque
 from flask import Flask
+import sys
+import traceback
 
 # Configuração do logger
 def setup_logger():
@@ -291,19 +293,24 @@ class InactivityBot(commands.Bot):
         self.setup_api_routes()
 
     async def on_error(self, event, *args, **kwargs):
-        """Tratamento de erros e reconexão automática"""
-        logger.error(f'Erro no evento {event}: {args[0] if args else "Sem detalhes"}')
+        """
+        Tratamento de erros. A reconexão é gerenciada automaticamente pelo discord.py.
+        Esta função agora apenas registra o erro detalhadamente.
+        """
+        exc_type, exc_value, exc_traceback = sys.exc_info()
+        tb_details = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
         
-        # Tentar reconectar após um pequeno delay
-        await asyncio.sleep(5)
-        try:
-            logger.info("Tentando reconectar...")
-            await self.start(os.getenv('DISCORD_TOKEN'))
-        except Exception as e:
-            logger.error(f"Falha na reconexão: {e}")
-            # Tentar novamente após um tempo maior
-            await asyncio.sleep(30)
-            await self.start(os.getenv('DISCORD_TOKEN'))
+        # Log com o logger principal
+        logger.error(f"Exceção não tratada no evento '{event}'", exc_info=(exc_type, exc_value, exc_traceback))
+        
+        # Log com contexto para o canal de logs do Discord, se possível
+        log_message = (
+            f"**Exceção Não Tratada no Evento: `{event}`**\n"
+            f"**Args:** `{args}`\n"
+            f"**Kwargs:** `{kwargs}`\n"
+            f"```python\n{tb_details[:1800]}\n```" # Limita o tamanho do traceback
+        )
+        await self.log_action("Erro Crítico de Evento", details=log_message)
 
     def setup_api_routes(self):
         """Configura as rotas da API Flask"""
@@ -1250,20 +1257,24 @@ async def on_ready():
                     logger.error(f"Sem permissão para enviar mensagens no canal de notificações em {guild.name}")
 
         except Exception as e:
-            logger.error(f"Erro ao verificar permissões em {guild.name}: {e}")
+            logger.error(f"Erro durante o processamento do on_ready para a guilda {guild.name}: {e}", exc_info=True)
     
-    embed = discord.Embed(
-        title="🤖 Bot de Controle de Atividades Iniciado",
-        description=f"Conectado como {bot.user.mention}",
-        color=discord.Color.green(),
-        timestamp=datetime.now(bot.timezone))
-    embed.add_field(name="Servidores", value=str(len(bot.guilds)), inline=True)
-    embed.add_field(name="Latência", value=f"{round(bot.latency * 1000)}ms", inline=True)
-    embed.set_thumbnail(url=bot.user.display_avatar.url)
-    embed.set_footer(text="Sistema de Controle de Atividades")
-    
-    await bot.log_action(None, None, embed=embed)
+    try:
+        embed = discord.Embed(
+            title="🤖 Bot de Controle de Atividades Iniciado",
+            description=f"Conectado como {bot.user.mention}",
+            color=discord.Color.green(),
+            timestamp=datetime.now(bot.timezone))
+        embed.add_field(name="Servidores", value=str(len(bot.guilds)), inline=True)
+        embed.add_field(name="Latência", value=f"{round(bot.latency * 1000)}ms", inline=True)
+        embed.set_thumbnail(url=bot.user.display_avatar.url)
+        embed.set_footer(text="Sistema de Controle de Atividades")
+        
+        await bot.log_action(None, None, embed=embed)
+    except Exception as e:
+        logger.error(f"Erro ao enviar embed de inicialização no on_ready: {e}", exc_info=True)
 
+    from tasks import check_missed_periods
     bot.loop.create_task(check_missed_periods())
 
 @bot.event

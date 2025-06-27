@@ -1350,6 +1350,11 @@ async def run_bot_async():
     try:
         web_logger.info("Iniciando bot Discord...")
         bot_running = True
+        
+        # Garante que o bot não está rodando antes de iniciar
+        if not bot.is_closed():
+            await bot.close()
+            
         await bot.start(os.getenv('DISCORD_TOKEN'))
     except Exception as e:
         web_logger.critical(f"Erro fatal ao iniciar o bot Discord: {e}", exc_info=True)
@@ -1357,6 +1362,8 @@ async def run_bot_async():
         raise
     finally:
         bot_running = False
+        if not bot.is_closed():
+            await bot.close()
 
 def start_bot():
     """Inicia o bot Discord em uma thread separada"""
@@ -1368,6 +1375,9 @@ def start_bot():
     except Exception as e:
         web_logger.critical(f"Falha ao iniciar o bot Discord: {e}", exc_info=True)
     finally:
+        tasks = asyncio.all_tasks(loop)
+        for task in tasks:
+            task.cancel()
         loop.close()
 
 def run_app():
