@@ -22,6 +22,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 import time
 from gevent.pywsgi import WSGIServer
 from gevent import spawn
+import sys
 
 # Configuração básica do logger para o web panel
 web_logger = logging.getLogger('web_panel')
@@ -48,10 +49,21 @@ WEB_AUTH_PASS = os.getenv('WEB_AUTH_PASS', 'admin123')
 # Variável global para controlar o estado do bot
 bot_running = False
 
+# Verificar token do Discord antes de iniciar
+DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
+if not DISCORD_TOKEN:
+    web_logger.critical("Token do Discord não encontrado! Verifique a variável de ambiente DISCORD_TOKEN")
+    sys.exit(1)
+
 # Rota para servir arquivos estáticos
 @app.route('/static/<path:filename>')
 def static_files(filename):
     return send_from_directory('static', filename)
+
+# Rota keepalive para evitar timeout no Render
+@app.route('/keepalive')
+def keepalive():
+    return jsonify({'status': 'alive'})
 
 # Tratamento de erro para rotas não encontradas
 @app.errorhandler(404)
@@ -119,7 +131,7 @@ def get_main_guild():
 # Verifique se o bot está realmente pronto
 @app.before_request
 def check_bot_ready():
-    if request.path.startswith('/static'):
+    if request.path.startswith('/static') or request.path == '/keepalive':
         return
     if request.endpoint == 'panel_status' or request.endpoint == 'health_check':
         return
@@ -1348,7 +1360,7 @@ async def run_bot_async():
     """Executa o bot Discord em uma corrotina separada"""
     global bot_running
     try:
-        web_logger.info("Iniciando bot Discord...")
+        web_logger.info(f"Conectando ao Discord com token: {os.getenv('DISCORD_TOKEN')[:5]}...")  # Log parcial do token
         bot_running = True
         
         # Ensure we have a valid event loop
@@ -1359,7 +1371,11 @@ async def run_bot_async():
         if not bot.is_closed():
             await bot.close()
             
-        await bot.start(os.getenv('DISCORD_TOKEN'))
+        await bot.start(DISCORD_TOKEN)
+    except discord.LoginFailure:
+        web_logger.critical("Token do Discord inválido!")
+        bot_running = False
+        raise
     except Exception as e:
         web_logger.critical(f"Erro fatal ao iniciar o bot Discord: {e}", exc_info=True)
         bot_running = False
@@ -1369,36 +1385,26 @@ async def run_bot_async():
         if not bot.is_closed():
             await bot.close()
 
-def start_bot():
-    """Inicia o bot Discord em uma thread separada"""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    try:
-        # Garante que o bot tenha um loop válido
-        bot.loop = loop
-        loop.run_until_complete(run_bot_async())
-    except Exception as e:
-        web_logger.critical(f"Falha ao iniciar o bot Discord: {e}", exc_info=True)
-    finally:
-        tasks = asyncio.all_tasks(loop)
-        for task in tasks:
-            task.cancel()
-        loop.close()
-
-def run_app():
-    """Inicia o servidor Flask"""
+async def run_web_server():
+    """Executa o servidor web Flask"""
     http_server = WSGIServer(('0.0.0.0', 8080), app)
     web_logger.info("Servidor web iniciado na porta 8080")
     http_server.serve_forever()
 
-if __name__ != '__main__':
-    # Inicia o bot Discord em uma thread separada
-    bot_thread = Thread(target=start_bot, daemon=True)
-    bot_thread.start()
+async def run_both():
+    """Executa tanto o bot quanto o servidor web"""
+    bot_task = asyncio.create_task(run_bot_async())
+    web_task = asyncio.create_task(run_web_server())
     
-    # Inicia o servidor Flask
-    run_app()
+    try:
+        await asyncio.gather(bot_task, web_task)
+    except Exception as e:
+        web_logger.critical(f"Erro fatal ao executar serviços: {e}", exc_info=True)
+        raise
+
+if __name__ != '__main__':
+    # Inicia o bot e o servidor web
+    asyncio.run(run_both())
 
 if __name__ == '__main__':
     # Crie a pasta static se não existir
@@ -1406,8 +1412,4 @@ if __name__ == '__main__':
     os.makedirs('templates', exist_ok=True)
     
     # Inicie o bot e o servidor web
-    bot_thread = Thread(target=start_bot, daemon=True)
-    bot_thread.start()
-    
-    # Use o servidor de desenvolvimento do Flask para depuração
-    app.run(host='0.0.0.0', port=8080, debug=True)
+    asyncio.run(run_both())
