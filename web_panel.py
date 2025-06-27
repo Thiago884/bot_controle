@@ -1371,6 +1371,8 @@ def start_bot():
     asyncio.set_event_loop(loop)
     
     try:
+        # Garante que o bot tenha um loop válido
+        bot.loop = loop
         loop.run_until_complete(run_bot_async())
     except Exception as e:
         web_logger.critical(f"Falha ao iniciar o bot Discord: {e}", exc_info=True)

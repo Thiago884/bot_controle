@@ -217,6 +217,9 @@ class SmartPriorityQueue:
 
 class InactivityBot(commands.Bot):
     def __init__(self, *args, **kwargs):
+        # Definir o loop antes de qualquer outra inicialização
+        self.loop = asyncio.get_event_loop()
+        
         kwargs.update({
             'max_messages': 100,
             'chunk_guilds_at_startup': False,
