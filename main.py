@@ -234,9 +234,10 @@ class InactivityBot(commands.Bot):
         })
         super().__init__(*args, **kwargs)
         
-        # Then set up the loop and other attributes
+        # Configurar o loop de eventos
         self.loop = asyncio.get_event_loop()
-        # Rest of your initialization code...
+        
+        # Resto da inicialização...
         self.config = {}
         self.timezone = pytz.timezone('America/Sao_Paulo')
         self.db = None

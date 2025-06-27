@@ -66,6 +66,10 @@ def run_bot_in_thread():
         web_logger.info("Iniciando o loop de eventos do bot no thread de background.")
         global bot_running
         bot_running = True
+        
+        # Configurar o loop no bot antes de iniciar
+        bot.loop = loop
+        
         loop.run_until_complete(bot.start(DISCORD_TOKEN))
     except discord.LoginFailure:
         web_logger.critical("Falha no login: Token do Discord inválido.")
@@ -77,12 +81,6 @@ def run_bot_in_thread():
         if not bot.is_closed():
             loop.run_until_complete(bot.close())
         loop.close()
-
-# Inicia o bot em uma thread de background.
-web_logger.info("Iniciando o thread do bot...")
-bot_thread = Thread(target=run_bot_in_thread)
-bot_thread.daemon = True
-bot_thread.start()
 
 # --- Rotas Web do Flask ---
 
