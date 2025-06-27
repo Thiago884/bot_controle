@@ -919,5 +919,6 @@ def setup_tasks():
     loop = asyncio.get_running_loop()
     loop.set_exception_handler(handle_exception)
     
-    # Não inicie as tasks imediatamente, espere o bot estar pronto
-    bot.loop.create_task(start_tasks_when_ready())
+    # Don't start tasks immediately if the bot isn't ready
+    if not bot.is_ready():
+        bot.loop.create_task(start_tasks_when_ready())

@@ -1351,6 +1351,10 @@ async def run_bot_async():
         web_logger.info("Iniciando bot Discord...")
         bot_running = True
         
+        # Ensure we have a valid event loop
+        if not hasattr(bot, 'loop') or bot.loop is None:
+            bot.loop = asyncio.get_event_loop()
+        
         # Garante que o bot não está rodando antes de iniciar
         if not bot.is_closed():
             await bot.close()

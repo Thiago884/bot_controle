@@ -217,9 +217,7 @@ class SmartPriorityQueue:
 
 class InactivityBot(commands.Bot):
     def __init__(self, *args, **kwargs):
-        # Definir o loop antes de qualquer outra inicialização
-        self.loop = asyncio.get_event_loop()
-        
+        # Initialize the bot first
         kwargs.update({
             'max_messages': 100,
             'chunk_guilds_at_startup': False,
@@ -235,6 +233,10 @@ class InactivityBot(commands.Bot):
             'status': discord.Status.online
         })
         super().__init__(*args, **kwargs)
+        
+        # Then set up the loop and other attributes
+        self.loop = asyncio.get_event_loop()
+        # Rest of your initialization code...
         self.config = {}
         self.timezone = pytz.timezone('America/Sao_Paulo')
         self.db = None
