@@ -18,7 +18,7 @@ import psutil
 from werkzeug.middleware.proxy_fix import ProxyFix
 import time
 import sys
-import encodings.idna  # Added as requested
+import encodings.idna
 
 # Configuração básica do logger para o web panel
 web_logger = logging.getLogger('web_panel')
@@ -36,7 +36,7 @@ web_logger.addHandler(console_handler)
 
 # Configure o diretório de templates
 app = Flask(__name__, template_folder='templates')
-app.config['SERVER_NAME'] = None  # Added as requested
+app.config['SERVER_NAME'] = None
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
 # Configuração de autenticação
@@ -68,7 +68,9 @@ def run_bot_in_thread():
             # Configurar o loop no bot antes de iniciar
             bot.loop = loop
             
+            # Esperar o bot ficar pronto
             loop.run_until_complete(bot.start(DISCORD_TOKEN))
+            loop.run_until_complete(bot.wait_until_ready())  # Adicionado para garantir inicialização completa
         except discord.LoginFailure:
             web_logger.critical("Falha no login: Token do Discord inválido.")
         except Exception as e:
@@ -151,10 +153,8 @@ def get_main_guild():
 def check_bot_ready():
     if request.path.startswith('/static') or request.path == '/keepalive':
         return
-    if request.endpoint == 'panel_status' or request.endpoint == 'health_check':
-        return
-    
-    if request.path.startswith('/api') and not getattr(bot, 'is_ready', lambda: False)():
+        
+    if not bot_running or not hasattr(bot, 'is_ready') or not bot.is_ready():
         web_logger.warning(f"Bot não pronto para atender requisição à {request.path}")
         return jsonify({'status': 'error', 'message': 'Bot não está pronto'}), 503
 

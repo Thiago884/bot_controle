@@ -217,10 +217,10 @@ class SmartPriorityQueue:
 
 class InactivityBot(commands.Bot):
     def __init__(self, *args, **kwargs):
-        # Adicionar o evento de ready antes de chamar super().__init__
+        # Inicializa o Event antes de chamar super().__init__
         self._ready = asyncio.Event()
         
-        # Initialize the bot first
+        # Initialize the bot with optimized settings
         kwargs.update({
             'max_messages': 100,
             'chunk_guilds_at_startup': False,
