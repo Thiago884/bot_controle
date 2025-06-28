@@ -218,7 +218,7 @@ class SmartPriorityQueue:
 class InactivityBot(commands.Bot):
     def __init__(self, *args, **kwargs):
         # Inicializa o Event antes de chamar super().__init__
-        self._ready = asyncio.Event()
+        self._ready_event = asyncio.Event()
         
         # Initialize the bot with optimized settings
         kwargs.update({
@@ -300,6 +300,11 @@ class InactivityBot(commands.Bot):
         # API Flask
         self.flask_app = Flask(__name__)
         self.setup_api_routes()
+
+    async def wait_until_ready(self):
+        await super().wait_until_ready()
+        self._ready_event.set()
+        return self
 
     async def on_error(self, event, *args, **kwargs):
         """

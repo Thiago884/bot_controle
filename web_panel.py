@@ -151,7 +151,7 @@ def get_main_guild():
 # Middleware para verificar se o bot está pronto
 @app.before_request
 def check_bot_ready():
-    if request.path.startswith('/static') or request.path == '/keepalive':
+    if request.path.startswith('/static') or request.path == '/keepalive' or request.path == '/health':
         return
         
     if not bot_running or not hasattr(bot, 'is_ready') or not bot.is_ready():
@@ -806,7 +806,7 @@ def manage_allowed_roles():
 
             if 'allowed_roles' not in bot.config:
                 bot.config['allowed_roles'] = []
-
+            
             if action == 'add':
                 if role_id not in bot.config['allowed_roles']:
                     bot.config['allowed_roles'].append(role_id)
