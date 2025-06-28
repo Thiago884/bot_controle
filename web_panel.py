@@ -18,6 +18,7 @@ import psutil
 from werkzeug.middleware.proxy_fix import ProxyFix
 import time
 import sys
+import encodings.idna  # Added as requested
 
 # Configuração básica do logger para o web panel
 web_logger = logging.getLogger('web_panel')
@@ -35,6 +36,7 @@ web_logger.addHandler(console_handler)
 
 # Configure o diretório de templates
 app = Flask(__name__, template_folder='templates')
+app.config['SERVER_NAME'] = None  # Added as requested
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
 # Configuração de autenticação

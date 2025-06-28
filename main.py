@@ -217,6 +217,9 @@ class SmartPriorityQueue:
 
 class InactivityBot(commands.Bot):
     def __init__(self, *args, **kwargs):
+        # Adicionar o evento de ready antes de chamar super().__init__
+        self._ready = asyncio.Event()
+        
         # Initialize the bot first
         kwargs.update({
             'max_messages': 100,
@@ -1297,3 +1300,12 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
 
 # Importar comandos
 from bot_commands import *
+
+async def main():
+    load_dotenv()
+    DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
+    async with bot:
+        await bot.start(DISCORD_TOKEN)
+
+if __name__ == '__main__':
+    asyncio.run(main())
