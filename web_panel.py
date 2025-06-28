@@ -1,7 +1,3 @@
-from gevent import monkey
-monkey.patch_all(thread=False)  # Desativa o monkey-patching para threading
-import nest_asyncio
-nest_asyncio.apply()
 from flask import Flask, jsonify, render_template, request, redirect, url_for, Response, send_from_directory
 from threading import Thread
 import threading
@@ -1416,20 +1412,25 @@ def handle_exception(e):
         'message': 'Ocorreu um erro interno no servidor'
     }), 500
 
-# Este bloco é útil para testes locais sem o Gunicorn
+# --- Inicialização do Bot e Servidor ---
+
+# Inicia o bot em uma thread separada assim que o módulo é carregado
+web_logger.info("Iniciando a thread do bot Discord...")
+run_bot_in_thread()
+
+# Este bloco só será usado para testes locais, não quando executado pelo Gunicorn
 if __name__ == '__main__':
-    web_logger.info("Iniciando o servidor Flask em modo de desenvolvimento local.")
+    web_logger.info("Iniciando o servidor Flask em modo de desenvolvimento local com WSGIServer.")
     
-    # Inicia o bot em uma thread separada
-    run_bot_in_thread()
-    
-    # Aguarda alguns segundos para o bot inicializar
-    time.sleep(5)
+    # O bot já foi iniciado acima. Apenas esperamos um pouco para garantir que ele se conecte.
+    time.sleep(10)
     
     # Verifica se o bot está rodando
     if not bot_running:
-        web_logger.error("Falha ao iniciar o bot Discord")
-    
+        web_logger.error("Falha ao iniciar o bot Discord. Verifique os logs.")
+    else:
+        web_logger.info("Bot parece estar rodando. Servidor web sendo iniciado.")
+
     # Inicia o servidor web
-    http_server = WSGIServer(('0.0.0.0', 8080), app)
+    http_server = WSGIServer(('0.0.0.0', 8080), app, log=web_logger, error_log=web_logger)
     http_server.serve_forever()
