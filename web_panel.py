@@ -1,9 +1,10 @@
 from gevent import monkey
-monkey.patch_all()
+monkey.patch_all(thread=False)  # Desativa o monkey-patching para threading
 import nest_asyncio
 nest_asyncio.apply()
 from flask import Flask, jsonify, render_template, request, redirect, url_for, Response, send_from_directory
 from threading import Thread
+import threading
 from main import bot
 import asyncio
 import datetime
@@ -59,47 +60,65 @@ if not DISCORD_TOKEN:
 
 def run_bot_in_thread():
     """Configura um loop de eventos asyncio dedicado e executa o bot nele."""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    try:
-        web_logger.info("Iniciando o loop de eventos do bot no thread de background.")
-        global bot_running
-        bot_running = True
+    def bot_runner():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         
-        # Configurar o loop no bot antes de iniciar
-        bot.loop = loop
-        
-        loop.run_until_complete(bot.start(DISCORD_TOKEN))
-    except discord.LoginFailure:
-        web_logger.critical("Falha no login: Token do Discord inválido.")
-    except Exception as e:
-        web_logger.critical(f"Erro fatal ao executar o bot Discord no thread: {e}", exc_info=True)
-    finally:
-        web_logger.warning("O loop do bot foi finalizado. Fechando o bot.")
-        bot_running = False
-        if not bot.is_closed():
-            loop.run_until_complete(bot.close())
-        loop.close()
+        try:
+            web_logger.info("Iniciando o loop de eventos do bot no thread de background.")
+            global bot_running
+            bot_running = True
+            
+            # Configurar o loop no bot antes de iniciar
+            bot.loop = loop
+            
+            loop.run_until_complete(bot.start(DISCORD_TOKEN))
+        except discord.LoginFailure:
+            web_logger.critical("Falha no login: Token do Discord inválido.")
+        except Exception as e:
+            web_logger.critical(f"Erro fatal ao executar o bot Discord no thread: {e}", exc_info=True)
+        finally:
+            web_logger.warning("O loop do bot foi finalizado. Fechando o bot.")
+            bot_running = False
+            if not bot.is_closed():
+                loop.run_until_complete(bot.close())
+            loop.close()
 
-# --- Rotas Web do Flask ---
+    # Inicia o bot em uma thread separada
+    bot_thread = threading.Thread(target=bot_runner, daemon=True)
+    bot_thread.start()
+
+# --- Funções Auxiliares ---
+
+def check_bot_initialized():
+    if not hasattr(bot, 'loop') or not bot.loop or not bot_running:
+        web_logger.error("Bot não inicializado corretamente")
+        return False
+    return True
 
 # Decorator para autenticação
 def basic_auth_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        auth = request.authorization
-        if not auth or auth.username != WEB_AUTH_USER or auth.password != WEB_AUTH_PASS:
-            web_logger.warning(f"Tentativa de acesso não autorizado ao painel web. IP: {request.remote_addr}")
+        try:
+            auth = request.authorization
+            if not auth or auth.username != WEB_AUTH_USER or auth.password != WEB_AUTH_PASS:
+                web_logger.warning(f"Tentativa de acesso não autorizado ao painel web. IP: {request.remote_addr}")
+                return Response(
+                    'Acesso não autorizado', 401, 
+                    {'WWW-Authenticate': 'Basic realm="Login Required"'}
+                )
+            return f(*args, **kwargs)
+        except Exception as e:
+            web_logger.error(f"Erro na autenticação: {e}", exc_info=True)
             return Response(
-                'Acesso não autorizado', 401, {'WWW-Authenticate': 'Basic realm="Login Required"'}
+                'Erro interno de autenticação', 500
             )
-        return f(*args, **kwargs)
     return decorated
 
 def run_coroutine_in_bot_loop(coro):
     """Executa uma corrotina no loop de eventos do bot e espera pelo resultado."""
-    if not hasattr(bot, 'loop') or not bot.loop.is_running():
+    if not check_bot_initialized():
         web_logger.error("Loop do bot não está rodando. Não é possível executar corrotina.")
         raise RuntimeError("Bot loop is not running.")
     
@@ -143,6 +162,8 @@ def check_bot_ready():
         web_logger.warning(f"Bot não pronto para atender requisição à {request.path}")
         return jsonify({'status': 'error', 'message': 'Bot não está pronto'}), 503
 
+# --- Rotas Web do Flask ---
+
 # Rota para servir arquivos estáticos
 @app.route('/static/<path:filename>')
 def static_files(filename):
@@ -162,10 +183,12 @@ def not_found(error):
 # Novo endpoint de health check
 @app.route('/health')
 def health_check():
+    bot_status = "running" if bot_running and hasattr(bot, 'is_ready') and bot.is_ready() else "error"
     return jsonify({
-        'status': 'ok', 
-        'bot_running': bot_running,
-        'bot_ready': bot.is_ready() if hasattr(bot, 'is_ready') else False
+        'status': 'ok' if bot_status == "running" else 'error',
+        'bot_status': bot_status,
+        'bot_ready': bot.is_ready() if hasattr(bot, 'is_ready') else False,
+        'web_panel': 'running'
     }), 200
 
 @app.route('/')
@@ -1384,9 +1407,29 @@ def manage_warning_settings():
         web_logger.error(f"Erro em /api/warning_settings: {e}", exc_info=True)
         return jsonify({'status': 'error', 'message': f"Erro ao gerenciar configurações de aviso: {str(e)}"}), 500
 
+# Tratamento de erro global
+@app.errorhandler(Exception)
+def handle_exception(e):
+    web_logger.error(f"Erro não tratado: {e}", exc_info=True)
+    return jsonify({
+        'status': 'error',
+        'message': 'Ocorreu um erro interno no servidor'
+    }), 500
+
 # Este bloco é útil para testes locais sem o Gunicorn
 if __name__ == '__main__':
     web_logger.info("Iniciando o servidor Flask em modo de desenvolvimento local.")
-    # O bot já foi iniciado na thread de background.
-    # Isto executará o servidor embutido do Flask, que não é para produção.
-    app.run(host='0.0.0.0', port=8080, debug=False)
+    
+    # Inicia o bot em uma thread separada
+    run_bot_in_thread()
+    
+    # Aguarda alguns segundos para o bot inicializar
+    time.sleep(5)
+    
+    # Verifica se o bot está rodando
+    if not bot_running:
+        web_logger.error("Falha ao iniciar o bot Discord")
+    
+    # Inicia o servidor web
+    http_server = WSGIServer(('0.0.0.0', 8080), app)
+    http_server.serve_forever()
