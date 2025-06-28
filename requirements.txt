@@ -13,3 +13,4 @@ flask-cors>=3.0.10
 psutil>=5.9.0
 gunicorn>=21.2.0
 nest-asyncio>=1.5.8
+gevent>=22.10.2

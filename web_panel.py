@@ -17,8 +17,6 @@ import aiomysql
 import psutil
 from werkzeug.middleware.proxy_fix import ProxyFix
 import time
-from gevent.pywsgi import WSGIServer
-from gevent import spawn
 import sys
 
 # Configuração básica do logger para o web panel
@@ -1420,7 +1418,7 @@ run_bot_in_thread()
 
 # Este bloco só será usado para testes locais, não quando executado pelo Gunicorn
 if __name__ == '__main__':
-    web_logger.info("Iniciando o servidor Flask em modo de desenvolvimento local com WSGIServer.")
+    web_logger.info("Iniciando o servidor Flask em modo de desenvolvimento local.")
     
     # O bot já foi iniciado acima. Apenas esperamos um pouco para garantir que ele se conecte.
     time.sleep(10)
@@ -1431,6 +1429,5 @@ if __name__ == '__main__':
     else:
         web_logger.info("Bot parece estar rodando. Servidor web sendo iniciado.")
 
-    # Inicia o servidor web
-    http_server = WSGIServer(('0.0.0.0', 8080), app, log=web_logger, error_log=web_logger)
-    http_server.serve_forever()
+    # Inicia o servidor web com o servidor de desenvolvimento do Flask
+    app.run(host='0.0.0.0', port=8080)
