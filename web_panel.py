@@ -181,13 +181,17 @@ def not_found(error):
 # Novo endpoint de health check
 @app.route('/health')
 def health_check():
-    bot_status = "running" if bot_running and hasattr(bot, 'is_ready') and bot.is_ready() else "error"
-    return jsonify({
-        'status': 'ok' if bot_status == "running" else 'error',
-        'bot_status': bot_status,
-        'bot_ready': bot.is_ready() if hasattr(bot, 'is_ready') else False,
-        'web_panel': 'running'
-    }), 200
+    try:
+        bot_status = "running" if bot_running and hasattr(bot, 'is_ready') and bot.is_ready() else "error"
+        return jsonify({
+            'status': 'ok' if bot_status == "running" else 'error',
+            'bot_status': bot_status,
+            'bot_ready': bot.is_ready() if hasattr(bot, 'is_ready') else False,
+            'web_panel': 'running',
+            'database': 'connected' if hasattr(bot, 'db') and bot.db else 'disconnected'
+        }), 200
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/')
 @basic_auth_required
@@ -1420,18 +1424,10 @@ def handle_exception(e):
 web_logger.info("Iniciando a thread do bot Discord...")
 run_bot_in_thread()
 
+# Adiciona um pequeno atraso para garantir que o bot tenha tempo de inicializar
+time.sleep(5)
+
 # Este bloco só será usado para testes locais, não quando executado pelo Gunicorn
 if __name__ == '__main__':
     web_logger.info("Iniciando o servidor Flask em modo de desenvolvimento local.")
-    
-    # O bot já foi iniciado acima. Apenas esperamos um pouco para garantir que ele se conecte.
-    time.sleep(10)
-    
-    # Verifica se o bot está rodando
-    if not bot_running:
-        web_logger.error("Falha ao iniciar o bot Discord. Verifique os logs.")
-    else:
-        web_logger.info("Bot parece estar rodando. Servidor web sendo iniciado.")
-
-    # Inicia o servidor web com o servidor de desenvolvimento do Flask
     app.run(host='0.0.0.0', port=8080)

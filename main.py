@@ -233,7 +233,7 @@ class InactivityBot(commands.Bot):
             'status': discord.Status.online
         })
         super().__init__(*args, **kwargs)
-        self._ready_event = asyncio.Event()
+        self._ready_event = asyncio.Event()  # Inicializado aqui
         # Configurar o loop de eventos
         self.loop = asyncio.get_event_loop()
         
@@ -1240,9 +1240,6 @@ bot = InactivityBot(
 @bot.event
 async def on_ready():
     try:
-        if not hasattr(bot, '_ready_event'):
-            bot._ready_event = asyncio.Event()
-            
         if not bot.is_ready():
             logger.warning("Evento on_ready chamado mas bot não está pronto")
             return
