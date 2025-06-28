@@ -307,36 +307,57 @@ class InactivityBot(commands.Bot):
         await self.log_action("Erro Crítico de Evento", details=log_message)
 
     async def setup_hook(self):
-        """Hook executado após o login, mas antes de estar pronto."""
+        """
+        Este hook é executado automaticamente após o login, mas antes de o bot
+        ser marcado como pronto. É o local ideal para configurações assíncronas e para iniciar tarefas.
+        """
         if self._setup_complete:
             return
-            
+        
         self.load_config()
         await self.initialize_db()
         
-        if self.db:
+        # Prossiga apenas se a conexão com o DB for bem-sucedida
+        if self.db and not self.db_connection_failed:
             from database import DatabaseBackup
             self.db_backup = DatabaseBackup(self.db)
             
+            # Sincronizar comandos slash
             try:
                 synced = await self.tree.sync()
-                logger.info(f"Comandos slash sincronizados: {len(synced)} comandos")
+                logger.info(f"Comandos slash sincronizados: {len(synced)} comandos.")
             except Exception as e:
                 logger.error(f"Erro ao sincronizar comandos slash: {e}")
             
-            from tasks import setup_tasks
-            setup_tasks()
+            # --- INÍCIO DAS TAREFAS DE SEGUNDO PLANO ---
+            # Importa as funções de tarefa diretamente de tasks.py
+            from tasks import (
+                inactivity_check, check_warnings, cleanup_members,
+                database_backup, cleanup_old_data, monitor_rate_limits,
+                report_metrics, health_check
+            )
             
-            self.voice_event_processor_task = asyncio.create_task(self.process_voice_events())
-            self.queue_processor_task = asyncio.create_task(self.process_queues())
-            self.pool_monitor_task = asyncio.create_task(self.monitor_db_pool())
-            self.health_check_task = asyncio.create_task(self.periodic_health_check())
-            self.audio_check_task = asyncio.create_task(self.check_audio_states())
+            # Inicia cada tarefa usando o loop do bot
+            self.loop.create_task(inactivity_check())
+            self.loop.create_task(check_warnings())
+            self.loop.create_task(cleanup_members())
+            self.loop.create_task(database_backup())
+            self.loop.create_task(cleanup_old_data())
+            self.loop.create_task(monitor_rate_limits())
+            self.loop.create_task(report_metrics())
+            self.loop.create_task(health_check())
+            
+            # Inicia as outras tarefas que já estavam aqui
+            self.voice_event_processor_task = self.loop.create_task(self.process_voice_events())
+            self.queue_processor_task = self.loop.create_task(self.process_queues())
+            self.pool_monitor_task = self.loop.create_task(self.monitor_db_pool())
+            self.health_check_task = self.loop.create_task(self.periodic_health_check())
+            self.audio_check_task = self.loop.create_task(self.check_audio_states())
 
             self._setup_complete = True
-            logger.info("Setup hook concluído com sucesso.")
+            logger.info("Setup hook concluído. Todas as tarefas de fundo foram agendadas.")
         else:
-            logger.critical("Falha na inicialização do banco de dados. O bot funcionará em modo degradado.")
+            logger.critical("Falha na inicialização do banco de dados. As tarefas não serão iniciadas.")
             self.db_connection_failed = True
 
     async def initialize_db(self):
