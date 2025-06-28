@@ -20,6 +20,9 @@ import time
 import sys
 import encodings.idna
 
+# Adicione no início do arquivo, após os imports
+bot_ready_event = asyncio.Event()
+
 # Configuração básica do logger para o web panel
 web_logger = logging.getLogger('web_panel')
 web_logger.setLevel(logging.INFO)
@@ -69,11 +72,10 @@ def run_bot_in_thread():
             
             # Configurar o loop no bot antes de iniciar
             bot.loop = loop
-            bot._ready_event = asyncio.Event()  # Garantir que o evento está inicializado
+            bot._ready_event = bot_ready_event  # Usar o evento compartilhado
             
             # Esperar o bot ficar pronto
             loop.run_until_complete(bot.start(DISCORD_TOKEN))
-            loop.run_until_complete(bot.wait_until_ready())
             bot_initialized = True
         except discord.LoginFailure:
             web_logger.critical("Falha no login: Token do Discord inválido.")
@@ -201,8 +203,15 @@ def health_check():
 @app.route('/')
 @basic_auth_required
 def home():
-    web_logger.info("Redirecionando para /dashboard")
-    return redirect(url_for('dashboard'))
+    try:
+        if not bot_running or not bot_initialized:
+            return render_template('error.html', error_message="Bot não está rodando ou não foi inicializado"), 503
+            
+        web_logger.info("Redirecionando para /dashboard")
+        return redirect(url_for('dashboard'))
+    except Exception as e:
+        web_logger.error(f"Erro na rota principal: {e}", exc_info=True)
+        return render_template('error.html', error_message="Erro interno do servidor"), 500
 
 @app.route('/dashboard')
 @basic_auth_required

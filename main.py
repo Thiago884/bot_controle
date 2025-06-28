@@ -233,7 +233,7 @@ class InactivityBot(commands.Bot):
             'status': discord.Status.online
         })
         super().__init__(*args, **kwargs)
-        self._ready_event = asyncio.Event()  # Inicializado aqui
+        self._ready_event = None  # Será definido pelo web_panel
         # Configurar o loop de eventos
         self.loop = asyncio.get_event_loop()
         
@@ -300,7 +300,7 @@ class InactivityBot(commands.Bot):
 
     async def wait_until_ready(self):
         await super().wait_until_ready()
-        if hasattr(self, '_ready_event'):
+        if self._ready_event:
             await self._ready_event.wait()
         return self
 
@@ -1291,7 +1291,8 @@ async def on_ready():
         bot.loop.create_task(check_missed_periods())
         
         # Sinalizar que o bot está pronto
-        bot._ready_event.set()
+        if bot._ready_event:
+            bot._ready_event.set()
         
     except Exception as e:
         logger.error(f"Erro crítico no on_ready: {e}", exc_info=True)
