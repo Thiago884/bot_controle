@@ -43,8 +43,9 @@ app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 WEB_AUTH_USER = os.getenv('WEB_AUTH_USER', 'admin')
 WEB_AUTH_PASS = os.getenv('WEB_AUTH_PASS', 'admin123')
 
-# Variável global para controlar o estado do bot
+# Variáveis globais para controlar o estado do bot
 bot_running = False
+bot_initialized = False
 
 # Verificar token do Discord antes de iniciar
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
@@ -57,6 +58,7 @@ if not DISCORD_TOKEN:
 def run_bot_in_thread():
     """Configura um loop de eventos asyncio dedicado e executa o bot nele."""
     def bot_runner():
+        global bot_initialized
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
@@ -67,10 +69,12 @@ def run_bot_in_thread():
             
             # Configurar o loop no bot antes de iniciar
             bot.loop = loop
+            bot._ready_event = asyncio.Event()  # Garantir que o evento está inicializado
             
             # Esperar o bot ficar pronto
             loop.run_until_complete(bot.start(DISCORD_TOKEN))
-            loop.run_until_complete(bot.wait_until_ready())  # Adicionado para garantir inicialização completa
+            loop.run_until_complete(bot.wait_until_ready())
+            bot_initialized = True
         except discord.LoginFailure:
             web_logger.critical("Falha no login: Token do Discord inválido.")
         except Exception as e:
@@ -78,6 +82,7 @@ def run_bot_in_thread():
         finally:
             web_logger.warning("O loop do bot foi finalizado. Fechando o bot.")
             bot_running = False
+            bot_initialized = False
             if not bot.is_closed():
                 loop.run_until_complete(bot.close())
             loop.close()
@@ -89,7 +94,7 @@ def run_bot_in_thread():
 # --- Funções Auxiliares ---
 
 def check_bot_initialized():
-    if not hasattr(bot, 'loop') or not bot.loop or not bot_running:
+    if not hasattr(bot, 'loop') or not bot.loop or not bot_running or not bot_initialized:
         web_logger.error("Bot não inicializado corretamente")
         return False
     return True
@@ -154,8 +159,8 @@ def check_bot_ready():
     if request.path.startswith('/static') or request.path == '/keepalive' or request.path == '/health':
         return
         
-    if not bot_running:
-        return jsonify({'status': 'error', 'message': 'Bot não está rodando'}), 503
+    if not bot_running or not bot_initialized:
+        return jsonify({'status': 'error', 'message': 'Bot não está rodando ou não foi inicializado'}), 503
         
     if not hasattr(bot, 'is_ready') or not bot.is_ready():
         return jsonify({'status': 'error', 'message': 'Bot não está completamente pronto'}), 503
@@ -182,7 +187,7 @@ def not_found(error):
 @app.route('/health')
 def health_check():
     try:
-        bot_status = "running" if bot_running and hasattr(bot, 'is_ready') and bot.is_ready() else "error"
+        bot_status = "running" if bot_running and bot_initialized and hasattr(bot, 'is_ready') and bot.is_ready() else "error"
         return jsonify({
             'status': 'ok' if bot_status == "running" else 'error',
             'bot_status': bot_status,
