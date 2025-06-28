@@ -264,6 +264,7 @@ class InactivityBot(commands.Bot):
         self._api_request_delay = 2.0
         self.audio_check_task = None
         self.health_check_task = None
+        self._tasks_started = False
         
         # Monitor de rate limits
         self.rate_limit_monitor = RateLimitMonitor()
@@ -309,8 +310,11 @@ class InactivityBot(commands.Bot):
     async def setup_hook(self):
         """
         Este hook é executado automaticamente após o login, mas antes de o bot
-        ser marcado como pronto. É o local ideal para configurações assíncronas e para iniciar tarefas.
+        ser marcado como pronto. É o local ideal para configurações assíncronas.
         """
+        # Adicione esta flag para controlar o início das tasks
+        self._tasks_started = False
+
         if self._setup_complete:
             return
         
@@ -328,34 +332,9 @@ class InactivityBot(commands.Bot):
                 logger.info(f"Comandos slash sincronizados: {len(synced)} comandos.")
             except Exception as e:
                 logger.error(f"Erro ao sincronizar comandos slash: {e}")
-            
-            # --- INÍCIO DAS TAREFAS DE SEGUNDO PLANO ---
-            # Importa as funções de tarefa diretamente de tasks.py
-            from tasks import (
-                inactivity_check, check_warnings, cleanup_members,
-                database_backup, cleanup_old_data, monitor_rate_limits,
-                report_metrics, health_check
-            )
-            
-            # Inicia cada tarefa usando o loop do bot
-            self.loop.create_task(inactivity_check())
-            self.loop.create_task(check_warnings())
-            self.loop.create_task(cleanup_members())
-            self.loop.create_task(database_backup())
-            self.loop.create_task(cleanup_old_data())
-            self.loop.create_task(monitor_rate_limits())
-            self.loop.create_task(report_metrics())
-            self.loop.create_task(health_check())
-            
-            # Inicia as outras tarefas que já estavam aqui
-            self.voice_event_processor_task = self.loop.create_task(self.process_voice_events())
-            self.queue_processor_task = self.loop.create_task(self.process_queues())
-            self.pool_monitor_task = self.loop.create_task(self.monitor_db_pool())
-            self.health_check_task = self.loop.create_task(self.periodic_health_check())
-            self.audio_check_task = self.loop.create_task(self.check_audio_states())
 
             self._setup_complete = True
-            logger.info("Setup hook concluído. Todas as tarefas de fundo foram agendadas.")
+            logger.info("Setup hook concluído. A inicialização das tarefas aguardará o evento on_ready.")
         else:
             logger.critical("Falha na inicialização do banco de dados. As tarefas não serão iniciadas.")
             self.db_connection_failed = True
@@ -1038,6 +1017,40 @@ async def on_ready():
         logger.info(f'Bot conectado como {bot.user}')
         logger.info(f"Latência: {round(bot.latency * 1000)}ms")
         
+        # --------------------------------------------------------------------
+        # ADICIONE A LÓGICA DE START DAS TASKS AQUI
+        # --------------------------------------------------------------------
+        if not bot._tasks_started:
+            logger.info("Bot está pronto. Iniciando tarefas de fundo...")
+            
+            # Importa as funções de tarefa diretamente de tasks.py
+            from tasks import (
+                inactivity_check, check_warnings, cleanup_members,
+                database_backup, cleanup_old_data, monitor_rate_limits,
+                report_metrics, health_check, check_missed_periods
+            )
+            
+            # Inicia cada tarefa usando o loop do bot
+            bot.loop.create_task(inactivity_check())
+            bot.loop.create_task(check_warnings())
+            bot.loop.create_task(cleanup_members())
+            bot.loop.create_task(database_backup())
+            bot.loop.create_task(cleanup_old_data())
+            bot.loop.create_task(monitor_rate_limits())
+            bot.loop.create_task(report_metrics())
+            bot.loop.create_task(health_check())
+            
+            # Inicia as outras tarefas que já estavam aqui
+            bot.voice_event_processor_task = bot.loop.create_task(bot.process_voice_events())
+            bot.queue_processor_task = bot.loop.create_task(bot.process_queues())
+            bot.pool_monitor_task = bot.loop.create_task(bot.monitor_db_pool())
+            bot.health_check_task = bot.loop.create_task(bot.periodic_health_check())
+            bot.audio_check_task = bot.loop.create_task(bot.check_audio_states())
+            bot.loop.create_task(check_missed_periods())
+
+            bot._tasks_started = True
+            logger.info("Todas as tarefas de fundo foram agendadas com sucesso.")
+
         for guild in bot.guilds:
             try:
                 log_channel_id = bot.config.get('log_channel')
@@ -1069,9 +1082,6 @@ async def on_ready():
             await bot.log_action(None, None, embed=embed)
         except Exception as e:
             logger.error(f"Erro ao enviar embed de inicialização no on_ready: {e}", exc_info=True)
-
-        from tasks import check_missed_periods
-        bot.loop.create_task(check_missed_periods())
         
     except Exception as e:
         logger.error(f"Erro crítico no on_ready: {e}", exc_info=True)
