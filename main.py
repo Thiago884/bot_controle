@@ -217,9 +217,6 @@ class SmartPriorityQueue:
 
 class InactivityBot(commands.Bot):
     def __init__(self, *args, **kwargs):
-        # Inicializa o Event antes de chamar super().__init__
-        self._ready_event = asyncio.Event()
-        
         # Initialize the bot with optimized settings
         kwargs.update({
             'max_messages': 100,
@@ -236,7 +233,7 @@ class InactivityBot(commands.Bot):
             'status': discord.Status.online
         })
         super().__init__(*args, **kwargs)
-        
+        self._ready_event = asyncio.Event()
         # Configurar o loop de eventos
         self.loop = asyncio.get_event_loop()
         
@@ -1241,55 +1238,63 @@ bot = InactivityBot(
 
 @bot.event
 async def on_ready():
-    if not bot.is_ready():
-        logger.warning("Evento on_ready chamado mas bot não está pronto")
-        return
-    
-    # Adicionar um pequeno atraso para garantir que tudo esteja carregado
-    await asyncio.sleep(2)
-    
-    logger.info(f'Bot conectado como {bot.user}')
-    logger.info(f"Latência: {round(bot.latency * 1000)}ms")
-    
-    for guild in bot.guilds:
-        try:
-            # Validar canais configurados
-            log_channel_id = bot.config.get('log_channel')
-            if log_channel_id:
-                log_channel = bot.get_channel(log_channel_id)
-                if not log_channel:
-                    logger.error(f"Canal de logs (ID: {log_channel_id}) não encontrado no servidor {guild.name}.")
-                elif not log_channel.permissions_for(guild.me).send_messages:
-                    logger.error(f"Sem permissão para enviar mensagens no canal de logs em {guild.name}")
-
-            notification_channel_id = bot.config.get('notification_channel')
-            if notification_channel_id:
-                notify_channel = bot.get_channel(notification_channel_id)
-                if not notify_channel:
-                    logger.error(f"Canal de notificações (ID: {notification_channel_id}) não encontrado no servidor {guild.name}.")
-                elif not notify_channel.permissions_for(guild.me).send_messages:
-                    logger.error(f"Sem permissão para enviar mensagens no canal de notificações em {guild.name}")
-
-        except Exception as e:
-            logger.error(f"Erro durante o processamento do on_ready para a guilda {guild.name}: {e}", exc_info=True)
-    
     try:
-        embed = discord.Embed(
-            title="🤖 Bot de Controle de Atividades Iniciado",
-            description=f"Conectado como {bot.user.mention}",
-            color=discord.Color.green(),
-            timestamp=datetime.now(bot.timezone))
-        embed.add_field(name="Servidores", value=str(len(bot.guilds)), inline=True)
-        embed.add_field(name="Latência", value=f"{round(bot.latency * 1000)}ms", inline=True)
-        embed.set_thumbnail(url=bot.user.display_avatar.url)
-        embed.set_footer(text="Sistema de Controle de Atividades")
+        if not hasattr(bot, '_ready_event'):
+            return
+            
+        if not bot.is_ready():
+            logger.warning("Evento on_ready chamado mas bot não está pronto")
+            return
         
-        await bot.log_action(None, None, embed=embed)
-    except Exception as e:
-        logger.error(f"Erro ao enviar embed de inicialização no on_ready: {e}", exc_info=True)
+        # Adicionar um pequeno atraso para garantir que tudo esteja carregado
+        await asyncio.sleep(2)
+        
+        logger.info(f'Bot conectado como {bot.user}')
+        logger.info(f"Latência: {round(bot.latency * 1000)}ms")
+        
+        for guild in bot.guilds:
+            try:
+                # Validar canais configurados
+                log_channel_id = bot.config.get('log_channel')
+                if log_channel_id:
+                    log_channel = bot.get_channel(log_channel_id)
+                    if not log_channel:
+                        logger.error(f"Canal de logs (ID: {log_channel_id}) não encontrado no servidor {guild.name}.")
+                    elif not log_channel.permissions_for(guild.me).send_messages:
+                        logger.error(f"Sem permissão para enviar mensagens no canal de logs em {guild.name}")
 
-    from tasks import check_missed_periods
-    bot.loop.create_task(check_missed_periods())
+                notification_channel_id = bot.config.get('notification_channel')
+                if notification_channel_id:
+                    notify_channel = bot.get_channel(notification_channel_id)
+                    if not notify_channel:
+                        logger.error(f"Canal de notificações (ID: {notification_channel_id}) não encontrado no servidor {guild.name}.")
+                    elif not notify_channel.permissions_for(guild.me).send_messages:
+                        logger.error(f"Sem permissão para enviar mensagens no canal de notificações em {guild.name}")
+
+            except Exception as e:
+                logger.error(f"Erro durante o processamento do on_ready para a guilda {guild.name}: {e}", exc_info=True)
+        
+        try:
+            embed = discord.Embed(
+                title="🤖 Bot de Controle de Atividades Iniciado",
+                description=f"Conectado como {bot.user.mention}",
+                color=discord.Color.green(),
+                timestamp=datetime.now(bot.timezone))
+            embed.add_field(name="Servidores", value=str(len(bot.guilds)), inline=True)
+            embed.add_field(name="Latência", value=f"{round(bot.latency * 1000)}ms", inline=True)
+            embed.set_thumbnail(url=bot.user.display_avatar.url)
+            embed.set_footer(text="Sistema de Controle de Atividades")
+            
+            await bot.log_action(None, None, embed=embed)
+        except Exception as e:
+            logger.error(f"Erro ao enviar embed de inicialização no on_ready: {e}", exc_info=True)
+
+        from tasks import check_missed_periods
+        bot.loop.create_task(check_missed_periods())
+        
+    except Exception as e:
+        logger.error(f"Erro crítico no on_ready: {e}", exc_info=True)
+        raise
 
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):

@@ -154,9 +154,11 @@ def check_bot_ready():
     if request.path.startswith('/static') or request.path == '/keepalive' or request.path == '/health':
         return
         
-    if not bot_running or not hasattr(bot, 'is_ready') or not bot.is_ready():
-        web_logger.warning(f"Bot não pronto para atender requisição à {request.path}")
-        return jsonify({'status': 'error', 'message': 'Bot não está pronto'}), 503
+    if not bot_running:
+        return jsonify({'status': 'error', 'message': 'Bot não está rodando'}), 503
+        
+    if not hasattr(bot, 'is_ready') or not bot.is_ready():
+        return jsonify({'status': 'error', 'message': 'Bot não está completamente pronto'}), 503
 
 # --- Rotas Web do Flask ---
 

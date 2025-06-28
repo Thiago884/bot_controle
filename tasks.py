@@ -891,27 +891,37 @@ async def check_missed_periods():
 
 async def start_tasks_when_ready():
     """Espera o bot estar pronto antes de iniciar as tasks"""
-    await bot.wait_until_ready()
-    
-    if not bot.is_ready():
-        logger.warning("Bot não está pronto - tentando novamente em 10 segundos")
-        await asyncio.sleep(10)
-        return await start_tasks_when_ready()
-    
-    logger.info("Bot está pronto - iniciando tarefas agendadas")
-    
-    # Carrega estados salvos
-    await load_task_states()
-    
-    # Inicia todas as tasks
-    bot.loop.create_task(execute_task_with_retry("inactivity_check", inactivity_check))
-    bot.loop.create_task(execute_task_with_retry("check_warnings", check_warnings))
-    bot.loop.create_task(execute_task_with_retry("cleanup_members", cleanup_members))
-    bot.loop.create_task(execute_task_with_retry("database_backup", database_backup))
-    bot.loop.create_task(execute_task_with_retry("cleanup_old_data", cleanup_old_data))
-    bot.loop.create_task(execute_task_with_retry("monitor_rate_limits", monitor_rate_limits))
-    bot.loop.create_task(execute_task_with_retry("report_metrics", report_metrics))
-    bot.loop.create_task(execute_task_with_retry("health_check", health_check))
+    try:
+        await bot.wait_until_ready()
+        
+        if not bot.is_ready():
+            logger.warning("Bot não está pronto - tentando novamente em 10 segundos")
+            await asyncio.sleep(10)
+            return await start_tasks_when_ready()
+        
+        logger.info("Bot está pronto - iniciando tarefas agendadas")
+        
+        # Carrega estados salvos
+        await load_task_states()
+        
+        # Inicia todas as tasks
+        tasks = [
+            inactivity_check(),
+            check_warnings(),
+            cleanup_members(),
+            database_backup(),
+            cleanup_old_data(),
+            monitor_rate_limits(),
+            report_metrics(),
+            health_check()
+        ]
+        
+        for task in tasks:
+            bot.loop.create_task(task)
+            
+    except Exception as e:
+        logger.error(f"Erro ao iniciar tasks: {e}")
+        raise
 
 def setup_tasks():
     """Configura e inicia todas as tarefas agendadas"""
