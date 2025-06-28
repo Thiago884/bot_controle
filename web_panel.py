@@ -20,8 +20,6 @@ import time
 import sys
 import encodings.idna
 
-# Adicione no início do arquivo, após os imports
-bot._ready_event = asyncio.Event()
 # Configuração básica do logger para o web panel
 web_logger = logging.getLogger('web_panel')
 web_logger.setLevel(logging.INFO)
@@ -57,26 +55,27 @@ if not DISCORD_TOKEN:
 
 # --- Lógica de Inicialização do Bot ---
 
-# Em web_panel.py, modificar a função run_bot_in_thread:
 def run_bot_in_thread():
     """Configura um loop de eventos asyncio dedicado e executa o bot nele."""
     def bot_runner():
-        global bot_initialized
+        global bot_initialized, bot_running
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
         try:
             web_logger.info("Iniciando o loop de eventos do bot no thread de background.")
-            global bot_running
+            
+            # Atribuir o loop ao bot ANTES de iniciar
+            bot.loop = loop
             bot_running = True
             
-            # Configurar o loop no bot antes de iniciar
-            bot.loop = loop
-            bot._ready_event = asyncio.Event()  # Criar o evento aqui
-            
-            # Esperar o bot ficar pronto
-            loop.run_until_complete(bot.start(DISCORD_TOKEN))
+            # O bot agora está 'inicializado' no sentido de ter um loop e estar prestes a rodar.
+            # O estado 'pronto' (is_ready) será tratado internamente pelo bot.
             bot_initialized = True
+            
+            # bot.start() é bloqueante e só retorna quando o bot é fechado.
+            loop.run_until_complete(bot.start(DISCORD_TOKEN))
+            
         except discord.LoginFailure:
             web_logger.critical("Falha no login: Token do Discord inválido.")
         except Exception as e:
@@ -86,18 +85,23 @@ def run_bot_in_thread():
             bot_running = False
             bot_initialized = False
             if not bot.is_closed():
-                loop.run_until_complete(bot.close())
-            loop.close()
+                # run_until_complete não pode ser chamado em um loop fechado
+                if not loop.is_closed():
+                    loop.run_until_complete(bot.close())
+            if not loop.is_closed():
+                loop.close()
 
-    # Inicia o bot em uma thread separada
     bot_thread = threading.Thread(target=bot_runner, daemon=True)
     bot_thread.start()
 
 # --- Funções Auxiliares ---
 
 def check_bot_initialized():
-    if not hasattr(bot, 'loop') or not bot.loop or not bot_running or not bot_initialized:
-        web_logger.error("Bot não inicializado corretamente")
+    """Verifica se a thread do bot foi iniciada e o objeto bot tem um loop."""
+    # A verificação principal para requisições será 'bot.is_ready()' no middleware.
+    # Esta é uma verificação mais básica de que o processo de inicialização começou.
+    if not bot_running or not bot_initialized or not hasattr(bot, 'loop') or not bot.loop.is_running():
+        web_logger.error("Bot não inicializado corretamente ou seu loop não está rodando.")
         return False
     return True
 
@@ -158,16 +162,17 @@ def get_main_guild():
 # Middleware para verificar se o bot está pronto
 @app.before_request
 def check_bot_ready():
-    if request.path.startswith('/static') or request.path == '/keepalive' or request.path == '/health':
+    # As rotas /static, /keepalive e /health não devem exigir que o bot esteja pronto.
+    if request.path.startswith('/static') or request.path in ['/keepalive', '/health']:
         return
         
+    # Verifica o estado básico da thread do bot
     if not bot_running or not bot_initialized:
-        return jsonify({'status': 'error', 'message': 'Bot não está rodando ou não foi inicializado'}), 503
+        return jsonify({'status': 'error', 'message': 'O processo do bot não está rodando ou inicializado.'}), 503
         
+    # A verificação mais importante: o bot está conectado e pronto para receber comandos?
     if not hasattr(bot, 'is_ready') or not bot.is_ready():
-        return jsonify({'status': 'error', 'message': 'Bot não está completamente pronto'}), 503
-
-# --- Rotas Web do Flask ---
+        return jsonify({'status': 'error', 'message': 'O bot está inicializando, mas ainda não está pronto.'}), 503
 
 # Rota para servir arquivos estáticos
 @app.route('/static/<path:filename>')
