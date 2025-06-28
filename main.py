@@ -300,7 +300,8 @@ class InactivityBot(commands.Bot):
 
     async def wait_until_ready(self):
         await super().wait_until_ready()
-        self._ready_event.set()
+        if hasattr(self, '_ready_event'):
+            await self._ready_event.wait()
         return self
 
     async def on_error(self, event, *args, **kwargs):
@@ -1240,7 +1241,7 @@ bot = InactivityBot(
 async def on_ready():
     try:
         if not hasattr(bot, '_ready_event'):
-            return
+            bot._ready_event = asyncio.Event()
             
         if not bot.is_ready():
             logger.warning("Evento on_ready chamado mas bot não está pronto")
@@ -1291,6 +1292,9 @@ async def on_ready():
 
         from tasks import check_missed_periods
         bot.loop.create_task(check_missed_periods())
+        
+        # Sinalizar que o bot está pronto
+        bot._ready_event.set()
         
     except Exception as e:
         logger.error(f"Erro crítico no on_ready: {e}", exc_info=True)
