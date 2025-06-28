@@ -21,8 +21,7 @@ import sys
 import encodings.idna
 
 # Adicione no início do arquivo, após os imports
-bot_ready_event = asyncio.Event()
-
+bot._ready_event = asyncio.Event()
 # Configuração básica do logger para o web panel
 web_logger = logging.getLogger('web_panel')
 web_logger.setLevel(logging.INFO)
@@ -58,6 +57,7 @@ if not DISCORD_TOKEN:
 
 # --- Lógica de Inicialização do Bot ---
 
+# Em web_panel.py, modificar a função run_bot_in_thread:
 def run_bot_in_thread():
     """Configura um loop de eventos asyncio dedicado e executa o bot nele."""
     def bot_runner():
@@ -72,7 +72,7 @@ def run_bot_in_thread():
             
             # Configurar o loop no bot antes de iniciar
             bot.loop = loop
-            bot._ready_event = bot_ready_event  # Usar o evento compartilhado
+            bot._ready_event = asyncio.Event()  # Criar o evento aqui
             
             # Esperar o bot ficar pronto
             loop.run_until_complete(bot.start(DISCORD_TOKEN))
