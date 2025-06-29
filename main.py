@@ -234,6 +234,9 @@ class InactivityBot(commands.Bot):
         })
         super().__init__(*args, **kwargs)
         
+        # Adicione esta linha para inicializar o atributo _ready
+        self._ready = asyncio.Event()
+        
         # Configurações do bot
         self.config = {}
         self.timezone = pytz.timezone('America/Sao_Paulo')
@@ -1016,6 +1019,12 @@ async def on_ready():
     try:
         logger.info(f'Bot conectado como {bot.user}')
         logger.info(f"Latência: {round(bot.latency * 1000)}ms")
+        
+        # Verificar se já está pronto para evitar múltiplas inicializações
+        if hasattr(bot, '_ready_set') and bot._ready_set:
+            return
+            
+        bot._ready_set = True
         
         # --------------------------------------------------------------------
         # ADICIONE A LÓGICA DE START DAS TASKS AQUI
