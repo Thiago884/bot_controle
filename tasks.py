@@ -188,10 +188,9 @@ async def on_shutdown():
 @bot.event
 async def on_resumed():
     """Executa ações quando o bot reconecta após uma queda."""
-    logger.info("Bot reconectado - reiniciando tarefas...")
+    logger.info("Bot reconectado após queda")
     await bot.log_action("Reconexão", None, "Bot reconectado após queda")
     await check_missed_periods()  # Verificar períodos perdidos durante a queda
-    await start_tasks_when_ready()  # Reinicia as tasks
 
 @bot.event
 async def on_disconnect():
