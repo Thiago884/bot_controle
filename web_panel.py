@@ -96,6 +96,10 @@ def run_bot_in_thread():
 
 # --- Funções Auxiliares ---
 
+def is_bot_ready():
+    """Verifica se o bot está completamente pronto para operar"""
+    return hasattr(bot, 'is_ready') and bot.is_ready() and hasattr(bot, 'db') and bot.db is not None
+
 def check_bot_initialized():
     """Verifica se a thread do bot foi iniciada e o objeto bot tem um loop."""
     # A verificação principal para requisições será 'bot.is_ready()' no middleware.
@@ -170,8 +174,8 @@ def check_bot_ready():
     if not bot_running or not bot_initialized:
         return jsonify({'status': 'error', 'message': 'O processo do bot não está rodando ou inicializado.'}), 503
         
-    # A verificação mais importante: o bot está conectado e pronto para receber comandos?
-    if not hasattr(bot, 'is_ready') or not bot.is_ready():
+    # Verificação mais completa
+    if not is_bot_ready():
         return jsonify({'status': 'error', 'message': 'O bot está inicializando, mas ainda não está pronto.'}), 503
 
 # Rota para servir arquivos estáticos
@@ -194,11 +198,11 @@ def not_found(error):
 @app.route('/health')
 def health_check():
     try:
-        bot_status = "running" if bot_running and bot_initialized and hasattr(bot, 'is_ready') and bot.is_ready() else "error"
+        bot_status = "running" if bot_running and bot_initialized and is_bot_ready() else "error"
         return jsonify({
             'status': 'ok' if bot_status == "running" else 'error',
             'bot_status': bot_status,
-            'bot_ready': bot.is_ready() if hasattr(bot, 'is_ready') else False,
+            'bot_ready': is_bot_ready(),
             'web_panel': 'running',
             'database': 'connected' if hasattr(bot, 'db') and bot.db else 'disconnected'
         }), 200
@@ -344,7 +348,7 @@ def panel_status():
     try:
         return jsonify({
             'status': 'running',
-            'bot_ready': bot.is_ready() if hasattr(bot, 'is_ready') else False,
+            'bot_ready': is_bot_ready(),
             'guild_count': len(bot.guilds) if hasattr(bot, 'guilds') else 0,
             'last_heartbeat': datetime.datetime.now().isoformat(),
             'panel_version': '1.0.0'
@@ -373,7 +377,7 @@ def system_info():
 @basic_auth_required
 def get_system_status():
     try:
-        bot_status = "Operacional" if hasattr(bot, 'is_ready') and bot.is_ready() else "Erro"
+        bot_status = "Operacional" if is_bot_ready() else "Erro"
         
         db_status = "Operacional"
         pool_status = {
