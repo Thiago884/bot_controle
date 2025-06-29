@@ -872,18 +872,118 @@ async def check_missed_periods():
         return
 
     for guild in bot.guilds:
-        members = [m for m in guild.members if any(r.id in tracked_roles for r in m.roles)]
+        # Obter todos os membros com cargos monitorados de forma mais eficiente
+        members_with_roles = await bot.db.get_members_with_tracked_roles(guild.id, tracked_roles)
+        if not members_with_roles:
+            continue
+            
+        # Processar em lotes
+        batch_size = bot._batch_processing_size
+        for i in range(0, len(members_with_roles), batch_size):
+            batch = members_with_roles[i:i + batch_size]
+            await asyncio.gather(*[
+                process_member_missed_periods(member_id, guild, required_minutes, 
+                                            required_days, monitoring_period, tracked_roles)
+                for member_id in batch
+            ])
+            await asyncio.sleep(bot.rate_limit_delay)
+
+async def process_member_missed_periods(member_id: int, guild: discord.Guild, 
+                                      required_minutes: int, required_days: int,
+                                      monitoring_period: int, tracked_roles: List[int]):
+    """Processa períodos perdidos para um único membro"""
+    try:
+        member = guild.get_member(member_id)
+        if not member:
+            return
+            
+        # Verificar whitelist
+        if member.id in bot.config['whitelist']['users'] or \
+           any(role.id in bot.config['whitelist']['roles'] for role in member.roles):
+            return
+            
+        # Obter todos os períodos não verificados
+        now = datetime.now(bot.timezone)
+        last_check = await bot.db.get_last_period_check(member.id, guild.id)
         
-        for member in members:
-            try:
-                last_check = await bot.db.get_last_period_check(member.id, guild.id)
-                now = datetime.now(bot.timezone)
+        if not last_check:
+            # Nunca foi verificado - criar um novo período
+            new_period_end = now + timedelta(days=monitoring_period)
+            await bot.db.log_period_check(member.id, guild.id, now, new_period_end, False)
+            return
+            
+        # Calcular quantos períodos completos foram perdidos
+        period_duration = timedelta(days=monitoring_period)
+        last_period_end = last_check['period_end'].replace(tzinfo=bot.timezone)
+        missed_periods = []
+        
+        current_start = last_period_end
+        while current_start < now:
+            current_end = min(current_start + period_duration, now)
+            missed_periods.append((current_start, current_end))
+            current_start = current_end
+            
+        # Processar cada período perdido
+        for period_start, period_end in missed_periods:
+            # Verificar atividade no período
+            sessions = await bot.db.get_voice_sessions(member.id, guild.id, period_start, period_end)
+            meets_requirements = False
+            valid_days = set()
+            
+            if sessions:
+                for session in sessions:
+                    if session['duration'] >= required_minutes * 60:
+                        day = session['join_time'].replace(tzinfo=bot.timezone).date()
+                        valid_days.add(day)
                 
-                if last_check and now > last_check['period_end'].replace(tzinfo=bot.timezone):
-                    # Período vencido durante a queda - forçar verificação
-                    await process_member_inactivity(
-                        member, guild, required_minutes, 
-                        required_days, monitoring_period, tracked_roles
+                meets_requirements = len(valid_days) >= required_days
+            
+            # Registrar verificação do período
+            await bot.db.log_period_check(member.id, guild.id, period_start, period_end, meets_requirements)
+            
+            # Se não cumpriu, remover cargos
+            if not meets_requirements and any(role.id in tracked_roles for role in member.roles):
+                roles_to_remove = [role for role in member.roles if role.id in tracked_roles]
+                
+                try:
+                    await member.remove_roles(*roles_to_remove)
+                    await bot.send_warning(member, 'final')
+                    await bot.db.log_removed_roles(member.id, guild.id, [r.id for r in roles_to_remove])
+                    
+                    report_file = await generate_activity_report(member, sessions)
+                    log_message = (
+                        f"Cargos removidos: {', '.join([r.name for r in roles_to_remove])}\n"
+                        f"Sessões no período: {len(sessions)}\n"
+                        f"Dias válidos: {len(valid_days)}/{required_days}\n"
+                        f"Período: {period_start.strftime('%d/%m/%Y')} a {period_end.strftime('%d/%m/%Y')}"
                     )
-            except Exception as e:
-                logger.error(f"Erro ao verificar períodos perdidos para {member}: {e}")
+                    
+                    if report_file:
+                        await bot.log_action(
+                            "Cargo Removido (Período Perdido)",
+                            member,
+                            log_message,
+                            file=report_file
+                        )
+                    else:
+                        await bot.log_action(
+                            "Cargo Removido (Período Perdido)",
+                            member,
+                            log_message
+                        )
+                    
+                    await bot.notify_roles(
+                        f"🚨 Cargos removidos de {member.mention} por inatividade no período perdido: " +
+                        ", ".join([f"`{r.name}`" for r in roles_to_remove]))
+                    
+                except discord.Forbidden:
+                    await bot.log_action("Erro ao Remover Cargo", member, "Permissões insuficientes")
+                except Exception as e:
+                    logger.error(f"Erro ao remover cargos de {member}: {e}")
+        
+        # Criar novo período atual
+        new_period_end = now + timedelta(days=monitoring_period)
+        await bot.db.log_period_check(member.id, guild.id, now, new_period_end, False)
+            
+    except Exception as e:
+        logger.error(f"Erro ao verificar períodos perdidos para {member_id}: {e}")

@@ -805,7 +805,7 @@ class Database:
             if conn:
                 self.pool.release(conn)
 
-    async def get_members_with_tracked_roles(self, guild_id: int, role_ids: List[int]) -> List[Dict]:
+    async def get_members_with_tracked_roles(self, guild_id: int, role_ids: List[int]) -> List[int]:
         """Obtém todos os membros que possuem pelo menos um dos cargos monitorados"""
         cursor = None
         conn = None
@@ -815,11 +815,15 @@ class Database:
 
             placeholders = ','.join(['%s'] * len(role_ids))
             cursor, conn = await self.execute_query(f'''
-                SELECT DISTINCT u.user_id 
-                FROM user_activity u
-                JOIN removed_roles r ON u.user_id = r.user_id AND u.guild_id = r.guild_id
-                WHERE u.guild_id = %s
-                AND r.role_id IN ({placeholders})
+                SELECT DISTINCT user_id 
+                FROM user_activity
+                WHERE guild_id = %s
+                AND EXISTS (
+                    SELECT 1 FROM removed_roles 
+                    WHERE removed_roles.user_id = user_activity.user_id 
+                    AND removed_roles.guild_id = user_activity.guild_id
+                    AND removed_roles.role_id IN ({placeholders})
+                )
             ''', [guild_id] + role_ids)
             
             results = await cursor.fetchall()

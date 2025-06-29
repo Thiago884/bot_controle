@@ -1039,26 +1039,24 @@ async def on_ready():
         logger.info(f'Bot conectado como {bot.user}')
         logger.info(f"Latência: {round(bot.latency * 1000)}ms")
         
-        # Verificar se já está pronto para evitar múltiplas inicializações
         if hasattr(bot, '_ready_set') and bot._ready_set:
             return
             
         bot._ready_set = True
         
-        # --------------------------------------------------------------------
-        # ADICIONE A LÓGICA DE START DAS TASKS AQUI
-        # --------------------------------------------------------------------
         if not bot._tasks_started:
             logger.info("Bot está pronto. Iniciando tarefas de fundo...")
             
-            # Importa as funções de tarefa diretamente de tasks.py
             from tasks import (
                 inactivity_check, check_warnings, cleanup_members,
                 database_backup, cleanup_old_data, monitor_rate_limits,
                 report_metrics, health_check, check_missed_periods
             )
             
-            # Inicia cada tarefa usando o loop do bot
+            # Primeiro verificar períodos perdidos
+            await check_missed_periods()
+            
+            # Depois iniciar as outras tasks
             bot.loop.create_task(inactivity_check())
             bot.loop.create_task(check_warnings())
             bot.loop.create_task(cleanup_members())
@@ -1068,13 +1066,11 @@ async def on_ready():
             bot.loop.create_task(report_metrics())
             bot.loop.create_task(health_check())
             
-            # Inicia as outras tarefas que já estavam aqui
             bot.voice_event_processor_task = bot.loop.create_task(bot.process_voice_events())
             bot.queue_processor_task = bot.loop.create_task(bot.process_queues())
             bot.pool_monitor_task = bot.loop.create_task(bot.monitor_db_pool())
             bot.health_check_task = bot.loop.create_task(bot.periodic_health_check())
             bot.audio_check_task = bot.loop.create_task(bot.check_audio_states())
-            bot.loop.create_task(check_missed_periods())
 
             bot._tasks_started = True
             logger.info("Todas as tarefas de fundo foram agendadas com sucesso.")
