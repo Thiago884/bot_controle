@@ -820,6 +820,29 @@ class Database:
             if conn:
                 self.pool.release(conn)
 
+    async def get_last_kick(self, user_id: int, guild_id: int) -> Optional[Dict]:
+        """Obtém última expulsão do usuário"""
+        cursor = None
+        conn = None
+        try:
+            cursor, conn = await self.execute_query('''
+                SELECT kick_date 
+                FROM kicked_members
+                WHERE user_id = %s AND guild_id = %s
+                ORDER BY kick_date DESC
+                LIMIT 1
+            ''', (user_id, guild_id))
+            
+            return await cursor.fetchone()
+        except Exception as e:
+            logger.error(f"Erro ao obter última expulsão: {e}")
+            return None
+        finally:
+            if cursor:
+                await cursor.close()
+            if conn:
+                self.pool.release(conn)
+
     async def get_members_with_tracked_roles(self, guild_id: int, role_ids: List[int]) -> List[int]:
         """Obtém todos os membros que possuem pelo menos um dos cargos monitorados"""
         cursor = None
@@ -846,6 +869,44 @@ class Database:
         except Exception as e:
             logger.error(f"Erro ao buscar membros com cargos monitorados: {e}")
             return []
+        finally:
+            if cursor:
+                await cursor.close()
+            if conn:
+                self.pool.release(conn)
+
+    async def get_last_periods_batch(self, user_ids: List[int], guild_id: int) -> Dict[int, Dict]:
+        """Obtém os últimos períodos verificados para um lote de usuários"""
+        if not user_ids:
+            return {}
+
+        cursor = None
+        conn = None
+        try:
+            placeholders = ','.join(['%s'] * len(user_ids))
+            cursor, conn = await self.execute_query(f'''
+                SELECT user_id, period_start, period_end, meets_requirements
+                FROM checked_periods
+                WHERE user_id IN ({placeholders}) AND guild_id = %s
+                ORDER BY user_id, period_start DESC
+            ''', user_ids + [guild_id])
+            
+            results = await cursor.fetchall()
+            last_periods = {}
+            
+            # Agrupar por user_id e pegar o último período para cada um
+            for row in results:
+                if row['user_id'] not in last_periods:
+                    last_periods[row['user_id']] = {
+                        'period_start': row['period_start'],
+                        'period_end': row['period_end'],
+                        'meets_requirements': row['meets_requirements']
+                    }
+            
+            return last_periods
+        except Exception as e:
+            logger.error(f"Erro ao obter últimos períodos em lote: {e}")
+            return {}
         finally:
             if cursor:
                 await cursor.close()
