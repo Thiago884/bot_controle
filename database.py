@@ -47,6 +47,9 @@ class DatabaseBackup:
             backup_file = os.path.join(self.backup_dir, f'backup_{timestamp}.sql')
             zip_file = f'{backup_file}.zip'
             
+            # Garantir que o diretório existe
+            os.makedirs(self.backup_dir, exist_ok=True)
+            
             async with self.db.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
                     await cursor.execute("SHOW TABLES")
@@ -82,15 +85,16 @@ class DatabaseBackup:
                                     else:
                                         f.write(";\n\n")
             
-            # Compactar
+            # Criar arquivo ZIP antes de remover o SQL
             with zipfile.ZipFile(zip_file, 'w', zipfile.ZIP_DEFLATED) as zipf:
                 zipf.write(backup_file, os.path.basename(backup_file))
             
-            # Remover arquivo SQL temporário
-            try:
-                os.remove(backup_file)
-            except Exception as e:
-                logger.warning(f"Erro ao remover arquivo SQL temporário: {e}")
+            # Verificar se o ZIP foi criado antes de remover o SQL
+            if os.path.exists(zip_file):
+                try:
+                    os.remove(backup_file)
+                except Exception as e:
+                    logger.warning(f"Erro ao remover arquivo SQL temporário: {e}")
             
             # Limpar backups antigos
             self._cleanup_old_backups(keep=5)
@@ -99,6 +103,17 @@ class DatabaseBackup:
             return True
         except Exception as e:
             logger.error(f"Erro no método manual de backup: {e}")
+            # Remover arquivos temporários em caso de erro
+            if 'backup_file' in locals() and os.path.exists(backup_file):
+                try:
+                    os.remove(backup_file)
+                except:
+                    pass
+            if 'zip_file' in locals() and os.path.exists(zip_file):
+                try:
+                    os.remove(zip_file)
+                except:
+                    pass
             return False
 
     def _cleanup_old_backups(self, keep=5):

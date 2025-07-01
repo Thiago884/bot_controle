@@ -241,48 +241,55 @@ async def emergency_backup():
     except Exception as e:
         logger.error(f"Falha no backup emergencial: {e}")
 
-@log_task_metrics("health_check")
-async def _health_check():
-    """Verifica a saúde do bot e reinicia tasks se necessário."""
-    await bot.wait_until_ready()
-    try:
-        # Verifica se as tasks estão rodando
-        active_tasks = {task.get_name() for task in asyncio.all_tasks() if task.get_name()}
-        expected_tasks = {'inactivity_check', 'check_warnings', 'cleanup_members', 
-                         'database_backup', 'cleanup_old_data', 'monitor_rate_limits', 
-                         'report_metrics', 'health_check'}
-
-        for task_name in expected_tasks:
-            if task_name not in active_tasks:
-                logger.warning(f"Task {task_name} não está ativa - reiniciando...")
-                if task_name == 'inactivity_check':
-                    bot.loop.create_task(execute_task_with_retry("inactivity_check", inactivity_check))
-                elif task_name == 'check_warnings':
-                    bot.loop.create_task(execute_task_with_retry("check_warnings", check_warnings))
-                elif task_name == 'cleanup_members':
-                    bot.loop.create_task(execute_task_with_retry("cleanup_members", cleanup_members))
-                elif task_name == 'database_backup':
-                    bot.loop.create_task(execute_task_with_retry("database_backup", database_backup))
-                elif task_name == 'cleanup_old_data':
-                    bot.loop.create_task(execute_task_with_retry("cleanup_old_data", cleanup_old_data))
-                elif task_name == 'monitor_rate_limits':
-                    bot.loop.create_task(execute_task_with_retry("monitor_rate_limits", monitor_rate_limits))
-                elif task_name == 'report_metrics':
-                    bot.loop.create_task(execute_task_with_retry("report_metrics", report_metrics))
-                elif task_name == 'health_check':
-                    bot.loop.create_task(execute_task_with_retry("health_check", health_check))
-
-        await bot.log_action("Verificação de Saúde", None, f"Tasks ativas: {', '.join(active_tasks)}")
-    except Exception as e:
-        logger.error(f"Erro na verificação de saúde: {e}")
-
 async def health_check():
-    """Wrapper para a task de verificação de saúde."""
+    """Wrapper para a task com intervalo persistente"""
     await execute_task_with_persistent_interval(
         "health_check",
         1,  # Verifica a cada hora
         _health_check
     )
+
+async def _health_check():
+    """Verifica a saúde do bot e reinicia tasks se necessário."""
+    await bot.wait_until_ready()
+    try:
+        # Verifica se as tasks estão rodando
+        active_tasks = {t._name if hasattr(t, '_name') else '' for t in asyncio.all_tasks()}
+        
+        expected_tasks = {
+            'inactivity_check_wrapper',
+            'check_warnings_wrapper', 
+            'cleanup_members_wrapper',
+            'database_backup_wrapper',
+            'cleanup_old_data_wrapper',
+            'monitor_rate_limits_wrapper',
+            'report_metrics_wrapper',
+            'health_check_wrapper'
+        }
+
+        for task_name in expected_tasks:
+            if task_name not in active_tasks:
+                logger.warning(f"Task {task_name} não está ativa - reiniciando...")
+                if task_name == 'inactivity_check_wrapper':
+                    bot.loop.create_task(inactivity_check(), name='inactivity_check_wrapper')
+                elif task_name == 'check_warnings_wrapper':
+                    bot.loop.create_task(check_warnings(), name='check_warnings_wrapper')
+                elif task_name == 'cleanup_members_wrapper':
+                    bot.loop.create_task(cleanup_members(), name='cleanup_members_wrapper')
+                elif task_name == 'database_backup_wrapper':
+                    bot.loop.create_task(database_backup(), name='database_backup_wrapper')
+                elif task_name == 'cleanup_old_data_wrapper':
+                    bot.loop.create_task(cleanup_old_data(), name='cleanup_old_data_wrapper')
+                elif task_name == 'monitor_rate_limits_wrapper':
+                    bot.loop.create_task(monitor_rate_limits(), name='monitor_rate_limits_wrapper')
+                elif task_name == 'report_metrics_wrapper':
+                    bot.loop.create_task(report_metrics(), name='report_metrics_wrapper')
+                elif task_name == 'health_check_wrapper':
+                    bot.loop.create_task(health_check(), name='health_check_wrapper')
+
+        await bot.log_action("Verificação de Saúde", None, f"Tasks ativas: {', '.join(t for t in active_tasks if t)}")
+    except Exception as e:
+        logger.error(f"Erro na verificação de saúde: {e}")
 
 @log_task_metrics("inactivity_check")
 async def _inactivity_check():
@@ -449,11 +456,12 @@ async def process_member_inactivity(member: discord.Member, guild: discord.Guild
 async def inactivity_check():
     """Wrapper para a task com intervalo persistente"""
     monitoring_period = bot.config['monitoring_period']
-    await execute_task_with_persistent_interval(
+    task = bot.loop.create_task(execute_task_with_persistent_interval(
         "inactivity_check", 
         monitoring_period,
         _inactivity_check
-    )
+    ), name='inactivity_check_wrapper')
+    return task
 
 @log_task_metrics("check_warnings")
 async def _check_warnings():
@@ -490,11 +498,12 @@ async def _check_warnings():
 async def check_warnings():
     """Wrapper para a task com intervalo persistente"""
     monitoring_period = bot.config['monitoring_period']
-    await execute_task_with_persistent_interval(
+    task = bot.loop.create_task(execute_task_with_persistent_interval(
         "check_warnings", 
         monitoring_period,
         _check_warnings
-    )
+    ), name='check_warnings_wrapper')
+    return task
 
 async def process_member_warnings(member: discord.Member, guild: discord.Guild, 
                                 tracked_roles: List[int], first_warning_days: int, 
@@ -569,11 +578,12 @@ async def _cleanup_members():
 async def cleanup_members():
     """Wrapper para a task com intervalo persistente"""
     monitoring_period = bot.config['monitoring_period']
-    await execute_task_with_persistent_interval(
+    task = bot.loop.create_task(execute_task_with_persistent_interval(
         "cleanup_members", 
         monitoring_period,
         _cleanup_members
-    )
+    ), name='cleanup_members_wrapper')
+    return task
 
 async def process_member_cleanup(member: discord.Member, guild: discord.Guild, 
                                cutoff_date: datetime, kick_after_days: int, 
@@ -640,11 +650,12 @@ async def _database_backup():
 async def database_backup():
     """Wrapper para a task com intervalo persistente"""
     monitoring_period = 1  # Backup should run daily regardless of monitoring period
-    await execute_task_with_persistent_interval(
+    task = bot.loop.create_task(execute_task_with_persistent_interval(
         "database_backup", 
         monitoring_period,
         _database_backup
-    )
+    ), name='database_backup_wrapper')
+    return task
 
 @log_task_metrics("cleanup_old_data")
 async def _cleanup_old_data():
@@ -693,11 +704,12 @@ async def _cleanup_old_data():
 async def cleanup_old_data():
     """Wrapper para a task com intervalo persistente"""
     monitoring_period = 1  # Cleanup should run daily regardless of monitoring period
-    await execute_task_with_persistent_interval(
+    task = bot.loop.create_task(execute_task_with_persistent_interval(
         "cleanup_old_data", 
         monitoring_period,
         _cleanup_old_data
-    )
+    ), name='cleanup_old_data_wrapper')
+    return task
 
 @log_task_metrics("monitor_rate_limits")
 async def _monitor_rate_limits():
@@ -754,11 +766,12 @@ async def _monitor_rate_limits():
 async def monitor_rate_limits():
     """Wrapper para a task com intervalo persistente"""
     monitoring_period = 1  # Rate limit monitoring should run frequently regardless of monitoring period
-    await execute_task_with_persistent_interval(
+    task = bot.loop.create_task(execute_task_with_persistent_interval(
         "monitor_rate_limits", 
         monitoring_period,
         _monitor_rate_limits
-    )
+    ), name='monitor_rate_limits_wrapper')
+    return task
 
 @log_task_metrics("report_metrics")
 async def _report_metrics():
@@ -792,11 +805,12 @@ async def _report_metrics():
 async def report_metrics():
     """Wrapper para a task com intervalo persistente"""
     monitoring_period = 1  # Metrics reporting should run daily regardless of monitoring period
-    await execute_task_with_persistent_interval(
+    task = bot.loop.create_task(execute_task_with_persistent_interval(
         "report_metrics", 
         monitoring_period,
         _report_metrics
-    )
+    ), name='report_metrics_wrapper')
+    return task
 
 async def generate_activity_report(member: discord.Member, sessions: list) -> Optional[discord.File]:
     """Gera um relatório gráfico de atividade e retorna como discord.File"""

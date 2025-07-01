@@ -1056,21 +1056,21 @@ async def on_ready():
             # Primeiro verificar períodos perdidos
             await check_missed_periods()
             
-            # Depois iniciar as outras tasks
-            bot.loop.create_task(inactivity_check())
-            bot.loop.create_task(check_warnings())
-            bot.loop.create_task(cleanup_members())
-            bot.loop.create_task(database_backup())
-            bot.loop.create_task(cleanup_old_data())
-            bot.loop.create_task(monitor_rate_limits())
-            bot.loop.create_task(report_metrics())
-            bot.loop.create_task(health_check())
+            # Criar tasks com nomes identificáveis
+            bot.loop.create_task(inactivity_check(), name='inactivity_check_wrapper')
+            bot.loop.create_task(check_warnings(), name='check_warnings_wrapper')
+            bot.loop.create_task(cleanup_members(), name='cleanup_members_wrapper')
+            bot.loop.create_task(database_backup(), name='database_backup_wrapper')
+            bot.loop.create_task(cleanup_old_data(), name='cleanup_old_data_wrapper')
+            bot.loop.create_task(monitor_rate_limits(), name='monitor_rate_limits_wrapper')
+            bot.loop.create_task(report_metrics(), name='report_metrics_wrapper')
+            bot.loop.create_task(health_check(), name='health_check_wrapper')
             
-            bot.voice_event_processor_task = bot.loop.create_task(bot.process_voice_events())
-            bot.queue_processor_task = bot.loop.create_task(bot.process_queues())
-            bot.pool_monitor_task = bot.loop.create_task(bot.monitor_db_pool())
-            bot.health_check_task = bot.loop.create_task(bot.periodic_health_check())
-            bot.audio_check_task = bot.loop.create_task(bot.check_audio_states())
+            bot.voice_event_processor_task = bot.loop.create_task(bot.process_voice_events(), name='voice_event_processor')
+            bot.queue_processor_task = bot.loop.create_task(bot.process_queues(), name='queue_processor')
+            bot.pool_monitor_task = bot.loop.create_task(bot.monitor_db_pool(), name='db_pool_monitor')
+            bot.health_check_task = bot.loop.create_task(bot.periodic_health_check(), name='periodic_health_check')
+            bot.audio_check_task = bot.loop.create_task(bot.check_audio_states(), name='audio_state_checker')
 
             bot._tasks_started = True
             logger.info("Todas as tarefas de fundo foram agendadas com sucesso.")
