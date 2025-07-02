@@ -1216,71 +1216,117 @@ async def server_monitoring_status(interaction: discord.Interaction):
     try:
         await interaction.response.defer(thinking=True)
         
-        # Pequeno delay para evitar rate limit
+        # Verificar rate limit antes de continuar
+        if bot.rate_limit_monitor.should_delay():
+            retry_after = bot.rate_limit_monitor.adaptive_delay
+            logger.warning(f"Rate limit detectado. Adiando execução por {retry_after} segundos")
+            await asyncio.sleep(retry_after)
+        
+        # Pequeno delay inicial para evitar rate limit
         await asyncio.sleep(1)
         
-        # Obter informações da última execução da task
-        last_exec = await bot.db.get_last_task_execution("inactivity_check")
+        # Obter informações da última execução da task com tratamento de erro
+        last_exec = None
+        try:
+            last_exec = await bot.db.get_last_task_execution("inactivity_check")
+        except Exception as db_error:
+            logger.error(f"Erro ao obter última execução: {db_error}")
+            await interaction.followup.send(
+                "❌ Ocorreu um erro ao obter informações do banco de dados.",
+                ephemeral=True
+            )
+            return
+            
         now = datetime.now(bot.timezone)
         monitoring_period = bot.config['monitoring_period']
         
-        # Obter estatísticas adicionais do banco de dados
-        async with bot.db.pool.acquire() as conn:
-            async with conn.cursor() as cursor:
-                # Contar membros com cargos monitorados
-                await cursor.execute('''
-                    SELECT COUNT(DISTINCT ua.user_id) as tracked_members
-                    FROM user_activity ua
-                    JOIN removed_roles rr ON ua.user_id = rr.user_id AND ua.guild_id = rr.guild_id
-                    WHERE ua.guild_id = %s AND rr.role_id IN %s
-                ''', (interaction.guild.id, tuple(bot.config['tracked_roles'])))
-                tracked_members = (await cursor.fetchone())['tracked_members'] if bot.config['tracked_roles'] else 0
-                
-                # Contar verificações no último período
-                await cursor.execute('''
-                    SELECT 
-                        COALESCE(SUM(CASE WHEN meets_requirements = 1 THEN 1 ELSE 0 END), 0) as compliant,
-                        COALESCE(SUM(CASE WHEN meets_requirements = 0 THEN 1 ELSE 0 END), 0) as non_compliant,
-                        COUNT(DISTINCT user_id) as total_members
-                    FROM checked_periods
-                    WHERE guild_id = %s 
-                    AND period_start >= %s
-                ''', (interaction.guild.id, last_exec['last_execution'] if last_exec else datetime.min))
-                stats = await cursor.fetchone()
-                
-                # Contar avisos enviados recentemente
-                await cursor.execute('''
-                    SELECT 
-                        warning_type,
-                        COUNT(*) as count
-                    FROM user_warnings
-                    WHERE guild_id = %s
-                    AND warning_date >= %s
-                    GROUP BY warning_type
-                ''', (interaction.guild.id, now - timedelta(days=7)))
-                warnings = await cursor.fetchall()
-                warnings_summary = {w['warning_type']: w['count'] for w in warnings}
-                
-                # Contar ações recentes (remoções de cargos e expulsões)
-                await cursor.execute('''
-                    SELECT 
-                        'role_removals' as action_type,
-                        COUNT(*) as count
-                    FROM removed_roles
-                    WHERE guild_id = %s
-                    AND removal_date >= %s
-                ''', (interaction.guild.id, now - timedelta(days=7)))
-                role_removals = (await cursor.fetchone())['count']
-                
-                await cursor.execute('''
-                    SELECT 
-                        'kicks' as action_type,
-                        COUNT(*) as count
-                    FROM kicked_members
-                    WHERE guild_id = %s
-                    AND kick_date >= %s
-                ''', (interaction.guild.id, now - timedelta(days=7)))
-                kicks = (await cursor.fetchone())['count']
+        # Obter estatísticas adicionais do banco de dados com tratamento de erro
+        try:
+            async with bot.db.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    # Contar membros com cargos monitorados (consulta otimizada)
+                    tracked_members = 0
+                    if bot.config['tracked_roles']:
+                        await cursor.execute('''
+                            SELECT COUNT(DISTINCT members.user_id) as tracked_members
+                            FROM (
+                                SELECT user_id, guild_id 
+                                FROM user_activity 
+                                WHERE guild_id = %s
+                                UNION
+                                SELECT user_id, guild_id 
+                                FROM removed_roles 
+                                WHERE guild_id = %s AND role_id IN %s
+                            ) AS members
+                        ''', (interaction.guild.id, interaction.guild.id, tuple(bot.config['tracked_roles'])))
+                        result = await cursor.fetchone()
+                        tracked_members = result['tracked_members'] if result else 0
+                    
+                    # Consulta única para todas as estatísticas
+                    await cursor.execute('''
+                        SELECT 
+                            COALESCE(SUM(CASE WHEN meets_requirements = 1 THEN 1 ELSE 0 END), 0) as compliant,
+                            COALESCE(SUM(CASE WHEN meets_requirements = 0 THEN 1 ELSE 0 END), 0) as non_compliant,
+                            COUNT(DISTINCT user_id) as total_members,
+                            COUNT(DISTINCT CASE WHEN warning_date >= %s THEN user_id END) as warned_users,
+                            COUNT(DISTINCT CASE WHEN removal_date >= %s THEN user_id END) as removed_roles,
+                            COUNT(DISTINCT CASE WHEN kick_date >= %s THEN user_id END) as kicked_members
+                        FROM (
+                            SELECT user_id, guild_id, meets_requirements, NULL as warning_date, NULL as removal_date, NULL as kick_date
+                            FROM checked_periods
+                            WHERE guild_id = %s AND period_start >= %s
+                            
+                            UNION ALL
+                            
+                            SELECT user_id, guild_id, NULL as meets_requirements, warning_date, NULL as removal_date, NULL as kick_date
+                            FROM user_warnings
+                            WHERE guild_id = %s AND warning_date >= %s
+                            
+                            UNION ALL
+                            
+                            SELECT user_id, guild_id, NULL as meets_requirements, NULL as warning_date, removal_date, NULL as kick_date
+                            FROM removed_roles
+                            WHERE guild_id = %s AND removal_date >= %s
+                            
+                            UNION ALL
+                            
+                            SELECT user_id, guild_id, NULL as meets_requirements, NULL as warning_date, NULL as removal_date, kick_date
+                            FROM kicked_members
+                            WHERE guild_id = %s AND kick_date >= %s
+                        ) AS combined_data
+                    ''', (
+                        now - timedelta(days=7), now - timedelta(days=7), now - timedelta(days=7),
+                        interaction.guild.id, last_exec['last_execution'] if last_exec else datetime.min,
+                        interaction.guild.id, now - timedelta(days=7),
+                        interaction.guild.id, now - timedelta(days=7),
+                        interaction.guild.id, now - timedelta(days=7)
+                    ))
+                    stats = await cursor.fetchone()
+                    
+                    # Consulta de avisos otimizada
+                    await cursor.execute('''
+                        SELECT 
+                            warning_type,
+                            COUNT(*) as count
+                        FROM user_warnings
+                        WHERE guild_id = %s
+                        AND warning_date >= %s
+                        GROUP BY warning_type
+                    ''', (interaction.guild.id, now - timedelta(days=7)))
+                    warnings = await cursor.fetchall()
+                    
+        except Exception as e:
+            logger.error(f"Erro ao consultar banco de dados: {e}")
+            await interaction.followup.send(
+                "❌ Ocorreu um erro ao consultar o banco de dados.",
+                ephemeral=True
+            )
+            return
+            
+        # Processar resultados
+        warnings_summary = {w['warning_type']: w['count'] for w in warnings} if warnings else {}
+        role_removals = stats['removed_roles'] if stats else 0
+        kicks = stats['kicked_members'] if stats else 0
         
         # Criar embed
         embed = discord.Embed(
@@ -1390,7 +1436,18 @@ async def server_monitoring_status(interaction: discord.Interaction):
             )
         
         embed.set_footer(text=f"Servidor: {interaction.guild.name}")
-        await interaction.followup.send(embed=embed)
+        
+        # Enviar resposta com tratamento de rate limit
+        try:
+            await interaction.followup.send(embed=embed)
+        except discord.errors.HTTPException as e:
+            if e.status == 429:
+                retry_after = float(e.response.headers.get('Retry-After', 60))
+                logger.warning(f"Rate limit ao enviar resposta. Tentando novamente em {retry_after} segundos")
+                await asyncio.sleep(retry_after)
+                await interaction.followup.send(embed=embed)
+            else:
+                raise
         
     except Exception as e:
         logger.error(f"Erro ao verificar status global do monitoramento: {e}")
