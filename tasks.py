@@ -629,10 +629,24 @@ async def process_member_warnings(member: discord.Member, guild: discord.Guild,
         perf_metrics.record_db_query(time.time() - start_time)
         
         if not last_check:
+            # Se não tem verificação anterior, criar um novo período
+            monitoring_period = bot.config['monitoring_period']
+            period_end = datetime.now(bot.timezone) + timedelta(days=monitoring_period)
+            await bot.db.log_period_check(
+                member.id, guild.id, 
+                datetime.now(bot.timezone), 
+                period_end, 
+                False
+            )
             return
         
-        # Calcular dias restantes
-        period_end = last_check['period_end'].replace(tzinfo=bot.timezone)
+        # Calcular dias restantes (garantir que é timezone aware)
+        period_end = last_check['period_end']
+        if not period_end.tzinfo:
+            period_end = period_end.replace(tzinfo=bot.timezone)
+        else:
+            period_end = period_end.astimezone(bot.timezone)
+            
         days_remaining = (period_end - datetime.now(bot.timezone)).days
         
         # Obter último aviso
@@ -642,12 +656,12 @@ async def process_member_warnings(member: discord.Member, guild: discord.Guild,
         
         # Verificar necessidade de avisos
         if days_remaining <= first_warning_days and (
-            not last_warning or last_warning[0] != 'first'):
+            not last_warning or (datetime.now(bot.timezone) - last_warning[1]).days >= 1):
             await bot.send_warning(member, 'first')
             warnings_sent['first'] += 1
         
         elif days_remaining <= second_warning_days and (
-            not last_warning or last_warning[0] != 'second'):
+            not last_warning or (datetime.now(bot.timezone) - last_warning[1]).days >= 1):
             await bot.send_warning(member, 'second')
             warnings_sent['second'] += 1
             
@@ -1195,12 +1209,10 @@ async def process_member_previous_periods(member: discord.Member, guild: discord
         # Verificar whitelist
         if member.id in bot.config['whitelist']['users'] or \
            any(role.id in bot.config['whitelist']['roles'] for role in member.roles):
-            logger.debug(f"Usuário {member} está na whitelist - ignorando")
             return result
             
         # Verificar se tem cargos monitorados
         if not any(role.id in tracked_roles for role in member.roles):
-            logger.debug(f"Usuário {member} não tem cargos monitorados - ignorando")
             return result
         
         result['processed'] = 1
@@ -1216,12 +1228,11 @@ async def process_member_previous_periods(member: discord.Member, guild: discord
                     FROM checked_periods
                     WHERE user_id = %s AND guild_id = %s
                     AND meets_requirements = FALSE
+                    AND period_end < %s  # Apenas períodos já encerrados
                     ORDER BY period_start
-                ''', (member.id, guild.id))
+                ''', (member.id, guild.id, now))
                 failed_periods = await cursor.fetchall()
         perf_metrics.record_db_query(time.time() - start_time)
-        
-        logger.debug(f"Usuário {member} tem {len(failed_periods)} períodos falhos")
         
         # Se houver períodos onde não cumpriu os requisitos
         if failed_periods:
@@ -1230,14 +1241,12 @@ async def process_member_previous_periods(member: discord.Member, guild: discord
             async with bot.db.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
                     await cursor.execute('''
-                        SELECT role_id 
+                        SELECT DISTINCT role_id 
                         FROM removed_roles
                         WHERE user_id = %s AND guild_id = %s
                     ''', (member.id, guild.id))
                     already_removed = {r['role_id'] for r in await cursor.fetchall()}
             perf_metrics.record_db_query(time.time() - start_time)
-            
-            logger.debug(f"Usuário {member} já teve removidos: {already_removed}")
             
             # Verificar quais cargos monitorados ainda não foram removidos
             roles_to_remove = [
@@ -1246,7 +1255,7 @@ async def process_member_previous_periods(member: discord.Member, guild: discord
             ]
             
             if roles_to_remove:
-                logger.info(f"Preparando para remover cargos de {member}: {[r.name for r in roles_to_remove]}")
+                logger.info(f"Removendo cargos de {member} por falha em períodos anteriores")
                 try:
                     # Remover cargos
                     start_time = time.time()
@@ -1264,7 +1273,15 @@ async def process_member_previous_periods(member: discord.Member, guild: discord
                     )
                     perf_metrics.record_db_query(time.time() - start_time)
                     
-                    # Gerar relatório gráfico com os períodos falhos
+                    # Registrar novo período de verificação
+                    new_period_end = now + timedelta(days=monitoring_period)
+                    await bot.db.log_period_check(
+                        member.id, guild.id,
+                        now, new_period_end,
+                        False  # Assume que começa não cumprindo
+                    )
+                    
+                    # Gerar relatório
                     all_sessions = []
                     for period in failed_periods:
                         sessions = await bot.db.get_voice_sessions(
