@@ -473,7 +473,8 @@ async def _health_check():
             'cleanup_old_data_wrapper',
             'monitor_rate_limits_wrapper',
             'report_metrics_wrapper',
-            'health_check_wrapper'
+            'health_check_wrapper',
+            'check_previous_periods_wrapper'  # Nova task adicionada
         }
 
         for task_name in expected_tasks:
@@ -495,6 +496,8 @@ async def _health_check():
                     bot.loop.create_task(report_metrics(), name='report_metrics_wrapper')
                 elif task_name == 'health_check_wrapper':
                     bot.loop.create_task(health_check(), name='health_check_wrapper')
+                elif task_name == 'check_previous_periods_wrapper':
+                    bot.loop.create_task(check_previous_periods(), name='check_previous_periods_wrapper')
 
         await bot.log_action("Verificação de Saúde", None, f"Tasks ativas: {', '.join(t for t in active_tasks if t)}")
     except Exception as e:
@@ -1109,3 +1112,185 @@ async def process_member_missed_periods(member_id: int, guild: discord.Guild,
             
     except Exception as e:
         logger.error(f"Erro ao verificar períodos perdidos para {member_id}: {e}")
+
+@log_task_metrics("check_previous_periods")
+async def _check_previous_periods():
+    """Verifica usuários que não cumpriram requisitos em períodos anteriores"""
+    await bot.wait_until_ready()
+    
+    required_minutes = bot.config['required_minutes']
+    required_days = bot.config['required_days']
+    monitoring_period = bot.config['monitoring_period']
+    tracked_roles = bot.config['tracked_roles']
+    
+    if not tracked_roles:
+        logger.info("Nenhum cargo monitorado definido - verificação ignorada")
+        return
+    
+    processed_members = 0
+    members_with_roles_removed = 0
+    
+    for guild in bot.guilds:
+        try:
+            # Obter todos os membros com cargos monitorados
+            members_with_roles = []
+            for member in guild.members:
+                if any(role.id in tracked_roles for role in member.roles):
+                    members_with_roles.append(member)
+            
+            # Processar em lotes otimizados
+            batch_size = bot._batch_processing_size
+            for i in range(0, len(members_with_roles), batch_size):
+                batch = members_with_roles[i:i + batch_size]
+                results = await asyncio.gather(*[
+                    process_member_previous_periods(member, guild, 
+                                                  required_minutes, required_days,
+                                                  monitoring_period, tracked_roles)
+                    for member in batch
+                ], return_exceptions=True)
+                
+                # Atualizar contadores
+                for result in results:
+                    if not isinstance(result, Exception):
+                        processed_members += result.get('processed', 0)
+                        members_with_roles_removed += result.get('removed', 0)
+                
+                # Pequeno delay entre lotes para evitar rate limits
+                await asyncio.sleep(bot.rate_limit_delay)
+                
+        except Exception as e:
+            logger.error(f"Erro ao verificar períodos anteriores na guild {guild.name}: {e}")
+            continue
+    
+    logger.info(f"Verificação de períodos anteriores concluída. Membros processados: {processed_members}, Cargos removidos: {members_with_roles_removed}")
+
+async def check_previous_periods():
+    """Wrapper para a task com intervalo persistente"""
+    monitoring_period = bot.config['monitoring_period']
+    task = bot.loop.create_task(execute_task_with_persistent_interval(
+        "check_previous_periods", 
+        monitoring_period,
+        _check_previous_periods
+    ), name='check_previous_periods_wrapper')
+    return task
+
+async def process_member_previous_periods(member: discord.Member, guild: discord.Guild,
+                                        required_minutes: int, required_days: int,
+                                        monitoring_period: int, tracked_roles: List[int]):
+    """Processa um membro para verificar períodos anteriores"""
+    result = {'processed': 0, 'removed': 0}
+    
+    try:
+        # Verificar whitelist
+        if member.id in bot.config['whitelist']['users'] or \
+           any(role.id in bot.config['whitelist']['roles'] for role in member.roles):
+            return result
+            
+        # Verificar se tem cargos monitorados
+        if not any(role.id in tracked_roles for role in member.roles):
+            return result
+        
+        result['processed'] = 1
+        
+        now = datetime.now(bot.timezone)
+        
+        # Obter todos os períodos verificados onde não cumpriu os requisitos
+        start_time = time.time()
+        async with bot.db.pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute('''
+                    SELECT period_start, period_end 
+                    FROM checked_periods
+                    WHERE user_id = %s AND guild_id = %s
+                    AND meets_requirements = FALSE
+                    ORDER BY period_start
+                ''', (member.id, guild.id))
+                failed_periods = await cursor.fetchall()
+        perf_metrics.record_db_query(time.time() - start_time)
+        
+        # Se houver períodos onde não cumpriu os requisitos
+        if failed_periods:
+            # Verificar se já teve cargos removidos para esses períodos
+            start_time = time.time()
+            async with bot.db.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute('''
+                        SELECT role_id 
+                        FROM removed_roles
+                        WHERE user_id = %s AND guild_id = %s
+                    ''', (member.id, guild.id))
+                    already_removed = {r['role_id'] for r in await cursor.fetchall()}
+            perf_metrics.record_db_query(time.time() - start_time)
+            
+            # Verificar quais cargos monitorados ainda não foram removidos
+            roles_to_remove = [
+                role for role in member.roles 
+                if role.id in tracked_roles and role.id not in already_removed
+            ]
+            
+            if roles_to_remove:
+                try:
+                    # Remover cargos
+                    start_time = time.time()
+                    await member.remove_roles(*roles_to_remove)
+                    perf_metrics.record_api_call(time.time() - start_time)
+                    
+                    # Enviar mensagem de aviso final via DM
+                    await bot.send_warning(member, 'final')
+                    
+                    # Registrar cargos removidos
+                    start_time = time.time()
+                    await bot.db.log_removed_roles(
+                        member.id, guild.id, 
+                        [r.id for r in roles_to_remove]
+                    )
+                    perf_metrics.record_db_query(time.time() - start_time)
+                    
+                    # Gerar relatório gráfico com os períodos falhos
+                    all_sessions = []
+                    for period in failed_periods:
+                        sessions = await bot.db.get_voice_sessions(
+                            member.id, guild.id,
+                            period['period_start'],
+                            period['period_end']
+                        )
+                        all_sessions.extend(sessions)
+                    
+                    report_file = await generate_activity_report(member, all_sessions)
+                    
+                    log_message = (
+                        f"Cargos removidos: {', '.join([r.name for r in roles_to_remove])}\n"
+                        f"Períodos falhos: {len(failed_periods)}\n"
+                        f"Primeiro período falho: {failed_periods[0]['period_start'].strftime('%d/%m/%Y')}\n"
+                        f"Último período falho: {failed_periods[-1]['period_end'].strftime('%d/%m/%Y')}"
+                    )
+                    
+                    if report_file:
+                        await bot.log_action(
+                            "Cargo Removido (Períodos Anteriores)",
+                            member,
+                            log_message,
+                            file=report_file
+                        )
+                    else:
+                        await bot.log_action(
+                            "Cargo Removido (Períodos Anteriores)",
+                            member,
+                            log_message
+                        )
+                    
+                    await bot.notify_roles(
+                        f"🚨 Cargos removidos de {member.mention} por inatividade em períodos anteriores: " +
+                        ", ".join([f"`{r.name}`" for r in roles_to_remove]))
+                    
+                    result['removed'] = 1
+                    
+                except discord.Forbidden:
+                    await bot.log_action("Erro ao Remover Cargo", member, "Permissões insuficientes")
+                except Exception as e:
+                    logger.error(f"Erro ao remover cargos de {member}: {e}")
+    
+    except Exception as e:
+        logger.error(f"Erro ao verificar períodos anteriores para {member}: {e}")
+    
+    return result

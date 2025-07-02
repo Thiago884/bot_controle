@@ -1050,7 +1050,8 @@ async def on_ready():
             from tasks import (
                 inactivity_check, check_warnings, cleanup_members,
                 database_backup, cleanup_old_data, monitor_rate_limits,
-                report_metrics, health_check, check_missed_periods
+                report_metrics, health_check, check_missed_periods,
+                check_previous_periods  # Adicione esta linha
             )
             
             # Primeiro verificar períodos perdidos
@@ -1065,6 +1066,7 @@ async def on_ready():
             bot.loop.create_task(monitor_rate_limits(), name='monitor_rate_limits_wrapper')
             bot.loop.create_task(report_metrics(), name='report_metrics_wrapper')
             bot.loop.create_task(health_check(), name='health_check_wrapper')
+            bot.loop.create_task(check_previous_periods(), name='check_previous_periods_wrapper')  # Adicione esta linha
             
             bot.voice_event_processor_task = bot.loop.create_task(bot.process_voice_events(), name='voice_event_processor')
             bot.queue_processor_task = bot.loop.create_task(bot.process_queues(), name='queue_processor')
