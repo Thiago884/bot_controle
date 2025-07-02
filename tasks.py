@@ -332,7 +332,7 @@ def prioritize_members(members: list[discord.Member]) -> list[discord.Member]:
     )
 
 async def execute_task_with_persistent_interval(task_name: str, monitoring_period: int, task_func: callable):
-    """Executa a task mantendo intervalo persistente"""
+    """Executa a task mantendo intervalo persistente de 24h"""
     await bot.wait_until_ready()
     
     while True:
@@ -348,14 +348,11 @@ async def execute_task_with_persistent_interval(task_name: str, monitoring_perio
                 should_execute = True
                 logger.info(f"Primeira execução da task {task_name}")
             else:
-                # Verificar se o período de monitoramento foi reduzido
-                if last_exec['monitoring_period'] > monitoring_period:
+                # Verificar se passou 24h desde a última execução
+                time_since_last = now - last_exec['last_execution']
+                if time_since_last >= timedelta(hours=24):
                     should_execute = True
-                    logger.info(f"Período de monitoramento reduzido para {task_name} - executando")
-                # Ou se passou o tempo mínimo desde a última execução (ajustado para 1 hora)
-                elif (now - last_exec['last_execution']) >= timedelta(hours=1):
-                    should_execute = True
-                    logger.debug(f"Intervalo suficiente passou para {task_name} - executando")
+                    logger.info(f"24h passaram - executando task {task_name}")
             
             if should_execute:
                 logger.info(f"Executando task {task_name}...")
@@ -365,12 +362,12 @@ async def execute_task_with_persistent_interval(task_name: str, monitoring_perio
                 await bot.db.log_task_execution(task_name, monitoring_period)
                 logger.info(f"Task {task_name} concluída com sucesso")
             
-            # Esperar 15 minutos antes de verificar novamente (ajustável)
-            await asyncio.sleep(900)
+            # Esperar 1h antes de verificar novamente (evita loops muito rápidos)
+            await asyncio.sleep(3600)
                 
         except Exception as e:
             logger.error(f"Erro na task {task_name}: {e}", exc_info=True)
-            await asyncio.sleep(600)  # Esperar 10 minutos antes de tentar novamente
+            await asyncio.sleep(3600)  # Esperar 1h antes de tentar novamente
 
 async def execute_task_with_retry(task_name: str, task_func: callable, max_retries: int = 3):
     """Executa uma task com tentativas de recuperação."""
@@ -558,13 +555,16 @@ async def _inactivity_check():
     logger.info(f"Verificação de inatividade concluída. Membros processados: {processed_members}, Cargos removidos: {members_with_roles_removed}")
 
 async def inactivity_check():
-    """Wrapper para a task com intervalo persistente"""
+    """Wrapper para a task com intervalo de 24h"""
     monitoring_period = bot.config['monitoring_period']
-    task = bot.loop.create_task(execute_task_with_persistent_interval(
-        "inactivity_check", 
-        monitoring_period,
-        _inactivity_check
-    ), name='inactivity_check_wrapper')
+    task = bot.loop.create_task(
+        execute_task_with_persistent_interval(
+            "inactivity_check", 
+            monitoring_period,
+            _inactivity_check
+        ), 
+        name='inactivity_check_wrapper'
+    )
     return task
 
 @log_task_metrics("check_warnings")
