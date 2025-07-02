@@ -495,12 +495,15 @@ class Database:
 
     async def load_config(self, guild_id: int) -> Optional[dict]:
         """Carrega configuração com cache"""
+        # Forçar atualização do cache a cada hora
+        if self._last_config_update and (datetime.utcnow() - self._last_config_update).total_seconds() > 3600:
+            if guild_id in self._config_cache:
+                del self._config_cache[guild_id]
+        
         # Verificar cache primeiro
         if guild_id in self._config_cache:
-            # Se a configuração foi atualizada recentemente, retornar do cache
-            if self._last_config_update and (datetime.utcnow() - self._last_config_update).total_seconds() < 300:
-                logger.debug(f"Retornando configuração do cache para guild {guild_id}")
-                return self._config_cache[guild_id]
+            logger.debug(f"Retornando configuração do cache para guild {guild_id}")
+            return self._config_cache[guild_id]
         
         cursor = None
         conn = None

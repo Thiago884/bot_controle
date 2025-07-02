@@ -346,25 +346,30 @@ async def execute_task_with_persistent_interval(task_name: str, monitoring_perio
             
             if not last_exec:  # Primeira execução
                 should_execute = True
+                logger.info(f"Primeira execução da task {task_name}")
             else:
                 # Verificar se o período de monitoramento foi reduzido
                 if last_exec['monitoring_period'] > monitoring_period:
                     should_execute = True
-                # Ou se passaram 24 horas desde a última execução
-                elif (now - last_exec['last_execution']) >= timedelta(hours=24):
+                    logger.info(f"Período de monitoramento reduzido para {task_name} - executando")
+                # Ou se passou o tempo mínimo desde a última execução (ajustado para 1 hora)
+                elif (now - last_exec['last_execution']) >= timedelta(hours=1):
                     should_execute = True
+                    logger.debug(f"Intervalo suficiente passou para {task_name} - executando")
             
             if should_execute:
+                logger.info(f"Executando task {task_name}...")
                 start_time = time.time()
                 await task_func()
                 perf_metrics.record_task_execution(task_name, time.time() - start_time)
                 await bot.db.log_task_execution(task_name, monitoring_period)
+                logger.info(f"Task {task_name} concluída com sucesso")
             
-            # Esperar 1 hora antes de verificar novamente
-            await asyncio.sleep(3600)
+            # Esperar 15 minutos antes de verificar novamente (ajustável)
+            await asyncio.sleep(900)
                 
         except Exception as e:
-            logger.error(f"Erro na task {task_name}: {e}")
+            logger.error(f"Erro na task {task_name}: {e}", exc_info=True)
             await asyncio.sleep(600)  # Esperar 10 minutos antes de tentar novamente
 
 async def execute_task_with_retry(task_name: str, task_func: callable, max_retries: int = 3):
@@ -1118,6 +1123,8 @@ async def _check_previous_periods():
     """Verifica usuários que não cumpriram requisitos em períodos anteriores"""
     await bot.wait_until_ready()
     
+    logger.info("Iniciando verificação de períodos anteriores...")
+    
     required_minutes = bot.config['required_minutes']
     required_days = bot.config['required_days']
     monitoring_period = bot.config['monitoring_period']
@@ -1132,11 +1139,15 @@ async def _check_previous_periods():
     
     for guild in bot.guilds:
         try:
+            logger.info(f"Verificando guild: {guild.name} (ID: {guild.id})")
+            
             # Obter todos os membros com cargos monitorados
             members_with_roles = []
             for member in guild.members:
                 if any(role.id in tracked_roles for role in member.roles):
                     members_with_roles.append(member)
+            
+            logger.debug(f"Encontrados {len(members_with_roles)} membros com cargos monitorados")
             
             # Processar em lotes otimizados
             batch_size = bot._batch_processing_size
@@ -1184,10 +1195,12 @@ async def process_member_previous_periods(member: discord.Member, guild: discord
         # Verificar whitelist
         if member.id in bot.config['whitelist']['users'] or \
            any(role.id in bot.config['whitelist']['roles'] for role in member.roles):
+            logger.debug(f"Usuário {member} está na whitelist - ignorando")
             return result
             
         # Verificar se tem cargos monitorados
         if not any(role.id in tracked_roles for role in member.roles):
+            logger.debug(f"Usuário {member} não tem cargos monitorados - ignorando")
             return result
         
         result['processed'] = 1
@@ -1208,6 +1221,8 @@ async def process_member_previous_periods(member: discord.Member, guild: discord
                 failed_periods = await cursor.fetchall()
         perf_metrics.record_db_query(time.time() - start_time)
         
+        logger.debug(f"Usuário {member} tem {len(failed_periods)} períodos falhos")
+        
         # Se houver períodos onde não cumpriu os requisitos
         if failed_periods:
             # Verificar se já teve cargos removidos para esses períodos
@@ -1222,6 +1237,8 @@ async def process_member_previous_periods(member: discord.Member, guild: discord
                     already_removed = {r['role_id'] for r in await cursor.fetchall()}
             perf_metrics.record_db_query(time.time() - start_time)
             
+            logger.debug(f"Usuário {member} já teve removidos: {already_removed}")
+            
             # Verificar quais cargos monitorados ainda não foram removidos
             roles_to_remove = [
                 role for role in member.roles 
@@ -1229,6 +1246,7 @@ async def process_member_previous_periods(member: discord.Member, guild: discord
             ]
             
             if roles_to_remove:
+                logger.info(f"Preparando para remover cargos de {member}: {[r.name for r in roles_to_remove]}")
                 try:
                     # Remover cargos
                     start_time = time.time()
