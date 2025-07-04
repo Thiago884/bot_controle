@@ -270,6 +270,7 @@ class InactivityBot(commands.Bot):
         self.audio_check_task = None
         self.health_check_task = None
         self._tasks_started = False
+        self._is_initialized = False  # Nova flag para controle de inicialização
         
         # Monitor de rate limits
         self.rate_limit_monitor = RateLimitMonitor()
@@ -299,27 +300,25 @@ class InactivityBot(commands.Bot):
 
     async def initialize_db(self):
         """Inicializa a conexão com o banco de dados usando a classe Database."""
-        if self.db is not None:
-            return
+        if self._is_initialized:
+            return True
 
         try:
-            # Instancia e inicializa sua classe que usa asyncpg
             self.db = Database()
-            await self.db.initialize() # Chama o método de inicialização do database.py
-            
+            await self.db.initialize()
             logger.info("Conexão com o banco de dados (via asyncpg) estabelecida com sucesso.")
             
-            # Carregar a configuração do banco, se necessário (sua lógica atual)
-            # A lógica de carregar config deve usar os métodos da sua classe Database
-            db_config = await self.db.load_config(guild_id=0) # Exemplo, ajuste conforme sua necessidade
-            if db_config:
-                self.config.update(db_config)
-                await self.save_config()
-                logger.info("Configuração carregada do banco de dados")
-
+            # Verificar se a conexão está realmente funcionando
+            async with self.db.pool.acquire() as conn:
+                await conn.execute("SELECT 1")
+                
+            self._is_initialized = True
+            return True
+            
         except Exception as e:
             logger.critical(f"Falha crítica ao inicializar o banco de dados: {e}", exc_info=True)
             self.db_connection_failed = True
+            return False
 
     async def send_with_fallback(self, destination, content=None, embed=None, file=None):
         """Envia mensagens com tratamento de erros e fallback para rate limits."""
@@ -1026,6 +1025,12 @@ async def on_ready():
             
         bot._ready_set = True
         
+        # Inicializar o banco de dados antes de qualquer coisa
+        db_initialized = await bot.initialize_db()
+        if not db_initialized:
+            logger.critical("Falha na inicialização do banco de dados. As tarefas não serão iniciadas.")
+            return
+            
         if not bot._tasks_started:
             logger.info("Bot está pronto. Iniciando tarefas de fundo...")
             
@@ -1112,8 +1117,13 @@ from bot_commands import *
 async def main():
     load_dotenv()
     DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
+    
+    # Tentar inicializar o banco de dados antes de iniciar o bot
+    try:
+        await bot.initialize_db()
+    except Exception as e:
+        logger.critical(f"Falha crítica ao inicializar o banco de dados: {e}")
+        return
+        
     async with bot:
         await bot.start(DISCORD_TOKEN)
-
-if __name__ == '__main__':
-    asyncio.run(main())

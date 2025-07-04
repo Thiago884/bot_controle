@@ -130,6 +130,11 @@ class BatchProcessor:
     async def process_inactivity_batch(self, members: list[discord.Member]):
         """Processa um lote de membros de uma vez."""
         try:
+            # Verificar se o banco de dados está disponível
+            if not hasattr(self.bot, 'db') or not self.bot.db or not self.bot.db._is_initialized:
+                logger.error("Banco de dados não inicializado - pulando processamento de lote")
+                return []
+
             batch = members[:self.batcher.batch_size]
             results = await self._real_process_batch(batch)
             await self.batcher.adjust_batch_size()  # Aumenta se tudo ok
@@ -335,6 +340,11 @@ async def execute_task_with_persistent_interval(task_name: str, monitoring_perio
     """Executa a task mantendo intervalo persistente de 24h"""
     await bot.wait_until_ready()
     
+    # Esperar até que o banco de dados esteja inicializado
+    while not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
+        await asyncio.sleep(5)
+        logger.info(f"Aguardando inicialização do banco de dados para a task {task_name}...")
+    
     while True:
         try:
             # Verificar última execução
@@ -421,6 +431,11 @@ def handle_exception(loop, context):
 async def save_task_states():
     """Salva o estado atual das tasks no banco de dados."""
     try:
+        # Verificar se o banco de dados está disponível
+        if not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
+            logger.error("Banco de dados não inicializado - pulando salvamento de estados")
+            return
+
         for task_name in ['inactivity_check', 'check_warnings', 'cleanup_members']:
             last_exec = await bot.db.get_last_task_execution(task_name)
             if last_exec:
@@ -432,6 +447,11 @@ async def save_task_states():
 async def load_task_states():
     """Carrega o estado das tasks do banco de dados."""
     try:
+        # Verificar se o banco de dados está disponível
+        if not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
+            logger.error("Banco de dados não inicializado - pulando carregamento de estados")
+            return
+
         for task_name in ['inactivity_check', 'check_warnings', 'cleanup_members']:
             last_exec = await bot.db.get_last_task_execution(task_name)
             if last_exec:
@@ -463,6 +483,12 @@ async def health_check():
 async def _health_check():
     """Verifica a saúde do bot e reinicia tasks se necessário."""
     await bot.wait_until_ready()
+    
+    # Verificar se o banco de dados está disponível
+    if not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
+        logger.error("Banco de dados não inicializado - pulando verificação de saúde")
+        return
+
     try:
         # Verifica se as tasks estão rodando
         active_tasks = {t._name if hasattr(t, '_name') else '' for t in asyncio.all_tasks()}
@@ -509,6 +535,11 @@ async def _health_check():
 async def _inactivity_check():
     """Verifica a inatividade dos membros e remove cargos se necessário"""
     await bot.wait_until_ready()
+    
+    # Verificar se o banco de dados está disponível
+    if not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
+        logger.error("Banco de dados não inicializado - pulando verificação de inatividade")
+        return
     
     required_minutes = bot.config['required_minutes']
     required_days = bot.config['required_days']
@@ -571,6 +602,11 @@ async def inactivity_check():
 async def _check_warnings():
     """Lógica original da task"""
     await bot.wait_until_ready()
+    
+    # Verificar se o banco de dados está disponível
+    if not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
+        logger.error("Banco de dados não inicializado - pulando verificação de avisos")
+        return
     
     required_minutes = bot.config['required_minutes']
     required_days = bot.config['required_days']
@@ -673,6 +709,11 @@ async def _cleanup_members():
     """Lógica original da task"""
     await bot.wait_until_ready()
     
+    # Verificar se o banco de dados está disponível
+    if not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
+        logger.error("Banco de dados não inicializado - pulando limpeza de membros")
+        return
+    
     kick_after_days = bot.config['kick_after_days']
     if kick_after_days <= 0:
         logger.info("Expulsão de membros inativos desativada na configuração")
@@ -759,6 +800,12 @@ async def process_member_cleanup(member: discord.Member, guild: discord.Guild,
 async def _database_backup():
     """Lógica original da task"""
     await bot.wait_until_ready()
+    
+    # Verificar se o banco de dados está disponível
+    if not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
+        logger.error("Banco de dados não inicializado - pulando backup")
+        return
+    
     if not hasattr(bot, 'db_backup'):
         from database import DatabaseBackup
         bot.db_backup = DatabaseBackup(bot.db)
@@ -791,6 +838,11 @@ async def database_backup():
 async def _cleanup_old_data():
     """Lógica original da task"""
     await bot.wait_until_ready()
+    
+    # Verificar se o banco de dados está disponível
+    if not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
+        logger.error("Banco de dados não inicializado - pulando limpeza de dados antigos")
+        return
     
     try:
         start_time = time.time()
@@ -880,6 +932,11 @@ async def _report_metrics():
     """Lógica original da task"""
     await bot.wait_until_ready()
     
+    # Verificar se o banco de dados está disponível
+    if not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
+        logger.error("Banco de dados não inicializado - pulando relatório de métricas")
+        return
+    
     try:
         metrics_report = []
         for task_name in ['inactivity_check', 'check_warnings', 'cleanup_members', 
@@ -928,6 +985,11 @@ async def generate_activity_report(member: discord.Member, sessions: list) -> Op
 async def _execute_force_check(member: discord.Member):
     """Executa uma verificação forçada de inatividade para um membro específico"""
     try:
+        # Verificar se o banco de dados está disponível
+        if not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
+            logger.error("Banco de dados não inicializado - pulando verificação forçada")
+            return None
+
         guild = member.guild
         required_minutes = bot.config['required_minutes']
         required_days = bot.config['required_days']
@@ -978,6 +1040,11 @@ async def _execute_force_check(member: discord.Member):
 async def check_missed_periods():
     """Verifica e processa períodos que deveriam ter sido verificados durante a queda do bot"""
     await bot.wait_until_ready()
+    
+    # Verificar se o banco de dados está disponível
+    if not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
+        logger.error("Banco de dados não inicializado - pulando verificação de períodos perdidos")
+        return
     
     required_minutes = bot.config['required_minutes']
     required_days = bot.config['required_days']
@@ -1108,6 +1175,11 @@ async def process_member_missed_periods(member_id: int, guild: discord.Guild,
 async def _check_previous_periods():
     """Verifica usuários que não cumpriram requisitos em períodos anteriores"""
     await bot.wait_until_ready()
+    
+    # Verificar se o banco de dados está disponível
+    if not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
+        logger.error("Banco de dados não inicializado - pulando verificação de períodos anteriores")
+        return
     
     logger.info("Iniciando verificação de períodos anteriores...")
     
