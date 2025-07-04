@@ -793,40 +793,12 @@ async def _cleanup_old_data():
     await bot.wait_until_ready()
     
     try:
-        cutoff_date = datetime.utcnow() - timedelta(days=60)  # 2 meses
-        
         start_time = time.time()
-        async with bot.db.pool.acquire() as conn:
-            async with conn.cursor() as cursor:
-                # Limpar sessões de voz antigas
-                await cursor.execute("DELETE FROM voice_sessions WHERE leave_time < %s", (cutoff_date,))
-                voice_deleted = cursor.rowcount
-                
-                # Limpar avisos antigos
-                await cursor.execute("DELETE FROM user_warnings WHERE warning_date < %s", (cutoff_date,))
-                warnings_deleted = cursor.rowcount
-                
-                # Limpar registros de cargos removidos antigos
-                await cursor.execute("DELETE FROM removed_roles WHERE removal_date < %s", (cutoff_date,))
-                roles_deleted = cursor.rowcount
-                
-                # Limpar membros expulsos antigos
-                await cursor.execute("DELETE FROM kicked_members WHERE kick_date < %s", (cutoff_date,))
-                kicks_deleted = cursor.rowcount
-                
-                await conn.commit()
-                
-                log_message = (
-                    f"Limpeza de dados antigos concluída: "
-                    f"Sessões de voz: {voice_deleted}, "
-                    f"Avisos: {warnings_deleted}, "
-                    f"Cargos removidos: {roles_deleted}, "
-                    f"Expulsões: {kicks_deleted}"
-                )
-                logger.info(log_message)
-                await bot.log_action("Limpeza de Dados", None, log_message)
-        
+        log_message = await bot.db.cleanup_old_data()
         perf_metrics.record_db_query(time.time() - start_time)
+        
+        if log_message:
+            await bot.log_action("Limpeza de Dados", None, log_message)
     except Exception as e:
         logger.error(f"Erro ao limpar dados antigos: {e}")
         await bot.log_action("Erro na Limpeza de Dados", None, f"Falha ao limpar dados antigos: {str(e)}")
@@ -1222,16 +1194,14 @@ async def process_member_previous_periods(member: discord.Member, guild: discord
         # Obter todos os períodos verificados onde não cumpriu os requisitos
         start_time = time.time()
         async with bot.db.pool.acquire() as conn:
-            async with conn.cursor() as cursor:
-                await cursor.execute('''
-                    SELECT period_start, period_end 
-                    FROM checked_periods
-                    WHERE user_id = %s AND guild_id = %s
-                    AND meets_requirements = FALSE
-                    AND period_end < %s  # Apenas períodos já encerrados
-                    ORDER BY period_start
-                ''', (member.id, guild.id, now))
-                failed_periods = await cursor.fetchall()
+            failed_periods = await conn.fetch('''
+                SELECT period_start, period_end 
+                FROM checked_periods
+                WHERE user_id = $1 AND guild_id = $2
+                AND meets_requirements = FALSE
+                AND period_end < $3  -- Apenas períodos já encerrados
+                ORDER BY period_start
+            ''', member.id, guild.id, now)
         perf_metrics.record_db_query(time.time() - start_time)
         
         # Se houver períodos onde não cumpriu os requisitos
@@ -1239,19 +1209,19 @@ async def process_member_previous_periods(member: discord.Member, guild: discord
             # Verificar se já teve cargos removidos para esses períodos
             start_time = time.time()
             async with bot.db.pool.acquire() as conn:
-                async with conn.cursor() as cursor:
-                    await cursor.execute('''
-                        SELECT DISTINCT role_id 
-                        FROM removed_roles
-                        WHERE user_id = %s AND guild_id = %s
-                    ''', (member.id, guild.id))
-                    already_removed = {r['role_id'] for r in await cursor.fetchall()}
+                already_removed = await conn.fetch('''
+                    SELECT DISTINCT role_id 
+                    FROM removed_roles
+                    WHERE user_id = $1 AND guild_id = $2
+                ''', member.id, guild.id)
             perf_metrics.record_db_query(time.time() - start_time)
+            
+            already_removed_ids = {r['role_id'] for r in already_removed}
             
             # Verificar quais cargos monitorados ainda não foram removidos
             roles_to_remove = [
                 role for role in member.roles 
-                if role.id in tracked_roles and role.id not in already_removed
+                if role.id in tracked_roles and role.id not in already_removed_ids
             ]
             
             if roles_to_remove:

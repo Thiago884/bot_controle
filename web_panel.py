@@ -13,7 +13,6 @@ import logging
 from logging.handlers import RotatingFileHandler
 from functools import wraps
 import discord
-import aiomysql
 import psutil
 from werkzeug.middleware.proxy_fix import ProxyFix
 import time
@@ -102,8 +101,6 @@ def is_bot_ready():
 
 def check_bot_initialized():
     """Verifica se a thread do bot foi iniciada e o objeto bot tem um loop."""
-    # A verificação principal para requisições será 'bot.is_ready()' no middleware.
-    # Esta é uma verificação mais básica de que o processo de inicialização começou.
     if not bot_running or not bot_initialized or not hasattr(bot, 'loop') or not bot.loop.is_running():
         web_logger.error("Bot não inicializado corretamente ou seu loop não está rodando.")
         return False
@@ -149,11 +146,8 @@ async def safe_db_operation(coro):
     """Executa operações no banco de dados com tratamento de erros"""
     try:
         return await run_coroutine_in_bot_loop(coro)
-    except aiomysql.Error as e:
-        web_logger.error(f"Erro de banco de dados: {e}", exc_info=True)
-        return None
     except Exception as e:
-        web_logger.error(f"Erro inesperado: {e}", exc_info=True)
+        web_logger.error(f"Erro de banco de dados: {e}", exc_info=True)
         return None
 
 def get_main_guild():
@@ -166,15 +160,12 @@ def get_main_guild():
 # Middleware para verificar se o bot está pronto
 @app.before_request
 def check_bot_ready():
-    # As rotas /static, /keepalive e /health não devem exigir que o bot esteja pronto.
     if request.path.startswith('/static') or request.path in ['/keepalive', '/health']:
         return
         
-    # Verifica o estado básico da thread do bot
     if not bot_running or not bot_initialized:
         return jsonify({'status': 'error', 'message': 'O processo do bot não está rodando ou inicializado.'}), 503
         
-    # Verificação mais completa
     if not is_bot_ready():
         return jsonify({'status': 'error', 'message': 'O bot está inicializando, mas ainda não está pronto.'}), 503
 
@@ -344,7 +335,6 @@ def monitor():
 @app.route('/api/panel_status')
 @basic_auth_required
 def panel_status():
-    """Endpoint para verificar o status do painel e do bot"""
     try:
         return jsonify({
             'status': 'running',
@@ -360,7 +350,6 @@ def panel_status():
 @app.route('/api/system_info')
 @basic_auth_required
 def system_info():
-    """Endpoint para obter informações do sistema"""
     try:
         return jsonify({
             'cpu_usage': psutil.cpu_percent(),
@@ -975,37 +964,36 @@ def get_warnings_history():
                 
             try:
                 async with bot.db.pool.acquire() as conn:
-                    async with conn.cursor(aiomysql.DictCursor) as cursor:
-                        # Query para contar o total
-                        count_query = '''
-                            SELECT COUNT(*) as total
-                            FROM user_warnings
-                            WHERE guild_id = %s
-                            AND warning_date >= DATE_SUB(NOW(), INTERVAL %s DAY)
-                        '''
-                        await cursor.execute(count_query, (guild_id, days))
-                        total = (await cursor.fetchone())['total']
-                        
-                        # Query para obter os dados paginados
-                        query = '''
-                            SELECT 
-                                user_id, 
-                                warning_type, 
-                                warning_date
-                            FROM user_warnings
-                            WHERE guild_id = %s
-                            AND warning_date >= DATE_SUB(NOW(), INTERVAL %s DAY)
-                            ORDER BY warning_date DESC
-                            LIMIT %s OFFSET %s
-                        '''
-                        offset = (page - 1) * per_page
-                        web_logger.debug(f"Executando query de warnings: {query} com params: {guild_id}, {days}, {per_page}, {offset}")
-                        await cursor.execute(query, (guild_id, days, per_page, offset))
-                        
-                        return {
-                            'total': total,
-                            'warnings': await cursor.fetchall()
-                        }
+                    # Query para contar o total
+                    count_query = '''
+                        SELECT COUNT(*) as total
+                        FROM user_warnings
+                        WHERE guild_id = $1
+                        AND warning_date >= (NOW() - INTERVAL '1 DAY' * $2)
+                    '''
+                    total_record = await conn.fetchrow(count_query, guild_id, days)
+                    total = total_record['total'] if total_record else 0
+                    
+                    # Query para obter os dados paginados
+                    query = '''
+                        SELECT 
+                            user_id, 
+                            warning_type, 
+                            warning_date
+                        FROM user_warnings
+                        WHERE guild_id = $1
+                        AND warning_date >= (NOW() - INTERVAL '1 DAY' * $2)
+                        ORDER BY warning_date DESC
+                        LIMIT $3 OFFSET $4
+                    '''
+                    offset = (page - 1) * per_page
+                    web_logger.debug(f"Executando query de warnings: {query} com params: {guild_id}, {days}, {per_page}, {offset}")
+                    results = await conn.fetch(query, guild_id, days, per_page, offset)
+                    
+                    return {
+                        'total': total,
+                        'warnings': [dict(row) for row in results]
+                    }
             except Exception as e:
                 web_logger.error(f"Erro de banco de dados em _get_warnings_from_db: {e}", exc_info=True)
                 return {'total': 0, 'warnings': []}
@@ -1067,37 +1055,36 @@ def get_kicks_history():
                 return {'total': 0, 'kicks': []}
             try:
                 async with bot.db.pool.acquire() as conn:
-                    async with conn.cursor(aiomysql.DictCursor) as cursor:
-                        # Query para contar o total
-                        count_query = '''
-                            SELECT COUNT(*) as total
-                            FROM kicked_members
-                            WHERE guild_id = %s
-                            AND kick_date >= DATE_SUB(NOW(), INTERVAL %s DAY)
-                        '''
-                        await cursor.execute(count_query, (guild_id, days))
-                        total = (await cursor.fetchone())['total']
-                        
-                        # Query para obter os dados paginados
-                        query = '''
-                            SELECT 
-                                user_id, 
-                                kick_date, 
-                                reason
-                            FROM kicked_members
-                            WHERE guild_id = %s
-                            AND kick_date >= DATE_SUB(NOW(), INTERVAL %s DAY)
-                            ORDER BY kick_date DESC
-                            LIMIT %s OFFSET %s
-                        '''
-                        offset = (page - 1) * per_page
-                        web_logger.debug(f"Executando query de kicks: {query} com params: {guild_id}, {days}, {per_page}, {offset}")
-                        await cursor.execute(query, (guild_id, days, per_page, offset))
-                        
-                        return {
-                            'total': total,
-                            'kicks': await cursor.fetchall()
-                        }
+                    # Query para contar o total
+                    count_query = '''
+                        SELECT COUNT(*) as total
+                        FROM kicked_members
+                        WHERE guild_id = $1
+                        AND kick_date >= (NOW() - INTERVAL '1 DAY' * $2)
+                    '''
+                    total_record = await conn.fetchrow(count_query, guild_id, days)
+                    total = total_record['total'] if total_record else 0
+                    
+                    # Query para obter os dados paginados
+                    query = '''
+                        SELECT 
+                            user_id, 
+                            kick_date, 
+                            reason
+                        FROM kicked_members
+                        WHERE guild_id = $1
+                        AND kick_date >= (NOW() - INTERVAL '1 DAY' * $2)
+                        ORDER BY kick_date DESC
+                        LIMIT $3 OFFSET $4
+                    '''
+                    offset = (page - 1) * per_page
+                    web_logger.debug(f"Executando query de kicks: {query} com params: {guild_id}, {days}, {per_page}, {offset}")
+                    results = await conn.fetch(query, guild_id, days, per_page, offset)
+                    
+                    return {
+                        'total': total,
+                        'kicks': [dict(row) for row in results]
+                    }
             except Exception as e:
                 web_logger.error(f"Erro de banco de dados em _get_kicks_from_db: {e}", exc_info=True)
                 return {'total': 0, 'kicks': []}
@@ -1163,37 +1150,36 @@ def get_role_removals():
                 
             try:
                 async with bot.db.pool.acquire() as conn:
-                    async with conn.cursor(aiomysql.DictCursor) as cursor:
-                        # Query para contar o total
-                        count_query = '''
-                            SELECT COUNT(*) as total
-                            FROM removed_roles
-                            WHERE guild_id = %s
-                            AND removal_date >= DATE_SUB(NOW(), INTERVAL %s DAY)
-                        '''
-                        await cursor.execute(count_query, (guild_id, days))
-                        total = (await cursor.fetchone())['total']
-                        
-                        # Query para obter os dados paginados
-                        query = '''
-                            SELECT 
-                                user_id,
-                                role_id as removed_roles,
-                                removal_date,
-                                NULL as executed_by
-                            FROM removed_roles
-                            WHERE guild_id = %s
-                            AND removal_date >= DATE_SUB(NOW(), INTERVAL %s DAY)
-                            ORDER BY removal_date DESC
-                            LIMIT %s OFFSET %s
-                        '''
-                        offset = (page - 1) * per_page
-                        await cursor.execute(query, (guild_id, days, per_page, offset))
-                        
-                        return {
-                            'total': total,
-                            'removals': await cursor.fetchall()
-                        }
+                    # Query para contar o total
+                    count_query = '''
+                        SELECT COUNT(*) as total
+                        FROM removed_roles
+                        WHERE guild_id = $1
+                        AND removal_date >= (NOW() - INTERVAL '1 DAY' * $2)
+                    '''
+                    total_record = await conn.fetchrow(count_query, guild_id, days)
+                    total = total_record['total'] if total_record else 0
+                    
+                    # Query para obter os dados paginados
+                    query = '''
+                        SELECT 
+                            user_id,
+                            role_id as removed_roles,
+                            removal_date,
+                            NULL as executed_by
+                        FROM removed_roles
+                        WHERE guild_id = $1
+                        AND removal_date >= (NOW() - INTERVAL '1 DAY' * $2)
+                        ORDER BY removal_date DESC
+                        LIMIT $3 OFFSET $4
+                    '''
+                    offset = (page - 1) * per_page
+                    results = await conn.fetch(query, guild_id, days, per_page, offset)
+                    
+                    return {
+                        'total': total,
+                        'removals': [dict(row) for row in results]
+                    }
             except Exception as e:
                 web_logger.error(f"Erro ao buscar remoções de cargo: {e}", exc_info=True)
                 return {'total': 0, 'removals': []}
@@ -1252,21 +1238,20 @@ def get_ranking():
                 
             try:
                 async with bot.db.pool.acquire() as conn:
-                    async with conn.cursor(aiomysql.DictCursor) as cursor:
-                        query = '''
-                            SELECT 
-                                user_id,
-                                SUM(duration)/60 as total_minutes,
-                                COUNT(DISTINCT DATE(join_time)) as active_days
-                            FROM voice_sessions
-                            WHERE guild_id = %s
-                            AND join_time >= DATE_SUB(NOW(), INTERVAL %s DAY)
-                            GROUP BY user_id
-                            ORDER BY total_minutes DESC, active_days DESC
-                            LIMIT %s
-                        '''
-                        await cursor.execute(query, (guild_id, days, limit))
-                        return await cursor.fetchall()
+                    query = '''
+                        SELECT 
+                            user_id,
+                            SUM(duration)/60 as total_minutes,
+                            COUNT(DISTINCT DATE(join_time)) as active_days
+                        FROM voice_sessions
+                        WHERE guild_id = $1
+                        AND join_time >= (NOW() - INTERVAL '1 DAY' * $2)
+                        GROUP BY user_id
+                        ORDER BY total_minutes DESC, active_days DESC
+                        LIMIT $3
+                    '''
+                    results = await conn.fetch(query, guild_id, days, limit)
+                    return [dict(row) for row in results]
             except Exception as e:
                 web_logger.error(f"Erro ao buscar ranking: {e}", exc_info=True)
                 return []

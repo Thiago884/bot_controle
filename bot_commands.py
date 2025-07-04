@@ -896,26 +896,23 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
         
         # Obter ranking completo do banco de dados
         async with bot.db.pool.acquire() as conn:
-            async with conn.cursor() as cursor:
-                await cursor.execute('''
-                    SELECT 
-                        user_id, 
-                        SUM(duration) as total_time,
-                        COUNT(DISTINCT DATE(join_time)) as active_days,
-                        COUNT(*) as session_count,
-                        AVG(duration) as avg_duration
-                    FROM voice_sessions
-                    WHERE guild_id = %s
-                    AND join_time >= %s 
-                    AND leave_time <= %s
-                    GROUP BY user_id
-                    ORDER BY total_time DESC
-                ''', (interaction.guild.id, start_date, end_date))
-                
-                all_results = await cursor.fetchall()
+            results = await conn.fetch('''
+                SELECT 
+                    user_id, 
+                    SUM(duration) as total_time,
+                    COUNT(DISTINCT DATE(join_time)) as active_days,
+                    COUNT(*) as session_count,
+                    AVG(duration) as avg_duration
+                FROM voice_sessions
+                WHERE guild_id = $1
+                AND join_time >= $2 
+                AND leave_time <= $3
+                GROUP BY user_id
+                ORDER BY total_time DESC
+            ''', interaction.guild.id, start_date, end_date)
         
         # Processar resultados
-        if not all_results:
+        if not results:
             embed = discord.Embed(
                 title=f"🏆 Ranking de Atividade (últimos {days} dias)",
                 description=f"ℹ️ Nenhuma sessão de voz registrada nos últimos {days} dias.",
@@ -925,7 +922,7 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
             return
         
         # Pegar apenas os top N resultados
-        top_results = all_results[:limit]
+        top_results = results[:limit]
         
         # Obter informações dos membros de forma mais eficiente
         member_ids = [row['user_id'] for row in top_results]
@@ -957,9 +954,9 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
             )
         
         # Calcular estatísticas gerais
-        total_sessions = sum(row['session_count'] for row in all_results)
-        total_time = sum(row['total_time'] for row in all_results)
-        avg_time_per_user = total_time / len(all_results) if all_results else 0
+        total_sessions = sum(row['session_count'] for row in results)
+        total_time = sum(row['total_time'] for row in results)
+        avg_time_per_user = total_time / len(results) if results else 0
         
         # Criar embed
         embed = discord.Embed(
@@ -971,7 +968,7 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
         embed.add_field(
             name="📊 Estatísticas Gerais",
             value=(
-                f"**Total de usuários ativos:** {len(all_results)}\n"
+                f"**Total de usuários ativos:** {len(results)}\n"
                 f"**Total de sessões:** {total_sessions}\n"
                 f"**Tempo total em voz:** {total_time/3600:.1f}h\n"
                 f"**Média por usuário:** {avg_time_per_user/3600:.1f}h"
@@ -1243,78 +1240,72 @@ async def server_monitoring_status(interaction: discord.Interaction):
         # Obter estatísticas adicionais do banco de dados com tratamento de erro
         try:
             async with bot.db.pool.acquire() as conn:
-                async with conn.cursor() as cursor:
-                    # Contar membros com cargos monitorados (consulta otimizada)
-                    tracked_members = 0
-                    if bot.config['tracked_roles']:
-                        await cursor.execute('''
-                            SELECT COUNT(DISTINCT members.user_id) as tracked_members
-                            FROM (
-                                SELECT user_id, guild_id 
-                                FROM user_activity 
-                                WHERE guild_id = %s
-                                UNION
-                                SELECT user_id, guild_id 
-                                FROM removed_roles 
-                                WHERE guild_id = %s AND role_id IN %s
-                            ) AS members
-                        ''', (interaction.guild.id, interaction.guild.id, tuple(bot.config['tracked_roles'])))
-                        result = await cursor.fetchone()
-                        tracked_members = result['tracked_members'] if result else 0
-                    
-                    # Consulta única para todas as estatísticas
-                    await cursor.execute('''
-                        SELECT 
-                            COALESCE(SUM(CASE WHEN meets_requirements = 1 THEN 1 ELSE 0 END), 0) as compliant,
-                            COALESCE(SUM(CASE WHEN meets_requirements = 0 THEN 1 ELSE 0 END), 0) as non_compliant,
-                            COUNT(DISTINCT user_id) as total_members,
-                            COUNT(DISTINCT CASE WHEN warning_date >= %s THEN user_id END) as warned_users,
-                            COUNT(DISTINCT CASE WHEN removal_date >= %s THEN user_id END) as removed_roles,
-                            COUNT(DISTINCT CASE WHEN kick_date >= %s THEN user_id END) as kicked_members
+                # Contar membros com cargos monitorados (consulta otimizada)
+                tracked_members = 0
+                if bot.config['tracked_roles']:
+                    result = await conn.fetchrow('''
+                        SELECT COUNT(DISTINCT members.user_id) as tracked_members
                         FROM (
-                            SELECT user_id, guild_id, meets_requirements, NULL as warning_date, NULL as removal_date, NULL as kick_date
-                            FROM checked_periods
-                            WHERE guild_id = %s AND period_start >= %s
-                            
-                            UNION ALL
-                            
-                            SELECT user_id, guild_id, NULL as meets_requirements, warning_date, NULL as removal_date, NULL as kick_date
-                            FROM user_warnings
-                            WHERE guild_id = %s AND warning_date >= %s
-                            
-                            UNION ALL
-                            
-                            SELECT user_id, guild_id, NULL as meets_requirements, NULL as warning_date, removal_date, NULL as kick_date
-                            FROM removed_roles
-                            WHERE guild_id = %s AND removal_date >= %s
-                            
-                            UNION ALL
-                            
-                            SELECT user_id, guild_id, NULL as meets_requirements, NULL as warning_date, NULL as removal_date, kick_date
-                            FROM kicked_members
-                            WHERE guild_id = %s AND kick_date >= %s
-                        ) AS combined_data
-                    ''', (
-                        now - timedelta(days=7), now - timedelta(days=7), now - timedelta(days=7),
-                        interaction.guild.id, last_exec['last_execution'] if last_exec else datetime.min,
-                        interaction.guild.id, now - timedelta(days=7),
-                        interaction.guild.id, now - timedelta(days=7),
-                        interaction.guild.id, now - timedelta(days=7)
-                    ))
-                    stats = await cursor.fetchone()
-                    
-                    # Consulta de avisos otimizada
-                    await cursor.execute('''
-                        SELECT 
-                            warning_type,
-                            COUNT(*) as count
+                            SELECT user_id, guild_id 
+                            FROM user_activity 
+                            WHERE guild_id = $1
+                            UNION
+                            SELECT user_id, guild_id 
+                            FROM removed_roles 
+                            WHERE guild_id = $1 AND role_id = ANY($2)
+                        ) AS members
+                    ''', interaction.guild.id, bot.config['tracked_roles'])
+                    tracked_members = result['tracked_members'] if result else 0
+                
+                # Consulta única para todas as estatísticas
+                stats = await conn.fetchrow('''
+                    SELECT 
+                        COALESCE(SUM(CASE WHEN meets_requirements = true THEN 1 ELSE 0 END), 0) as compliant,
+                        COALESCE(SUM(CASE WHEN meets_requirements = false THEN 1 ELSE 0 END), 0) as non_compliant,
+                        COUNT(DISTINCT user_id) as total_members,
+                        COUNT(DISTINCT CASE WHEN warning_date >= $1 THEN user_id END) as warned_users,
+                        COUNT(DISTINCT CASE WHEN removal_date >= $1 THEN user_id END) as removed_roles,
+                        COUNT(DISTINCT CASE WHEN kick_date >= $1 THEN user_id END) as kicked_members
+                    FROM (
+                        SELECT user_id, guild_id, meets_requirements, NULL as warning_date, NULL as removal_date, NULL as kick_date
+                        FROM checked_periods
+                        WHERE guild_id = $2 AND period_start >= $3
+                        
+                        UNION ALL
+                        
+                        SELECT user_id, guild_id, NULL as meets_requirements, warning_date, NULL as removal_date, NULL as kick_date
                         FROM user_warnings
-                        WHERE guild_id = %s
-                        AND warning_date >= %s
-                        GROUP BY warning_type
-                    ''', (interaction.guild.id, now - timedelta(days=7)))
-                    warnings = await cursor.fetchall()
-                    
+                        WHERE guild_id = $2 AND warning_date >= $1
+                        
+                        UNION ALL
+                        
+                        SELECT user_id, guild_id, NULL as meets_requirements, NULL as warning_date, removal_date, NULL as kick_date
+                        FROM removed_roles
+                        WHERE guild_id = $2 AND removal_date >= $1
+                        
+                        UNION ALL
+                        
+                        SELECT user_id, guild_id, NULL as meets_requirements, NULL as warning_date, NULL as removal_date, kick_date
+                        FROM kicked_members
+                        WHERE guild_id = $2 AND kick_date >= $1
+                    ) AS combined_data
+                ''', (
+                    now - timedelta(days=7),
+                    interaction.guild.id,
+                    last_exec['last_execution'] if last_exec else datetime.min
+                ))
+                
+                # Consulta de avisos otimizada
+                warnings = await conn.fetch('''
+                    SELECT 
+                        warning_type,
+                        COUNT(*) as count
+                    FROM user_warnings
+                    WHERE guild_id = $1
+                    AND warning_date >= $2
+                    GROUP BY warning_type
+                ''', interaction.guild.id, now - timedelta(days=7))
+                
         except Exception as e:
             logger.error(f"Erro ao consultar banco de dados: {e}")
             await interaction.followup.send(

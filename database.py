@@ -7,8 +7,9 @@ import zipfile
 import json
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Union
-import aiomysql
-from aiomysql import Pool, Connection, DictCursor
+import asyncpg
+from asyncpg import Pool, Connection
+from asyncpg.pool import create_pool
 
 logger = logging.getLogger('inactivity_bot')
 
@@ -51,39 +52,38 @@ class DatabaseBackup:
             os.makedirs(self.backup_dir, exist_ok=True)
             
             async with self.db.pool.acquire() as conn:
-                async with conn.cursor() as cursor:
-                    await cursor.execute("SHOW TABLES")
-                    tables = [table['Tables_in_' + os.getenv('DB_NAME')] for table in await cursor.fetchall()]
-                    
-                    with open(backup_file, 'w', encoding='utf-8') as f:
-                        for table in tables:
-                            # Escrever estrutura da tabela
-                            await cursor.execute(f"SHOW CREATE TABLE `{table}`")
-                            create_table = (await cursor.fetchone())['Create Table']
-                            f.write(f"{create_table};\n\n")
+                tables = await conn.fetch("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'")
+                
+                with open(backup_file, 'w', encoding='utf-8') as f:
+                    for table in tables:
+                        table_name = table['table_name']
+                        # Escrever estrutura da tabela
+                        create_table = await conn.fetchval(f"SELECT pg_get_tabledef('{table_name}')")
+                        f.write(f"{create_table};\n\n")
+                        
+                        # Escrever dados da tabela
+                        rows = await conn.fetch(f"SELECT * FROM {table_name}")
+                        if rows:
+                            columns = list(rows[0].keys())
+                            f.write(f"INSERT INTO {table_name} ({','.join(columns)}) VALUES\n")
                             
-                            # Escrever dados da tabela
-                            await cursor.execute(f"SELECT * FROM `{table}`")
-                            rows = await cursor.fetchall()
-                            if rows:
-                                columns = [col[0] for col in cursor.description]
-                                f.write(f"INSERT INTO `{table}` (`{'`,`'.join(columns)}`) VALUES\n")
-                                
-                                for i, row in enumerate(rows):
-                                    values = []
-                                    for value in row.values():
-                                        if value is None:
-                                            values.append("NULL")
-                                        elif isinstance(value, (int, float)):
-                                            values.append(str(value))
-                                        else:
-                                            values.append("'" + str(value).replace("'", "''") + "'")
-                                    
-                                    f.write(f"({','.join(values)})")
-                                    if i < len(rows) - 1:
-                                        f.write(",\n")
+                            for i, row in enumerate(rows):
+                                values = []
+                                for value in row.values():
+                                    if value is None:
+                                        values.append("NULL")
+                                    elif isinstance(value, (int, float)):
+                                        values.append(str(value))
+                                    elif isinstance(value, datetime):
+                                        values.append(f"'{value.isoformat()}'")
                                     else:
-                                        f.write(";\n\n")
+                                        values.append("'" + str(value).replace("'", "''") + "'")
+                                
+                                f.write(f"({','.join(values)})")
+                                if i < len(rows) - 1:
+                                    f.write(",\n")
+                                else:
+                                    f.write(";\n\n")
             
             # Criar arquivo ZIP antes de remover o SQL
             with zipfile.ZipFile(zip_file, 'w', zipfile.ZIP_DEFLATED) as zipf:
@@ -132,15 +132,14 @@ class DatabaseBackup:
 class Database:
     def __init__(self):
         self.pool = None
-        self.semaphore = asyncio.Semaphore(25)  # Aumentado para 25 conexões simultâneas
+        self.semaphore = asyncio.Semaphore(25)
         self._is_initialized = False
         self.heartbeat_task = None
-        self._config_cache = {}  # Cache para configurações
+        self._config_cache = {}
         self._last_config_update = None
-        self._active_tasks = set()  # Track active tasks
+        self._active_tasks = set()
 
     async def initialize(self):
-        """Inicializa o pool de conexões com configurações otimizadas"""
         if self._is_initialized:
             return
             
@@ -148,33 +147,23 @@ class Database:
         initial_delay = 2
         for attempt in range(max_retries):
             try:
-                self.pool = await aiomysql.create_pool(
+                self.pool = await create_pool(
                     host=os.getenv('DB_HOST'),
-                    port=int(os.getenv('DB_PORT', 3306)),
+                    port=int(os.getenv('DB_PORT', 5432)),
                     user=os.getenv('DB_USER'),
                     password=os.getenv('DB_PASS'),
-                    db=os.getenv('DB_NAME'),
-                    minsize=5,
-                    maxsize=25,
-                    connect_timeout=60,  # Aumentado para 30 segundos
-                    autocommit=True,
-                    cursorclass=DictCursor,
-                    pool_recycle=300,
-                    echo=False,
-                    sql_mode='NO_ENGINE_SUBSTITUTION' # Adicionado para maior compatibilidade
+                    database=os.getenv('DB_NAME'),
+                    min_size=5,
+                    max_size=25,
+                    command_timeout=60,
+                    max_inactive_connection_lifetime=300
                 )
                 
-                # Testar conexão com timeout
-                try:
-                    async with self.pool.acquire() as conn:
-                        await conn.ping(reconnect=True)
-                        async with conn.cursor() as cursor:
-                            await cursor.execute("SELECT 1")
-                            await cursor.fetchone()
-                except asyncio.TimeoutError:
-                    raise Exception("Timeout ao testar conexão com o banco de dados")
+                # Testar conexão
+                async with self.pool.acquire() as conn:
+                    await conn.execute("SELECT 1")
                 
-                # Verificar e criar tabelas
+                # Criar tabelas
                 await self.create_tables()
                 self._is_initialized = True
                 logger.info("Banco de dados inicializado com sucesso")
@@ -185,47 +174,24 @@ class Database:
                 self._active_tasks.add(self.heartbeat_task)
                 logger.info("Task de heartbeat do banco de dados iniciada")
                 
-                # Aquecer o pool
-                await self._warmup_pool()
+                return
                 
-                return # Sai do loop se a conexão for bem sucedida
-                
-            except aiomysql.OperationalError as e:
-                logger.error(f"Erro ao conectar ao MySQL (tentativa {attempt + 1}/{max_retries}): {e}")
-                if "Can't connect to MySQL server" in str(e):
-                    logger.critical("CAUSA PROVÁVEL: Firewall bloqueando a conexão ou credenciais/IP incorretos.")
-                if attempt < max_retries - 1:
-                    sleep_time = initial_delay * (2 ** attempt)
-                    logger.info(f"Tentando novamente em {sleep_time} segundos...")
-                    await asyncio.sleep(sleep_time)
-                else:
-                    logger.error("Falha ao conectar ao banco de dados após várias tentativas.")
+            except Exception as e:
+                logger.error(f"Tentativa {attempt + 1} de conexão ao banco de dados falhou: {e}")
+                if attempt == max_retries - 1:
+                    logger.critical("Falha ao conectar ao banco de dados após várias tentativas.")
                     raise
-
-    async def _warmup_pool(self):
-        """Cria algumas conexões iniciais para aquecer o pool"""
-        try:
-            warmup_conns = []
-            for _ in range(self.pool.minsize):
-                conn = await self.pool.acquire()
-                warmup_conns.append(conn)
-            
-            # Liberar conexões após aquecimento
-            for conn in warmup_conns:
-                self.pool.release(conn)
                 
-            logger.info(f"Pool aquecido com {len(warmup_conns)} conexões iniciais")
-        except Exception as e:
-            logger.warning(f"Erro ao aquecer pool: {e}")
+                sleep_time = initial_delay * (2 ** attempt)
+                logger.info(f"Tentando novamente em {sleep_time} segundos...")
+                await asyncio.sleep(sleep_time)
 
     async def _db_heartbeat(self, interval: int = 300):
         """Envia um ping periódico para manter conexões ativas"""
         while True:
             try:
                 async with self.pool.acquire() as conn:
-                    async with conn.cursor() as cursor:
-                        await asyncio.wait_for(cursor.execute("SELECT 1"), timeout=10)
-                        await cursor.fetchone()
+                    await asyncio.wait_for(conn.execute("SELECT 1"), timeout=10)
                 
                 logger.debug("Heartbeat do banco de dados executado com sucesso")
                 await asyncio.sleep(interval)
@@ -247,18 +213,17 @@ class Database:
             logger.info("Task de heartbeat do banco de dados encerrada")
         
         if self.pool:
-            self.pool.close()
-            await self.pool.wait_closed()
+            await self.pool.close()
             logger.info("Pool de conexões fechado")
 
     async def check_pool_status(self):
         """Retorna estatísticas do pool de conexões"""
         if self.pool:
             return {
-                'size': self.pool.size,
-                'freesize': self.pool.freesize,
-                'used': self.pool.size - self.pool.freesize,
-                'maxsize': self.pool.maxsize
+                'size': self.pool.get_size(),
+                'freesize': self.pool.get_idle_size(),
+                'used': self.pool.get_size() - self.pool.get_idle_size(),
+                'maxsize': self.pool.get_max_size()
             }
         return None
 
@@ -268,147 +233,149 @@ class Database:
             conn = None
             try:
                 conn = await self.pool.acquire()
-                async with conn.cursor() as cursor:
-                    # Suprimir warnings de tabelas existentes
-                    await cursor.execute("SET sql_notes = 0;")
-                    
-                    # Tabela de atividade do usuário
-                    await cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS user_activity (
-                        user_id BIGINT,
-                        guild_id BIGINT,
-                        last_voice_join DATETIME,
-                        last_voice_leave DATETIME,
-                        voice_sessions INT DEFAULT 0,
-                        total_voice_time INT DEFAULT 0,
-                        PRIMARY KEY (user_id, guild_id),
-                        INDEX idx_guild_user (guild_id, user_id),
-                        INDEX idx_last_join (last_voice_join),
-                        INDEX idx_last_leave (last_voice_leave),
-                        INDEX idx_activity_composite (guild_id, user_id, last_voice_join, last_voice_leave),
-                        INDEX idx_voice_time_composite (guild_id, user_id, total_voice_time)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci''')
-                    
-                    # Tabela de sessões de voz
-                    await cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS voice_sessions (
-                        id INT AUTO_INCREMENT PRIMARY KEY,
-                        user_id BIGINT,
-                        guild_id BIGINT,
-                        join_time DATETIME,
-                        leave_time DATETIME,
-                        duration INT,
-                        INDEX idx_user_guild (user_id, guild_id),
-                        INDEX idx_join_time (join_time),
-                        INDEX idx_leave_time (leave_time),
-                        INDEX idx_user_guild_time (user_id, guild_id, join_time, leave_time),
-                        INDEX idx_duration (duration),
-                        INDEX idx_session_composite (user_id, guild_id, join_time, leave_time, duration),
-                        INDEX idx_user_guild_duration (user_id, guild_id, duration)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci''')
-                    
-                    # Tabela de avisos
-                    await cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS user_warnings (
-                        user_id BIGINT,
-                        guild_id BIGINT,
-                        warning_type VARCHAR(20),
-                        warning_date DATETIME,
-                        PRIMARY KEY (user_id, guild_id, warning_type),
-                        INDEX idx_warning_date (warning_date),
-                        INDEX idx_user_guild_warning (user_id, guild_id, warning_type, warning_date)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci''')
-                    
-                    # Tabela de cargos removidos
-                    await cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS removed_roles (
-                        user_id BIGINT,
-                        guild_id BIGINT,
-                        role_id BIGINT,
-                        removal_date DATETIME,
-                        PRIMARY KEY (user_id, guild_id, role_id),
-                        INDEX idx_removal_date (removal_date),
-                        INDEX idx_removal_composite (user_id, guild_id, role_id, removal_date)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci''')
-                    
-                    # Tabela de membros expulsos
-                    await cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS kicked_members (
-                        id INT AUTO_INCREMENT PRIMARY KEY,
-                        user_id BIGINT,
-                        guild_id BIGINT,
-                        kick_date DATETIME,
-                        reason TEXT,
-                        INDEX idx_user_guild (user_id, guild_id),
-                        INDEX idx_kick_date (kick_date)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci''')
-                    
-                    # Tabela de períodos verificados
-                    await cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS checked_periods (
-                        user_id BIGINT,
-                        guild_id BIGINT,
-                        period_start DATETIME,
-                        period_end DATETIME,
-                        meets_requirements BOOLEAN,
-                        PRIMARY KEY (user_id, guild_id, period_start),
-                        INDEX idx_period_end (period_end),
-                        INDEX idx_requirements (meets_requirements),
-                        INDEX idx_user_guild_period (user_id, guild_id, period_start, period_end)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci''')
-                    
-                    # Tabela de configuração do bot
-                    await cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS bot_config (
-                        guild_id BIGINT PRIMARY KEY,
-                        config_json TEXT,
-                        last_updated DATETIME,
-                        INDEX idx_last_updated (last_updated)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci''')
-                    
-                    # Tabela de logs de rate limit
-                    await cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS rate_limit_logs (
-                        id INT AUTO_INCREMENT PRIMARY KEY,
-                        guild_id BIGINT,
-                        bucket VARCHAR(100),
-                        limit_count INT,
-                        remaining INT,
-                        reset_at DATETIME,
-                        scope VARCHAR(50),
-                        endpoint VARCHAR(255),
-                        retry_after FLOAT,
-                        log_date DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        INDEX idx_guild (guild_id),
-                        INDEX idx_bucket (bucket),
-                        INDEX idx_reset (reset_at),
-                        INDEX idx_endpoint (endpoint),
-                        INDEX idx_date (log_date)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci''')
-                    
-                    # Tabela de execuções de tasks
-                    await cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS task_executions (
-                        task_name VARCHAR(50) PRIMARY KEY,
-                        last_execution DATETIME,
-                        monitoring_period INT,
-                        INDEX idx_last_execution (last_execution)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-                    ''')
-                    
-                    # Reativar warnings
-                    await cursor.execute("SET sql_notes = 1;")
-                    await conn.commit()
-                    logger.info("Tabelas criadas/verificadas com sucesso")
+                
+                # Tabela de atividade do usuário
+                await conn.execute('''
+                CREATE TABLE IF NOT EXISTS user_activity (
+                    user_id BIGINT,
+                    guild_id BIGINT,
+                    last_voice_join TIMESTAMP,
+                    last_voice_leave TIMESTAMP,
+                    voice_sessions INT DEFAULT 0,
+                    total_voice_time INT DEFAULT 0,
+                    PRIMARY KEY (user_id, guild_id)
+                )''')
+                
+                await conn.execute('CREATE INDEX IF NOT EXISTS idx_guild_user ON user_activity (guild_id, user_id)')
+                await conn.execute('CREATE INDEX IF NOT EXISTS idx_last_join ON user_activity (last_voice_join)')
+                await conn.execute('CREATE INDEX IF NOT EXISTS idx_last_leave ON user_activity (last_voice_leave)')
+                await conn.execute('CREATE INDEX IF NOT EXISTS idx_activity_composite ON user_activity (guild_id, user_id, last_voice_join, last_voice_leave)')
+                await conn.execute('CREATE INDEX IF NOT EXISTS idx_voice_time_composite ON user_activity (guild_id, user_id, total_voice_time)')
+                
+                # Tabela de sessões de voz
+                await conn.execute('''
+                CREATE TABLE IF NOT EXISTS voice_sessions (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT,
+                    guild_id BIGINT,
+                    join_time TIMESTAMP,
+                    leave_time TIMESTAMP,
+                    duration INT
+                )''')
+                
+                await conn.execute('CREATE INDEX IF NOT EXISTS idx_user_guild ON voice_sessions (user_id, guild_id)')
+                await conn.execute('CREATE INDEX IF NOT EXISTS idx_join_time ON voice_sessions (join_time)')
+                await conn.execute('CREATE INDEX IF NOT EXISTS idx_leave_time ON voice_sessions (leave_time)')
+                await conn.execute('CREATE INDEX IF NOT EXISTS idx_user_guild_time ON voice_sessions (user_id, guild_id, join_time, leave_time)')
+                await conn.execute('CREATE INDEX IF NOT EXISTS idx_duration ON voice_sessions (duration)')
+                await conn.execute('CREATE INDEX IF NOT EXISTS idx_session_composite ON voice_sessions (user_id, guild_id, join_time, leave_time, duration)')
+                await conn.execute('CREATE INDEX IF NOT EXISTS idx_user_guild_duration ON voice_sessions (user_id, guild_id, duration)')
+                
+                # Tabela de avisos
+                await conn.execute('''
+                CREATE TABLE IF NOT EXISTS user_warnings (
+                    user_id BIGINT,
+                    guild_id BIGINT,
+                    warning_type VARCHAR(20),
+                    warning_date TIMESTAMP,
+                    PRIMARY KEY (user_id, guild_id, warning_type)
+                )''')
+                
+                await conn.execute('CREATE INDEX IF NOT EXISTS idx_warning_date ON user_warnings (warning_date)')
+                await conn.execute('CREATE INDEX IF NOT EXISTS idx_user_guild_warning ON user_warnings (user_id, guild_id, warning_type, warning_date)')
+                
+                # Tabela de cargos removidos
+                await conn.execute('''
+                CREATE TABLE IF NOT EXISTS removed_roles (
+                    user_id BIGINT,
+                    guild_id BIGINT,
+                    role_id BIGINT,
+                    removal_date TIMESTAMP,
+                    PRIMARY KEY (user_id, guild_id, role_id)
+                )''')
+                
+                await conn.execute('CREATE INDEX IF NOT EXISTS idx_removal_date ON removed_roles (removal_date)')
+                await conn.execute('CREATE INDEX IF NOT EXISTS idx_removal_composite ON removed_roles (user_id, guild_id, role_id, removal_date)')
+                
+                # Tabela de membros expulsos
+                await conn.execute('''
+                CREATE TABLE IF NOT EXISTS kicked_members (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT,
+                    guild_id BIGINT,
+                    kick_date TIMESTAMP,
+                    reason TEXT
+                )''')
+                
+                await conn.execute('CREATE INDEX IF NOT EXISTS idx_user_guild ON kicked_members (user_id, guild_id)')
+                await conn.execute('CREATE INDEX IF NOT EXISTS idx_kick_date ON kicked_members (kick_date)')
+                
+                # Tabela de períodos verificados
+                await conn.execute('''
+                CREATE TABLE IF NOT EXISTS checked_periods (
+                    user_id BIGINT,
+                    guild_id BIGINT,
+                    period_start TIMESTAMP,
+                    period_end TIMESTAMP,
+                    meets_requirements BOOLEAN,
+                    PRIMARY KEY (user_id, guild_id, period_start)
+                )''')
+                
+                await conn.execute('CREATE INDEX IF NOT EXISTS idx_period_end ON checked_periods (period_end)')
+                await conn.execute('CREATE INDEX IF NOT EXISTS idx_requirements ON checked_periods (meets_requirements)')
+                await conn.execute('CREATE INDEX IF NOT EXISTS idx_user_guild_period ON checked_periods (user_id, guild_id, period_start, period_end)')
+                
+                # Tabela de configuração do bot
+                await conn.execute('''
+                CREATE TABLE IF NOT EXISTS bot_config (
+                    guild_id BIGINT PRIMARY KEY,
+                    config_json TEXT,
+                    last_updated TIMESTAMP
+                )''')
+                
+                await conn.execute('CREATE INDEX IF NOT EXISTS idx_last_updated ON bot_config (last_updated)')
+                
+                # Tabela de logs de rate limit
+                await conn.execute('''
+                CREATE TABLE IF NOT EXISTS rate_limit_logs (
+                    id SERIAL PRIMARY KEY,
+                    guild_id BIGINT,
+                    bucket VARCHAR(100),
+                    limit_count INT,
+                    remaining INT,
+                    reset_at TIMESTAMP,
+                    scope VARCHAR(50),
+                    endpoint VARCHAR(255),
+                    retry_after FLOAT,
+                    log_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )''')
+                
+                await conn.execute('CREATE INDEX IF NOT EXISTS idx_guild ON rate_limit_logs (guild_id)')
+                await conn.execute('CREATE INDEX IF NOT EXISTS idx_bucket ON rate_limit_logs (bucket)')
+                await conn.execute('CREATE INDEX IF NOT EXISTS idx_reset ON rate_limit_logs (reset_at)')
+                await conn.execute('CREATE INDEX IF NOT EXISTS idx_endpoint ON rate_limit_logs (endpoint)')
+                await conn.execute('CREATE INDEX IF NOT EXISTS idx_date ON rate_limit_logs (log_date)')
+                
+                # Tabela de execuções de tasks
+                await conn.execute('''
+                CREATE TABLE IF NOT EXISTS task_executions (
+                    task_name VARCHAR(50) PRIMARY KEY,
+                    last_execution TIMESTAMP,
+                    monitoring_period INT
+                )''')
+                
+                await conn.execute('CREATE INDEX IF NOT EXISTS idx_last_execution ON task_executions (last_execution)')
+                
+                logger.info("Tabelas criadas/verificadas com sucesso")
             except Exception as e:
                 logger.error(f"Erro ao criar tabelas: {e}")
                 raise
             finally:
                 if conn:
-                    self.pool.release(conn)
+                    await self.pool.release(conn)
 
     async def execute_query(self, query: str, params: tuple = None, timeout: int = 30):
-        """Executa uma query com tratamento de timeout và retry"""
+        """Executa uma query com tratamento de timeout e retry"""
         async with self.semaphore:
             max_retries = 3
             conn = None
@@ -418,20 +385,14 @@ class Database:
                     conn = await asyncio.wait_for(self.pool.acquire(), timeout=timeout)
                     
                     # Executar query com timeout
-                    cursor = await conn.cursor()
-                    await asyncio.wait_for(cursor.execute(query, params or ()), timeout=timeout)
+                    result = await asyncio.wait_for(conn.execute(query, *(params or ()), timeout=timeout))
                     
-                    return cursor, conn
+                    return conn, result
                     
-                except (aiomysql.OperationalError, aiomysql.InterfaceError) as e:
-                    if "max_user_connections" in str(e):
-                        logger.error(f"Limite de conexões excedido (tentativa {attempt + 1}/{max_retries})")
-                        await asyncio.sleep(5 * (attempt + 1))  # Backoff exponencial
-                        continue
-                        
+                except (asyncpg.PostgresError, asyncpg.InterfaceError) as e:
                     logger.error(f"Erro de conexão (tentativa {attempt + 1}/{max_retries}): {e}")
                     if conn:
-                        self.pool.release(conn)
+                        await self.pool.release(conn)
                         conn = None
                         
                     if attempt < max_retries - 1:
@@ -443,7 +404,7 @@ class Database:
                 except asyncio.TimeoutError:
                     logger.error(f"Timeout ao executar query (tentativa {attempt + 1})")
                     if conn:
-                        self.pool.release(conn)
+                        await self.pool.release(conn)
                         conn = None
                         
                     if attempt < max_retries - 1:
@@ -455,12 +416,11 @@ class Database:
                 except Exception as e:
                     logger.error(f"Erro ao executar query: {e}")
                     if conn:
-                        self.pool.release(conn)
+                        await self.pool.release(conn)
                     raise
 
     async def save_config(self, guild_id: int, config: dict):
         """Salva configuração com cache"""
-        cursor = None
         conn = None
         try:
             # Atualizar cache
@@ -470,15 +430,15 @@ class Database:
             # Serializar para JSON
             config_json = json.dumps(config)
             
-            cursor, conn = await self.execute_query('''
+            conn = await self.pool.acquire()
+            await conn.execute('''
                 INSERT INTO bot_config (guild_id, config_json, last_updated)
-                VALUES (%s, %s, %s)
-                ON DUPLICATE KEY UPDATE
-                    config_json = VALUES(config_json),
-                    last_updated = VALUES(last_updated)
-            ''', (guild_id, config_json, datetime.utcnow()))
+                VALUES ($1, $2, $3)
+                ON CONFLICT (guild_id) DO UPDATE
+                SET config_json = EXCLUDED.config_json,
+                    last_updated = EXCLUDED.last_updated
+            ''', guild_id, config_json, datetime.utcnow())
             
-            await conn.commit()
             logger.info(f"Configuração salva no banco de dados para a guild {guild_id}")
             return True
         except Exception as e:
@@ -488,10 +448,8 @@ class Database:
                 del self._config_cache[guild_id]
             return False
         finally:
-            if cursor:
-                await cursor.close()
             if conn:
-                self.pool.release(conn)
+                await self.pool.release(conn)
 
     async def load_config(self, guild_id: int) -> Optional[dict]:
         """Carrega configuração com cache"""
@@ -505,15 +463,14 @@ class Database:
             logger.debug(f"Retornando configuração do cache para guild {guild_id}")
             return self._config_cache[guild_id]
         
-        cursor = None
         conn = None
         try:
-            cursor, conn = await self.execute_query('''
+            conn = await self.pool.acquire()
+            result = await conn.fetchrow('''
                 SELECT config_json FROM bot_config
-                WHERE guild_id = %s
-            ''', (guild_id,))
+                WHERE guild_id = $1
+            ''', guild_id)
             
-            result = await cursor.fetchone()
             if result:
                 config = json.loads(result['config_json'])
                 # Atualizar cache
@@ -527,26 +484,22 @@ class Database:
             logger.error(f"Erro ao carregar configuração: {e}")
             return None
         finally:
-            if cursor:
-                await cursor.close()
             if conn:
-                self.pool.release(conn)
+                await self.pool.release(conn)
 
     async def load_configs(self, guild_ids: List[int]) -> Dict[int, dict]:
         """Carrega configurações para múltiplas guilds de uma vez"""
         if not guild_ids:
             return {}
 
-        cursor = None
         conn = None
         try:
-            placeholders = ','.join(['%s'] * len(guild_ids))
-            cursor, conn = await self.execute_query(f'''
+            conn = await self.pool.acquire()
+            results = await conn.fetch('''
                 SELECT guild_id, config_json FROM bot_config
-                WHERE guild_id IN ({placeholders})
+                WHERE guild_id = ANY($1)
             ''', guild_ids)
             
-            results = await cursor.fetchall()
             configs = {}
             for row in results:
                 try:
@@ -562,34 +515,29 @@ class Database:
             logger.error(f"Erro ao carregar configurações múltiplas: {e}")
             return {}
         finally:
-            if cursor:
-                await cursor.close()
             if conn:
-                self.pool.release(conn)
+                await self.pool.release(conn)
 
     async def log_voice_join(self, user_id: int, guild_id: int):
         """Registra entrada em canal de voz"""
         now = datetime.utcnow()
-        cursor = None
         conn = None
         try:
-            cursor, conn = await self.execute_query('''
+            conn = await self.pool.acquire()
+            await conn.execute('''
                 INSERT INTO user_activity 
                 (user_id, guild_id, last_voice_join, voice_sessions) 
-                VALUES (%s, %s, %s, 1)
-                ON DUPLICATE KEY UPDATE 
-                    last_voice_join = VALUES(last_voice_join),
-                    voice_sessions = voice_sessions + 1
-            ''', (user_id, guild_id, now))
-            await conn.commit()
+                VALUES ($1, $2, $3, 1)
+                ON CONFLICT (user_id, guild_id) DO UPDATE 
+                SET last_voice_join = EXCLUDED.last_voice_join,
+                    voice_sessions = user_activity.voice_sessions + 1
+            ''', user_id, guild_id, now)
         except Exception as e:
             logger.error(f"Erro ao registrar entrada em voz: {e}")
             raise
         finally:
-            if cursor:
-                await cursor.close()
             if conn:
-                self.pool.release(conn)
+                await self.pool.release(conn)
 
     async def log_voice_leave(self, user_id: int, guild_id: int, duration: int):
         """Registra saída de canal de voz"""
@@ -597,165 +545,146 @@ class Database:
         conn = None
         try:
             conn = await self.pool.acquire()
-            async with conn.cursor() as cursor:
+            async with conn.transaction():
                 # Atualizar atividade do usuário
-                await cursor.execute('''
+                await conn.execute('''
                     UPDATE user_activity 
-                    SET last_voice_leave = %s,
-                        total_voice_time = total_voice_time + %s
-                    WHERE user_id = %s AND guild_id = %s
-                ''', (now, duration, user_id, guild_id))
+                    SET last_voice_leave = $1,
+                        total_voice_time = total_voice_time + $2
+                    WHERE user_id = $3 AND guild_id = $4
+                ''', now, duration, user_id, guild_id)
                 
                 # Registrar sessão de voz
                 join_time = now - timedelta(seconds=duration)
-                await cursor.execute('''
+                await conn.execute('''
                     INSERT INTO voice_sessions
                     (user_id, guild_id, join_time, leave_time, duration)
-                    VALUES (%s, %s, %s, %s, %s)
-                ''', (user_id, guild_id, join_time, now, duration))
+                    VALUES ($1, $2, $3, $4, $5)
+                ''', user_id, guild_id, join_time, now, duration)
                 
-                await conn.commit()
         except Exception as e:
             logger.error(f"Erro ao registrar saída de voz: {e}")
             raise
         finally:
             if conn:
-                self.pool.release(conn)
+                await self.pool.release(conn)
 
     async def get_user_activity(self, user_id: int, guild_id: int) -> Dict:
         """Obtém dados de atividade do usuário"""
-        cursor = None
         conn = None
         try:
-            cursor, conn = await self.execute_query('''
+            conn = await self.pool.acquire()
+            result = await conn.fetchrow('''
                 SELECT last_voice_join, last_voice_leave, voice_sessions, total_voice_time 
                 FROM user_activity 
-                WHERE user_id = %s AND guild_id = %s
-            ''', (user_id, guild_id))
+                WHERE user_id = $1 AND guild_id = $2
+            ''', user_id, guild_id)
             
-            result = await cursor.fetchone()
-            return result if result else {}
+            return dict(result) if result else {}
         except Exception as e:
             logger.error(f"Erro ao obter atividade do usuário: {e}")
             return {}
         finally:
-            if cursor:
-                await cursor.close()
             if conn:
-                self.pool.release(conn)
+                await self.pool.release(conn)
 
     async def get_voice_sessions(self, user_id: int, guild_id: int, 
                                start_date: datetime, end_date: datetime) -> List[Dict]:
         """Obtém sessões de voz do usuário em um período"""
-        cursor = None
         conn = None
         try:
-            cursor, conn = await self.execute_query('''
+            conn = await self.pool.acquire()
+            results = await conn.fetch('''
                 SELECT join_time, leave_time, duration 
                 FROM voice_sessions
-                WHERE user_id = %s AND guild_id = %s
-                AND join_time >= %s AND leave_time <= %s
+                WHERE user_id = $1 AND guild_id = $2
+                AND join_time >= $3 AND leave_time <= $4
                 ORDER BY join_time
-            ''', (user_id, guild_id, start_date, end_date))
+            ''', user_id, guild_id, start_date, end_date)
             
-            result = await cursor.fetchall()
-            return result
+            return [dict(row) for row in results]
         except Exception as e:
             logger.error(f"Erro ao obter sessões de voz: {e}")
             return []
         finally:
-            if cursor:
-                await cursor.close()
             if conn:
-                self.pool.release(conn)
+                await self.pool.release(conn)
 
     async def log_period_check(self, user_id: int, guild_id: int, 
                              start_date: datetime, end_date: datetime, 
                              meets_requirements: bool):
         """Registra verificação de período"""
-        cursor = None
         conn = None
         try:
-            cursor, conn = await self.execute_query('''
+            conn = await self.pool.acquire()
+            await conn.execute('''
                 INSERT INTO checked_periods
                 (user_id, guild_id, period_start, period_end, meets_requirements)
-                VALUES (%s, %s, %s, %s, %s)
-                ON DUPLICATE KEY UPDATE
-                    meets_requirements = VALUES(meets_requirements)
-            ''', (user_id, guild_id, start_date, end_date, meets_requirements))
-            
-            await conn.commit()
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (user_id, guild_id, period_start) DO UPDATE
+                SET meets_requirements = EXCLUDED.meets_requirements
+            ''', user_id, guild_id, start_date, end_date, meets_requirements)
         except Exception as e:
             logger.error(f"Erro ao registrar verificação de período: {e}")
             raise
         finally:
-            if cursor:
-                await cursor.close()
             if conn:
-                self.pool.release(conn)
+                await self.pool.release(conn)
 
     async def get_last_period_check(self, user_id: int, guild_id: int) -> Optional[Dict]:
         """Obtém última verificação de período"""
-        cursor = None
         conn = None
         try:
-            cursor, conn = await self.execute_query('''
+            conn = await self.pool.acquire()
+            result = await conn.fetchrow('''
                 SELECT period_start, period_end, meets_requirements
                 FROM checked_periods
-                WHERE user_id = %s AND guild_id = %s
+                WHERE user_id = $1 AND guild_id = $2
                 ORDER BY period_start DESC
                 LIMIT 1
-            ''', (user_id, guild_id))
+            ''', user_id, guild_id)
             
-            result = await cursor.fetchone()
-            return result
+            return dict(result) if result else None
         except Exception as e:
             logger.error(f"Erro ao obter última verificação de período: {e}")
             return None
         finally:
-            if cursor:
-                await cursor.close()
             if conn:
-                self.pool.release(conn)
+                await self.pool.release(conn)
 
     async def log_warning(self, user_id: int, guild_id: int, warning_type: str):
         """Registra aviso enviado ao usuário"""
         now = datetime.utcnow()
-        cursor = None
         conn = None
         try:
-            cursor, conn = await self.execute_query('''
+            conn = await self.pool.acquire()
+            await conn.execute('''
                 INSERT INTO user_warnings 
                 (user_id, guild_id, warning_type, warning_date) 
-                VALUES (%s, %s, %s, %s)
-                ON DUPLICATE KEY UPDATE 
-                    warning_date = VALUES(warning_date)
-            ''', (user_id, guild_id, warning_type, now))
-            
-            await conn.commit()
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (user_id, guild_id, warning_type) DO UPDATE 
+                SET warning_date = EXCLUDED.warning_date
+            ''', user_id, guild_id, warning_type, now)
         except Exception as e:
             logger.error(f"Erro ao registrar aviso: {e}")
             raise
         finally:
-            if cursor:
-                await cursor.close()
             if conn:
-                self.pool.release(conn)
+                await self.pool.release(conn)
 
     async def get_last_warning(self, user_id: int, guild_id: int) -> Optional[Tuple[str, datetime]]:
         """Obtém último aviso enviado ao usuário"""
-        cursor = None
         conn = None
         try:
-            cursor, conn = await self.execute_query('''
+            conn = await self.pool.acquire()
+            result = await conn.fetchrow('''
                 SELECT warning_type, warning_date 
                 FROM user_warnings 
-                WHERE user_id = %s AND guild_id = %s
+                WHERE user_id = $1 AND guild_id = $2
                 ORDER BY warning_date DESC
                 LIMIT 1
-            ''', (user_id, guild_id))
+            ''', user_id, guild_id)
             
-            result = await cursor.fetchone()
             if result:
                 return result['warning_type'], result['warning_date']
             return None
@@ -763,158 +692,128 @@ class Database:
             logger.error(f"Erro ao obter último aviso: {e}")
             return None
         finally:
-            if cursor:
-                await cursor.close()
             if conn:
-                self.pool.release(conn)
+                await self.pool.release(conn)
 
     async def log_removed_roles(self, user_id: int, guild_id: int, role_ids: List[int]):
         """Registra cargos removidos por inatividade (COM transação)."""
         conn = None
         try:
-            # 1. Adquire uma conexão do pool e INICIA uma transação
             conn = await self.pool.acquire()
-            await conn.begin()  # ⚠️ Tudo a partir daqui é "temporário" até o commit
-            
-            # 2. Executa todas as operações dentro da transação
-            async with conn.cursor() as cursor:
+            async with conn.transaction():
                 for role_id in role_ids:
-                    await cursor.execute('''
+                    await conn.execute('''
                         INSERT INTO removed_roles 
                         (user_id, guild_id, role_id, removal_date) 
-                        VALUES (%s, %s, %s, %s)
-                        ON DUPLICATE KEY UPDATE 
-                            removal_date = VALUES(removal_date)
-                    ''', (user_id, guild_id, role_id, datetime.utcnow()))
-                
-                # 3. Se tudo deu certo, CONFIRMA as alterações no banco
-                await conn.commit()  # ✅ Agora os dados são persistentes
-
+                        VALUES ($1, $2, $3, $4)
+                        ON CONFLICT (user_id, guild_id, role_id) DO UPDATE 
+                        SET removal_date = EXCLUDED.removal_date
+                    ''', user_id, guild_id, role_id, datetime.utcnow())
         except Exception as e:
-            # 4. Se algo falhar, REVERTE a transação inteira
-            if conn:
-                await conn.rollback()  # 🔄 Nenhum dado é alterado no banco
-            raise  # Propaga o erro para ser tratado pela task
-
+            logger.error(f"Erro ao registrar cargos removidos: {e}")
+            raise
         finally:
-            # 5. Libera a conexão de volta para o pool
             if conn:
-                self.pool.release(conn)
+                await self.pool.release(conn)
 
     async def log_kicked_member(self, user_id: int, guild_id: int, reason: str):
         """Registra membro expulso por inatividade"""
         now = datetime.utcnow()
-        cursor = None
         conn = None
         try:
-            cursor, conn = await self.execute_query('''
+            conn = await self.pool.acquire()
+            await conn.execute('''
                 INSERT INTO kicked_members 
                 (user_id, guild_id, kick_date, reason) 
-                VALUES (%s, %s, %s, %s)
-            ''', (user_id, guild_id, now, reason))
-            
-            await conn.commit()
+                VALUES ($1, $2, $3, $4)
+            ''', user_id, guild_id, now, reason)
         except Exception as e:
             logger.error(f"Erro ao registrar membro expulso: {e}")
             raise
         finally:
-            if cursor:
-                await cursor.close()
             if conn:
-                self.pool.release(conn)
+                await self.pool.release(conn)
 
     async def get_last_kick(self, user_id: int, guild_id: int) -> Optional[Dict]:
         """Obtém última expulsão do usuário"""
-        cursor = None
         conn = None
         try:
-            cursor, conn = await self.execute_query('''
+            conn = await self.pool.acquire()
+            result = await conn.fetchrow('''
                 SELECT kick_date 
                 FROM kicked_members
-                WHERE user_id = %s AND guild_id = %s
+                WHERE user_id = $1 AND guild_id = $2
                 ORDER BY kick_date DESC
                 LIMIT 1
-            ''', (user_id, guild_id))
+            ''', user_id, guild_id)
             
-            return await cursor.fetchone()
+            return dict(result) if result else None
         except Exception as e:
             logger.error(f"Erro ao obter última expulsão: {e}")
             return None
         finally:
-            if cursor:
-                await cursor.close()
             if conn:
-                self.pool.release(conn)
+                await self.pool.release(conn)
 
     async def get_members_with_tracked_roles(self, guild_id: int, role_ids: List[int]) -> List[int]:
         """Obtém todos os membros que possuem pelo menos um dos cargos monitorados"""
-        cursor = None
+        if not role_ids:
+            return []
+
         conn = None
         try:
-            if not role_ids:
-                return []
-
-            placeholders = ','.join(['%s'] * len(role_ids))
-            cursor, conn = await self.execute_query(f'''
+            conn = await self.pool.acquire()
+            results = await conn.fetch('''
                 SELECT DISTINCT user_id 
                 FROM user_activity
-                WHERE guild_id = %s
+                WHERE guild_id = $1
                 AND EXISTS (
                     SELECT 1 FROM removed_roles 
                     WHERE removed_roles.user_id = user_activity.user_id 
                     AND removed_roles.guild_id = user_activity.guild_id
-                    AND removed_roles.role_id IN ({placeholders})
+                    AND removed_roles.role_id = ANY($2)
                 )
-            ''', [guild_id] + role_ids)
+            ''', guild_id, role_ids)
             
-            results = await cursor.fetchall()
             return [r['user_id'] for r in results] if results else []
         except Exception as e:
             logger.error(f"Erro ao buscar membros com cargos monitorados: {e}")
             return []
         finally:
-            if cursor:
-                await cursor.close()
             if conn:
-                self.pool.release(conn)
+                await self.pool.release(conn)
 
     async def get_last_periods_batch(self, user_ids: List[int], guild_id: int) -> Dict[int, Dict]:
         """Obtém os últimos períodos verificados para um lote de usuários"""
         if not user_ids:
             return {}
 
-        cursor = None
         conn = None
         try:
-            placeholders = ','.join(['%s'] * len(user_ids))
-            cursor, conn = await self.execute_query(f'''
-                SELECT user_id, period_start, period_end, meets_requirements
+            conn = await self.pool.acquire()
+            results = await conn.fetch('''
+                SELECT DISTINCT ON (user_id) 
+                    user_id, period_start, period_end, meets_requirements
                 FROM checked_periods
-                WHERE user_id IN ({placeholders}) AND guild_id = %s
+                WHERE user_id = ANY($1) AND guild_id = $2
                 ORDER BY user_id, period_start DESC
-            ''', user_ids + [guild_id])
+            ''', user_ids, guild_id)
             
-            results = await cursor.fetchall()
             last_periods = {}
-            
-            # Agrupar por user_id e pegar o último período para cada um
             for row in results:
-                if row['user_id'] not in last_periods:
-                    last_periods[row['user_id']] = {
-                        'period_start': row['period_start'],
-                        'period_end': row['period_end'],
-                        'meets_requirements': row['meets_requirements']
-                    }
+                last_periods[row['user_id']] = {
+                    'period_start': row['period_start'],
+                    'period_end': row['period_end'],
+                    'meets_requirements': row['meets_requirements']
+                }
             
             return last_periods
         except Exception as e:
             logger.error(f"Erro ao obter últimos períodos em lote: {e}")
             return {}
         finally:
-            if cursor:
-                await cursor.close()
             if conn:
-                self.pool.release(conn)
+                await self.pool.release(conn)
 
     async def cleanup_old_data(self, days: int = 60):
         """Limpa dados antigos do banco de dados"""
@@ -923,36 +822,29 @@ class Database:
             cutoff_date = datetime.utcnow() - timedelta(days=days)
             
             conn = await self.pool.acquire()
-            async with conn.cursor() as cursor:
+            async with conn.transaction():
                 # Limpar sessões de voz antigas
-                await cursor.execute("DELETE FROM voice_sessions WHERE leave_time < %s", (cutoff_date,))
-                voice_deleted = cursor.rowcount
+                voice_deleted = await conn.execute("DELETE FROM voice_sessions WHERE leave_time < $1", cutoff_date)
                 
                 # Limpar avisos antigos
-                await cursor.execute("DELETE FROM user_warnings WHERE warning_date < %s", (cutoff_date,))
-                warnings_deleted = cursor.rowcount
+                warnings_deleted = await conn.execute("DELETE FROM user_warnings WHERE warning_date < $1", cutoff_date)
                 
                 # Limpar registros de cargos removidos antigos
-                await cursor.execute("DELETE FROM removed_roles WHERE removal_date < %s", (cutoff_date,))
-                roles_deleted = cursor.rowcount
+                roles_deleted = await conn.execute("DELETE FROM removed_roles WHERE removal_date < $1", cutoff_date)
                 
                 # Limpar membros expulsos antigos
-                await cursor.execute("DELETE FROM kicked_members WHERE kick_date < %s", (cutoff_date,))
-                kicks_deleted = cursor.rowcount
+                kicks_deleted = await conn.execute("DELETE FROM kicked_members WHERE kick_date < $1", cutoff_date)
                 
                 # Limpar logs de rate limit antigos
-                await cursor.execute("DELETE FROM rate_limit_logs WHERE log_date < %s", (cutoff_date,))
-                rate_limits_deleted = cursor.rowcount
-                
-                await conn.commit()
+                rate_limits_deleted = await conn.execute("DELETE FROM rate_limit_logs WHERE log_date < $1", cutoff_date)
                 
                 log_message = (
                     f"Limpeza de dados antigos concluída: "
-                    f"Sessões de voz: {voice_deleted}, "
-                    f"Avisos: {warnings_deleted}, "
-                    f"Cargos removidos: {roles_deleted}, "
-                    f"Expulsões: {kicks_deleted}, "
-                    f"Rate limits: {rate_limits_deleted}"
+                    f"Sessões de voz: {voice_deleted.split()[1]}, "
+                    f"Avisos: {warnings_deleted.split()[1]}, "
+                    f"Cargos removidos: {roles_deleted.split()[1]}, "
+                    f"Expulsões: {kicks_deleted.split()[1]}, "
+                    f"Rate limits: {rate_limits_deleted.split()[1]}"
                 )
                 logger.info(log_message)
                 return log_message
@@ -961,20 +853,20 @@ class Database:
             raise
         finally:
             if conn:
-                self.pool.release(conn)
+                await self.pool.release(conn)
 
     async def log_rate_limit(self, guild_id: int, data: dict):
         """Registra ocorrência de rate limit no banco de dados"""
-        cursor = None
         conn = None
         try:
             # Converter reset timestamp para datetime se existir
             reset_at = datetime.utcfromtimestamp(data['reset']) if data.get('reset') else None
             
-            cursor, conn = await self.execute_query('''
+            conn = await self.pool.acquire()
+            await conn.execute('''
                 INSERT INTO rate_limit_logs 
                 (guild_id, bucket, limit_count, remaining, reset_at, scope, endpoint, retry_after)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             ''', (
                 guild_id,
                 data.get('bucket'),
@@ -985,40 +877,35 @@ class Database:
                 data.get('endpoint'),
                 data.get('retry_after')
             ))
-            await conn.commit()
             logger.info(f"Rate limit registrado para guild {guild_id} no endpoint {data.get('endpoint')}")
             return True
         except Exception as e:
             logger.error(f"Erro ao registrar rate limit: {e}")
             return False
         finally:
-            if cursor:
-                await cursor.close()
             if conn:
-                self.pool.release(conn)
+                await self.pool.release(conn)
 
     async def get_rate_limit_history(self, guild_id: int, hours: int = 24) -> List[Dict]:
         """Obtém histórico de rate limits para uma guild"""
-        cursor = None
         conn = None
         try:
             since = datetime.utcnow() - timedelta(hours=hours)
-            cursor, conn = await self.execute_query('''
+            conn = await self.pool.acquire()
+            results = await conn.fetch('''
                 SELECT bucket, limit_count, remaining, reset_at, scope, endpoint, retry_after, log_date
                 FROM rate_limit_logs
-                WHERE guild_id = %s AND log_date >= %s
+                WHERE guild_id = $1 AND log_date >= $2
                 ORDER BY log_date DESC
-            ''', (guild_id, since))
+            ''', guild_id, since)
             
-            return await cursor.fetchall()
+            return [dict(row) for row in results]
         except Exception as e:
             logger.error(f"Erro ao obter histórico de rate limits: {e}")
             return []
         finally:
-            if cursor:
-                await cursor.close()
             if conn:
-                self.pool.release(conn)
+                await self.pool.release(conn)
 
     async def cleanup_rate_limit_logs(self, days: int = 7):
         """Limpa logs de rate limit antigos"""
@@ -1026,63 +913,55 @@ class Database:
         try:
             cutoff_date = datetime.utcnow() - timedelta(days=days)
             conn = await self.pool.acquire()
-            async with conn.cursor() as cursor:
-                await cursor.execute("DELETE FROM rate_limit_logs WHERE log_date < %s", (cutoff_date,))
-                deleted_count = cursor.rowcount
-                await conn.commit()
-                logger.info(f"Removidos {deleted_count} logs de rate limit antigos")
-                return deleted_count
+            result = await conn.execute("DELETE FROM rate_limit_logs WHERE log_date < $1", cutoff_date)
+            deleted_count = int(result.split()[1])
+            logger.info(f"Removidos {deleted_count} logs de rate limit antigos")
+            return deleted_count
         except Exception as e:
             logger.error(f"Erro ao limpar logs de rate limit: {e}")
             return 0
         finally:
             if conn:
-                self.pool.release(conn)
+                await self.pool.release(conn)
 
     async def get_last_task_execution(self, task_name: str) -> Optional[Dict]:
         """Obtém a última execução de uma task"""
-        cursor = None
         conn = None
         try:
-            cursor, conn = await self.execute_query('''
+            conn = await self.pool.acquire()
+            result = await conn.fetchrow('''
                 SELECT last_execution, monitoring_period 
                 FROM task_executions 
-                WHERE task_name = %s
-            ''', (task_name,))
+                WHERE task_name = $1
+            ''', task_name)
             
-            return await cursor.fetchone()
+            return dict(result) if result else None
         except Exception as e:
             logger.error(f"Erro ao obter última execução da task: {e}")
             return None
         finally:
-            if cursor:
-                await cursor.close()
             if conn:
-                self.pool.release(conn)
+                await self.pool.release(conn)
 
     async def log_task_execution(self, task_name: str, monitoring_period: int):
         """Registra execução de uma task"""
-        cursor = None
         conn = None
         try:
-            cursor, conn = await self.execute_query('''
+            conn = await self.pool.acquire()
+            await conn.execute('''
                 INSERT INTO task_executions 
                 (task_name, last_execution, monitoring_period) 
-                VALUES (%s, %s, %s)
-                ON DUPLICATE KEY UPDATE 
-                    last_execution = VALUES(last_execution),
-                    monitoring_period = VALUES(monitoring_period)
-            ''', (task_name, datetime.utcnow(), monitoring_period))
-            
-            await conn.commit()
+                VALUES ($1, $2, $3)
+                ON CONFLICT (task_name) DO UPDATE 
+                SET last_execution = EXCLUDED.last_execution,
+                    monitoring_period = EXCLUDED.monitoring_period
+            ''', task_name, datetime.utcnow(), monitoring_period)
         except Exception as e:
             logger.error(f"Erro ao registrar execução da task: {e}")
             raise
         finally:
-            if cursor:
-                await cursor.close()
             if conn:
-                self.pool.release(conn)
+                await self.pool.release(conn)
 
     async def health_check(self):
         """Verifica a saúde do banco de dados e reinicia tasks se necessário"""

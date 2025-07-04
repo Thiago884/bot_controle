@@ -11,13 +11,15 @@ import time
 from datetime import datetime, timedelta
 from typing import Optional
 from discord.ext import tasks
-import aiomysql
 import random
 from collections import defaultdict
 from collections import deque
 from flask import Flask
 import sys
 import traceback
+
+# Importe sua classe Database
+from database import Database
 
 # Configuração do logger
 def setup_logger():
@@ -295,6 +297,30 @@ class InactivityBot(commands.Bot):
         }
         self.cache_ttl = 300
 
+    async def initialize_db(self):
+        """Inicializa a conexão com o banco de dados usando a classe Database."""
+        if self.db is not None:
+            return
+
+        try:
+            # Instancia e inicializa sua classe que usa asyncpg
+            self.db = Database()
+            await self.db.initialize() # Chama o método de inicialização do database.py
+            
+            logger.info("Conexão com o banco de dados (via asyncpg) estabelecida com sucesso.")
+            
+            # Carregar a configuração do banco, se necessário (sua lógica atual)
+            # A lógica de carregar config deve usar os métodos da sua classe Database
+            db_config = await self.db.load_config(guild_id=0) # Exemplo, ajuste conforme sua necessidade
+            if db_config:
+                self.config.update(db_config)
+                await self.save_config()
+                logger.info("Configuração carregada do banco de dados")
+
+        except Exception as e:
+            logger.critical(f"Falha crítica ao inicializar o banco de dados: {e}", exc_info=True)
+            self.db_connection_failed = True
+
     async def send_with_fallback(self, destination, content=None, embed=None, file=None):
         """Envia mensagens com tratamento de erros e fallback para rate limits."""
         try:
@@ -345,9 +371,6 @@ class InactivityBot(commands.Bot):
         
         # Prossiga apenas se a conexão com o DB for bem-sucedida
         if self.db and not self.db_connection_failed:
-            from database import DatabaseBackup
-            self.db_backup = DatabaseBackup(self.db)
-            
             # Sincronizar comandos slash
             try:
                 synced = await self.tree.sync()
@@ -360,46 +383,6 @@ class InactivityBot(commands.Bot):
         else:
             logger.critical("Falha na inicialização do banco de dados. As tarefas não serão iniciadas.")
             self.db_connection_failed = True
-
-    async def initialize_db(self):
-        max_retries = 5
-        initial_delay = 2
-        for attempt in range(max_retries):
-            try:
-                from database import Database
-                self.db = Database()
-                await self.db.initialize()
-                logger.info("Conexão com o banco de dados estabelecida com sucesso.")
-                
-                async with self.db.pool.acquire() as conn:
-                    await conn.ping(reconnect=True)
-                    async with conn.cursor() as cursor:
-                        await cursor.execute("SELECT 1")
-                        await cursor.fetchone()
-                
-                await self.db.create_tables()
-                
-                db_config = await self.db.load_config(0)
-                if db_config:
-                    self.config.update(db_config)
-                    await self.save_config()
-                    logger.info("Configuração carregada do banco de dados")
-                
-                return
-            except Exception as e:
-                logger.error(f"Tentativa {attempt + 1} de conexão ao banco de dados falhou: {e}")
-                if self.db and self.db.pool:
-                    await self.db.close()
-                    self.db = None
-
-                if attempt == max_retries - 1:
-                    logger.critical("Falha ao conectar ao banco de dados após várias tentativas.")
-                    self.db_connection_failed = True
-                    return
-                
-                sleep_time = min(initial_delay * (2 ** attempt) + random.uniform(0, 1), 30)
-                logger.info(f"Tentando novamente em {sleep_time:.2f} segundos...")
-                await asyncio.sleep(sleep_time)
 
     async def check_audio_states(self):
         await self.wait_until_ready()
@@ -464,22 +447,18 @@ class InactivityBot(commands.Bot):
         await self.wait_until_ready()
         while True:
             try:
-                if hasattr(self, 'db') and self.db and self.db.pool:
-                    pool_status = await self.db.check_pool_status()
-                    if pool_status:
-                        log_message = (
-                            f"Status do pool: {pool_status['used']} conexões ativas de "
-                            f"{pool_status['size']} (máx: {pool_status['maxsize']})"
+                if hasattr(self, 'db') and self.db:
+                    try:
+                        pool_status = await self.db.check_pool_status()
+                        if pool_status:
+                            logger.debug(f"Status do pool de conexões: {pool_status}")
+                    except Exception as e:
+                        logger.error(f"Health check falhou para o banco de dados: {e}")
+                        await self.log_action(
+                            "Erro de Saúde",
+                            None,
+                            f"Falha na conexão com o banco de dados: {str(e)}"
                         )
-                        logger.info(log_message)
-                        
-                        if pool_status['used'] > 20:
-                            logger.warning("Aproximando do limite de conexões - considerando otimizações")
-                            await self.log_action(
-                                "Monitoramento do Pool",
-                                None,
-                                f"Uso elevado de conexões: {pool_status['used']}/{pool_status['maxsize']}"
-                            )
                 
                 await asyncio.sleep(300)
             except Exception as e:
@@ -500,13 +479,11 @@ class InactivityBot(commands.Bot):
                 if queue_status['normal'] > 100:
                     logger.warning(f"Fila de comandos grande: {queue_status['normal']}")
                 
-                if hasattr(self, 'db') and self.db and self.db.pool:
+                if hasattr(self, 'db') and self.db:
                     try:
-                        async with self.db.pool.acquire() as conn:
-                            async with conn.cursor() as cursor:
-                                await cursor.execute("SELECT 1")
-                                await cursor.fetchone()
-                        logger.debug("Health check: Banco de dados respondendo")
+                        pool_status = await self.db.check_pool_status()
+                        if pool_status:
+                            logger.debug(f"Status do pool de conexões: {pool_status}")
                     except Exception as e:
                         logger.error(f"Health check falhou para o banco de dados: {e}")
                         await self.log_action(
@@ -557,7 +534,7 @@ class InactivityBot(commands.Bot):
             with open(CONFIG_FILE, 'w') as f:
                 json.dump(self.config, f, indent=4)
             
-            if hasattr(self, 'db') and self.db and self.db.pool:
+            if hasattr(self, 'db') and self.db:
                 try:
                     await self.db.save_config(0, self.config)
                     logger.info("Configuração salva no banco de dados com sucesso")
@@ -673,7 +650,9 @@ class InactivityBot(commands.Bot):
 
     async def _handle_voice_join(self, member, after):
         try:
+            # Registrar entrada no banco de dados
             await self.db.log_voice_join(member.id, member.guild.id)
+            
             self.active_sessions[(member.id, member.guild.id)] = {
                 'start_time': datetime.utcnow(),
                 'last_audio_time': datetime.utcnow(),
@@ -718,6 +697,7 @@ class InactivityBot(commands.Bot):
                 
                 if effective_time >= self.config['required_minutes'] * 60:
                     try:
+                        # Registrar saída no banco de dados
                         await self.db.log_voice_leave(member.id, member.guild.id, int(effective_time))
                     except Exception as e:
                         logger.error(f"Erro ao registrar saída de voz: {e}")
@@ -997,8 +977,10 @@ class InactivityBot(commands.Bot):
                 embed.set_author(name=member.guild.name, icon_url=member.guild.icon.url)
             
             await self.send_dm(member, message, embed)
-            if self.db:
-                await self.db.log_warning(member.id, member.guild.id, warning_type)
+            
+            # Registrar aviso no banco de dados
+            await self.db.log_warning(member.id, member.guild.id, warning_type)
+            
             await self.log_action(f"Aviso Enviado ({warning_type})", member)
         except Exception as e:
             logger.error(f"Erro ao enviar aviso para {member}: {e}")
@@ -1051,7 +1033,7 @@ async def on_ready():
                 inactivity_check, check_warnings, cleanup_members,
                 database_backup, cleanup_old_data, monitor_rate_limits,
                 report_metrics, health_check, check_missed_periods,
-                check_previous_periods  # Adicione esta linha
+                check_previous_periods
             )
             
             # Primeiro verificar períodos perdidos
@@ -1066,7 +1048,7 @@ async def on_ready():
             bot.loop.create_task(monitor_rate_limits(), name='monitor_rate_limits_wrapper')
             bot.loop.create_task(report_metrics(), name='report_metrics_wrapper')
             bot.loop.create_task(health_check(), name='health_check_wrapper')
-            bot.loop.create_task(check_previous_periods(), name='check_previous_periods_wrapper')  # Adicione esta linha
+            bot.loop.create_task(check_previous_periods(), name='check_previous_periods_wrapper')
             
             bot.voice_event_processor_task = bot.loop.create_task(bot.process_voice_events(), name='voice_event_processor')
             bot.queue_processor_task = bot.loop.create_task(bot.process_queues(), name='queue_processor')
