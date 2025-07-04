@@ -62,9 +62,38 @@ class DatabaseBackup:
                 with open(backup_file, 'w', encoding='utf-8') as f:
                     for table in tables:
                         table_name = table['table_name']
-                        # Escrever estrutura da tabela
-                        create_table = await conn.fetchval(f"SELECT pg_get_tabledef('{table_name}')")
-                        f.write(f"{create_table};\n\n")
+                        # Escrever estrutura da tabela com método mais robusto
+                        create_table_query = f"""
+                        SELECT 
+                            pg_get_serial_sequence('{table_name}', col.attname) as seq, 
+                            format('CREATE TABLE %I (%s);', tbl.relname, string_agg(col.column_def, ', ')) as ddl 
+                        FROM pg_catalog.pg_statio_all_tables as st 
+                        JOIN pg_catalog.pg_description pg_d on (pg_d.objoid = st.relid) 
+                        JOIN pg_catalog.pg_class tbl on (tbl.oid = st.relid) 
+                        LEFT JOIN (
+                            select c.relname, a.attname, 
+                            format('%%I %%s%%s', a.attname, t.typname, 
+                                case when a.attnotnull then ' NOT NULL' else '' end) as column_def 
+                            from pg_catalog.pg_attribute a 
+                            join pg_catalog.pg_class c on (a.attrelid = c.oid) 
+                            join pg_catalog.pg_type t on (a.atttypid = t.oid) 
+                            where c.relname = '{table_name}' and a.attnum > 0
+                        ) as col on (col.relname = tbl.relname) 
+                        WHERE tbl.relname = '{table_name}' 
+                        GROUP BY tbl.relname;
+                        """
+                        try:
+                            create_table = await conn.fetchval(create_table_query)
+                            if create_table:
+                                f.write(f"{create_table};\n\n")
+                            else:
+                                # Fallback para pg_get_tabledef se disponível
+                                create_table = await conn.fetchval(f"SELECT pg_get_tabledef('{table_name}')")
+                                if create_table:
+                                    f.write(f"{create_table};\n\n")
+                        except Exception as e:
+                            logger.warning(f"Erro ao obter definição da tabela {table_name}: {e}")
+                            continue
                         
                         # Escrever dados da tabela
                         rows = await conn.fetch(f"SELECT * FROM {table_name}")
@@ -81,6 +110,8 @@ class DatabaseBackup:
                                         values.append(str(value))
                                     elif isinstance(value, datetime):
                                         values.append(f"'{value.isoformat()}'")
+                                    elif isinstance(value, str):
+                                        values.append("'" + value.replace("'", "''") + "'")
                                     else:
                                         values.append("'" + str(value).replace("'", "''") + "'")
                                 
@@ -152,64 +183,83 @@ class Database:
         initial_delay = 2
         for attempt in range(max_retries):
             try:
-                # Verificar se as variáveis de ambiente estão definidas
-                required_env_vars = ['DB_HOST', 'DB_USER', 'DB_PASS', 'DB_NAME']
-                for var in required_env_vars:
-                    if not os.getenv(var):
-                        logger.error(f"Variável de ambiente {var} não definida")
-                        raise ValueError(f"Variável de ambiente {var} não definida")
-
-                logger.info(f"Tentando conectar ao banco em: {os.getenv('DB_HOST')}:{os.getenv('DB_PORT', 5432)}")
-
-                self.pool = await create_pool(
-                    host=os.getenv('DB_HOST'),
-                    port=int(os.getenv('DB_PORT', 5432)),
-                    user=os.getenv('DB_USER'),
-                    password=os.getenv('DB_PASS'),
-                    database=os.getenv('DB_NAME'),
-                    min_size=5,
-                    max_size=25,
-                    command_timeout=60,
-                    max_inactive_connection_lifetime=300,
-                    ssl='require'  # Adicionado para Supabase
-                )
+                db_url = os.getenv('DATABASE_URL')
                 
-                # Testar conexão com timeout menor
+                if db_url:
+                    logger.info(f"Tentando conectar ao banco de dados usando DATABASE_URL.")
+                    self.pool = await create_pool(
+                        dsn=db_url,
+                        min_size=5,
+                        max_size=25,
+                        command_timeout=60,
+                        max_inactive_connection_lifetime=300,
+                        ssl='require'
+                    )
+                else:
+                    logger.warning("DATABASE_URL não encontrada. Usando variáveis de ambiente separadas (DB_HOST, DB_USER, etc.).")
+                    required_env_vars = ['DB_HOST', 'DB_USER', 'DB_PASS', 'DB_NAME']
+                    for var in required_env_vars:
+                        if not os.getenv(var):
+                            raise ValueError(f"Variável de ambiente {var} não definida e DATABASE_URL não encontrada.")
+
+                    logger.info(f"Tentando conectar ao banco em: {os.getenv('DB_HOST')}:{os.getenv('DB_PORT', 5432)}")
+                    self.pool = await create_pool(
+                        host=os.getenv('DB_HOST'),
+                        port=int(os.getenv('DB_PORT', 5432)),
+                        user=os.getenv('DB_USER'),
+                        password=os.getenv('DB_PASS'),
+                        database=os.getenv('DB_NAME'),
+                        min_size=5,
+                        max_size=25,
+                        command_timeout=60,
+                        max_inactive_connection_lifetime=300,
+                        ssl='require'
+                    )
+                
                 async with self.pool.acquire() as conn:
-                    await asyncio.wait_for(conn.execute("SELECT 1"), timeout=5)
+                    await asyncio.wait_for(conn.execute("SELECT 1"), timeout=10)
                 
                 await self.create_tables()
                 self._is_initialized = True
                 logger.info("Banco de dados inicializado com sucesso")
                     
-                # Iniciar task de heartbeat
                 self.heartbeat_task = asyncio.create_task(self._db_heartbeat(interval=300))
                 self.heartbeat_task._name = 'database_heartbeat'
                 self._active_tasks.add(self.heartbeat_task)
                 logger.info("Task de heartbeat do banco de dados iniciada")
                 
                 return
-                
+            
+            except OSError as e:
+                if e.errno == 101: # Network is unreachable
+                    logger.error(
+                        f"Tentativa {attempt + 1} de conexão falhou: Rede inacessível (Network Unreachable). "
+                        f"Isso geralmente é um problema de firewall. Verifique se o IP da sua aplicação na Render "
+                        f"está na lista de permissões (Network Restrictions) do seu banco de dados Supabase."
+                    )
+                else:
+                    logger.error(f"Tentativa {attempt + 1} de conexão ao banco de dados falhou com erro de OS: {e}")
+
             except Exception as e:
                 logger.error(f"Tentativa {attempt + 1} de conexão ao banco de dados falhou: {e}")
-                if attempt == max_retries - 1:
-                    logger.critical("Falha ao conectar ao banco de dados após várias tentativas.")
-                    # Criar um pool vazio para evitar erros de NoneType
-                    self.pool = None
-                    raise
-                
-                sleep_time = initial_delay * (2 ** attempt)
-                logger.info(f"Tentando novamente em {sleep_time} segundos...")
-                await asyncio.sleep(sleep_time)
+            
+            if attempt == max_retries - 1:
+                logger.critical("Falha ao conectar ao banco de dados após várias tentativas.")
+                self.pool = None
+                raise
+            
+            sleep_time = initial_delay * (2 ** attempt)
+            logger.info(f"Tentando novamente em {sleep_time} segundos...")
+            await asyncio.sleep(sleep_time)
 
     async def _db_heartbeat(self, interval: int = 300):
         """Envia um ping periódico para manter conexões ativas"""
         while True:
             try:
-                async with self.pool.acquire() as conn:
-                    await asyncio.wait_for(conn.execute("SELECT 1"), timeout=10)
-                
-                logger.debug("Heartbeat do banco de dados executado com sucesso")
+                if self.pool:
+                    async with self.pool.acquire() as conn:
+                        await asyncio.wait_for(conn.execute("SELECT 1"), timeout=10)
+                    logger.debug("Heartbeat do banco de dados executado com sucesso")
                 await asyncio.sleep(interval)
             except asyncio.CancelledError:
                 logger.info("Heartbeat do banco de dados cancelado.")
