@@ -104,6 +104,12 @@ def check_bot_initialized():
     if not bot_running or not bot_initialized or not hasattr(bot, 'loop') or not bot.loop.is_running():
         web_logger.error("Bot não inicializado corretamente ou seu loop não está rodando.")
         return False
+    
+    # Verificar se o banco de dados está acessível
+    if not hasattr(bot, 'db') or not bot.db or not hasattr(bot.db, 'pool') or not bot.db.pool:
+        web_logger.error("Pool de conexões do banco de dados não está disponível.")
+        return False
+        
     return True
 
 # Decorator para autenticação

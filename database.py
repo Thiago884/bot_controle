@@ -13,6 +13,11 @@ from asyncpg.pool import create_pool
 
 logger = logging.getLogger('inactivity_bot')
 
+# Configuração padrão para fallback
+DEFAULT_CONFIG = {
+    # Adicione configurações padrão para guilds específicas se necessário
+}
+
 class DatabaseBackup:
     def __init__(self, db):
         self.db = db
@@ -147,6 +152,15 @@ class Database:
         initial_delay = 2
         for attempt in range(max_retries):
             try:
+                # Verificar se as variáveis de ambiente estão definidas
+                required_env_vars = ['DB_HOST', 'DB_USER', 'DB_PASS', 'DB_NAME']
+                for var in required_env_vars:
+                    if not os.getenv(var):
+                        logger.error(f"Variável de ambiente {var} não definida")
+                        raise ValueError(f"Variável de ambiente {var} não definida")
+
+                logger.info(f"Tentando conectar ao banco em: {os.getenv('DB_HOST')}:{os.getenv('DB_PORT', 5432)}")
+
                 self.pool = await create_pool(
                     host=os.getenv('DB_HOST'),
                     port=int(os.getenv('DB_PORT', 5432)),
@@ -156,14 +170,14 @@ class Database:
                     min_size=5,
                     max_size=25,
                     command_timeout=60,
-                    max_inactive_connection_lifetime=300
+                    max_inactive_connection_lifetime=300,
+                    ssl='require'  # Adicionado para Supabase
                 )
                 
-                # Testar conexão
+                # Testar conexão com timeout menor
                 async with self.pool.acquire() as conn:
-                    await conn.execute("SELECT 1")
+                    await asyncio.wait_for(conn.execute("SELECT 1"), timeout=5)
                 
-                # Criar tabelas
                 await self.create_tables()
                 self._is_initialized = True
                 logger.info("Banco de dados inicializado com sucesso")
@@ -180,6 +194,8 @@ class Database:
                 logger.error(f"Tentativa {attempt + 1} de conexão ao banco de dados falhou: {e}")
                 if attempt == max_retries - 1:
                     logger.critical("Falha ao conectar ao banco de dados após várias tentativas.")
+                    # Criar um pool vazio para evitar erros de NoneType
+                    self.pool = None
                     raise
                 
                 sleep_time = initial_delay * (2 ** attempt)
@@ -376,6 +392,9 @@ class Database:
 
     async def execute_query(self, query: str, params: tuple = None, timeout: int = 30):
         """Executa uma query com tratamento de timeout e retry"""
+        if not self.pool:
+            raise RuntimeError("Pool de conexões não está disponível")
+            
         async with self.semaphore:
             max_retries = 3
             conn = None
@@ -385,7 +404,7 @@ class Database:
                     conn = await asyncio.wait_for(self.pool.acquire(), timeout=timeout)
                     
                     # Executar query com timeout
-                    result = await asyncio.wait_for(conn.execute(query, *(params or ()), timeout=timeout))
+                    result = await asyncio.wait_for(conn.execute(query, *(params or ())), timeout=timeout)
                     
                     return conn, result
                     
@@ -453,6 +472,11 @@ class Database:
 
     async def load_config(self, guild_id: int) -> Optional[dict]:
         """Carrega configuração com cache"""
+        # Se o banco não estiver disponível, retorne a configuração padrão
+        if not self.pool:
+            logger.warning("Pool de conexões não disponível - retornando configuração padrão")
+            return DEFAULT_CONFIG.get(guild_id, None)
+        
         # Forçar atualização do cache a cada hora
         if self._last_config_update and (datetime.utcnow() - self._last_config_update).total_seconds() > 3600:
             if guild_id in self._config_cache:
@@ -965,7 +989,14 @@ class Database:
 
     async def health_check(self):
         """Verifica a saúde do banco de dados e reinicia tasks se necessário"""
+        # Verificação básica de conexão
+        if not self.pool:
+            return False
+            
         try:
+            async with self.pool.acquire() as conn:
+                await conn.execute("SELECT 1")
+            
             # Verifica se as tasks estão rodando
             active_tasks = {t._name for t in asyncio.all_tasks() if hasattr(t, '_name') and t._name}
             expected_tasks = {'database_heartbeat'}

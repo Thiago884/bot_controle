@@ -309,8 +309,13 @@ class InactivityBot(commands.Bot):
             logger.info("Conexão com o banco de dados (via asyncpg) estabelecida com sucesso.")
             
             # Verificar se a conexão está realmente funcionando
-            async with self.db.pool.acquire() as conn:
-                await conn.execute("SELECT 1")
+            try:
+                async with self.db.pool.acquire() as conn:
+                    await asyncio.wait_for(conn.execute("SELECT 1"), timeout=10)
+            except Exception as e:
+                logger.error(f"Falha ao verificar conexão com o banco: {e}")
+                self.db_connection_failed = True
+                return False
                 
             self._is_initialized = True
             return True
@@ -318,6 +323,9 @@ class InactivityBot(commands.Bot):
         except Exception as e:
             logger.critical(f"Falha crítica ao inicializar o banco de dados: {e}", exc_info=True)
             self.db_connection_failed = True
+            # Criar instância vazia para evitar erros de NoneType
+            self.db = Database()
+            self.db.pool = None
             return False
 
     async def send_with_fallback(self, destination, content=None, embed=None, file=None):
