@@ -465,12 +465,27 @@ async def emergency_backup():
     try:
         logger.info("Iniciando backup emergencial...")
         if not hasattr(bot, 'db_backup'):
-            from database import DatabaseBackup
-            bot.db_backup = DatabaseBackup(bot.db)
-        await bot.db_backup.create_backup()
-        logger.info("Backup emergencial concluído com sucesso.")
+            try:
+                from database import DatabaseBackup
+                bot.db_backup = DatabaseBackup(bot.db)
+            except Exception as e:
+                logger.error(f"Erro ao criar instância de DatabaseBackup: {e}")
+                return False
+        
+        try:
+            success = await bot.db_backup.create_backup()
+            if success:
+                logger.info("Backup emergencial concluído com sucesso.")
+                return True
+            else:
+                logger.error("Backup emergencial falhou.")
+                return False
+        except Exception as e:
+            logger.error(f"Falha no backup emergencial: {e}")
+            return False
     except Exception as e:
-        logger.error(f"Falha no backup emergencial: {e}")
+        logger.error(f"Erro inesperado durante backup emergencial: {e}")
+        return False
 
 async def health_check():
     """Wrapper para a task com intervalo persistente"""

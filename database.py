@@ -62,35 +62,38 @@ class DatabaseBackup:
                 with open(backup_file, 'w', encoding='utf-8') as f:
                     for table in tables:
                         table_name = table['table_name']
-                        # Escrever estrutura da tabela com método mais robusto
-                        create_table_query = f"""
-                        SELECT 
-                            pg_get_serial_sequence('{table_name}', col.attname) as seq, 
-                            format('CREATE TABLE %I (%s);', tbl.relname, string_agg(col.column_def, ', ')) as ddl 
-                        FROM pg_catalog.pg_statio_all_tables as st 
-                        JOIN pg_catalog.pg_description pg_d on (pg_d.objoid = st.relid) 
-                        JOIN pg_catalog.pg_class tbl on (tbl.oid = st.relid) 
-                        LEFT JOIN (
-                            select c.relname, a.attname, 
-                            format('%%I %%s%%s', a.attname, t.typname, 
-                                case when a.attnotnull then ' NOT NULL' else '' end) as column_def 
-                            from pg_catalog.pg_attribute a 
-                            join pg_catalog.pg_class c on (a.attrelid = c.oid) 
-                            join pg_catalog.pg_type t on (a.atttypid = t.oid) 
-                            where c.relname = '{table_name}' and a.attnum > 0
-                        ) as col on (col.relname = tbl.relname) 
-                        WHERE tbl.relname = '{table_name}' 
-                        GROUP BY tbl.relname;
-                        """
+                        # Obter a estrutura da tabela de forma mais simples e confiável
                         try:
-                            create_table = await conn.fetchval(create_table_query)
+                            # Primeiro tentar com pg_dump (se disponível)
+                            create_table = await conn.fetchval(f"""
+                                SELECT pg_get_tabledef('{table_name}')
+                            """)
+                            
+                            if not create_table:
+                                # Fallback para query mais simples se pg_get_tabledef não funcionar
+                                create_table = await conn.fetchval(f"""
+                                    SELECT 'CREATE TABLE ' || quote_ident(table_name) || ' (' || 
+                                           string_agg(column_definition, ', ') || ');'
+                                    FROM (
+                                        SELECT 
+                                            table_name,
+                                            quote_ident(column_name) || ' ' || 
+                                            data_type || 
+                                            CASE WHEN is_nullable = 'NO' THEN ' NOT NULL' ELSE '' END || 
+                                            CASE WHEN column_default IS NOT NULL THEN ' DEFAULT ' || column_default ELSE '' END AS column_definition
+                                        FROM information_schema.columns
+                                        WHERE table_name = $1 AND table_schema = 'public'
+                                        ORDER BY ordinal_position
+                                    ) AS cols
+                                    GROUP BY table_name;
+                                """, table_name)
+                            
                             if create_table:
                                 f.write(f"{create_table};\n\n")
                             else:
-                                # Fallback para pg_get_tabledef se disponível
-                                create_table = await conn.fetchval(f"SELECT pg_get_tabledef('{table_name}')")
-                                if create_table:
-                                    f.write(f"{create_table};\n\n")
+                                logger.warning(f"Não foi possível obter definição da tabela {table_name}")
+                                continue
+                                
                         except Exception as e:
                             logger.warning(f"Erro ao obter definição da tabela {table_name}: {e}")
                             continue
@@ -197,7 +200,7 @@ class Database:
                 self.pool = await create_pool(
                     dsn=db_url,
                     min_size=5,
-                    max_size=25,
+                    max_size=50,
                     command_timeout=60,
                     max_inactive_connection_lifetime=300,
                     ssl='require'

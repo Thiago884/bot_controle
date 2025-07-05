@@ -14,11 +14,28 @@ from tasks import perf_metrics
 logger = logging.getLogger('inactivity_bot')
 
 @bot.tree.command(name="list_allowed_roles", description="Lista os cargos com permissão para usar comandos")
-async def list_allowed_roles(interaction: discord.Interaction):
-    """Lista todos os cargos que têm permissão para usar comandos do bot"""
+@app_commands.describe(role="Selecione um cargo para ver detalhes (opcional)")
+async def list_allowed_roles(
+    interaction: discord.Interaction, 
+    role: Optional[discord.Role] = None
+):
+    """Lista todos os cargos que têm permissão para usar comandos do bot ou detalhes de um cargo específico"""
     try:
         logger.info(f"Comando list_allowed_roles acionado por {interaction.user}")
         
+        if role:
+            # Mostrar informações sobre um cargo específico
+            is_allowed = role.id in bot.config['allowed_roles']
+            embed = discord.Embed(
+                title=f"ℹ️ Informações do Cargo {role.name}",
+                color=role.color
+            )
+            embed.add_field(name="Permissão no Bot", value="✅ Permitido" if is_allowed else "❌ Não permitido")
+            embed.add_field(name="ID do Cargo", value=str(role.id))
+            await interaction.response.send_message(embed=embed)
+            return
+
+        # Código original para listar todos os cargos
         if not bot.config['allowed_roles']:
             embed = discord.Embed(
                 title="ℹ️ Cargos Permitidos",
