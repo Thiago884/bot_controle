@@ -308,6 +308,10 @@ class InactivityBot(commands.Bot):
             await self.db.initialize()
             logger.info("Conexão com o banco de dados (via asyncpg) estabelecida com sucesso.")
             
+            # Inicializar o backup após a conexão com o banco
+            from database import DatabaseBackup
+            self.db_backup = DatabaseBackup(self.db)
+            
             # Verificar se a conexão está realmente funcionando
             try:
                 async with self.db.pool.acquire() as conn:
@@ -826,8 +830,15 @@ class InactivityBot(commands.Bot):
                 logger.error(f"Erro no processador de eventos de voz: {e}")
                 await asyncio.sleep(1)
 
-    async def log_action(self, action: str, member: Optional[discord.Member] = None, details: str = None, file: discord.File = None, embed: discord.Embed = None):
+    async def log_action(self, action: str, member: Optional[discord.Member] = None, 
+                       details: str = None, file: discord.File = None, 
+                       embed: discord.Embed = None):
         try:
+            if not hasattr(self, 'config') or not self.config.get('log_channel'):
+                if action:  # Só loga no console se for uma ação importante
+                    logger.info(f"Ação não logada (canal não configurado): {action}")
+                return
+                
             log_channel_id = self.config.get('log_channel')
             if not log_channel_id:
                 logger.warning("Canal de logs não configurado")
@@ -1025,6 +1036,10 @@ bot = InactivityBot(
 @bot.event
 async def on_ready():
     try:
+        if hasattr(bot, '_ready_called') and bot._ready_called:
+            return
+        bot._ready_called = True
+        
         logger.info(f'Bot conectado como {bot.user}')
         logger.info(f"Latência: {round(bot.latency * 1000)}ms")
         

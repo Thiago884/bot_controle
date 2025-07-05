@@ -484,14 +484,13 @@ async def _health_check():
     """Verifica a saúde do bot e reinicia tasks se necessário."""
     await bot.wait_until_ready()
     
-    # Verificar se o banco de dados está disponível
     if not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
         logger.error("Banco de dados não inicializado - pulando verificação de saúde")
         return
 
     try:
-        # Verifica se as tasks estão rodando
-        active_tasks = {t._name if hasattr(t, '_name') else '' for t in asyncio.all_tasks()}
+        # Obter todas as tasks ativas por nome
+        active_tasks = {t.get_name() for t in asyncio.all_tasks() if t.get_name()}
         
         expected_tasks = {
             'inactivity_check_wrapper',
@@ -502,30 +501,45 @@ async def _health_check():
             'monitor_rate_limits_wrapper',
             'report_metrics_wrapper',
             'health_check_wrapper',
-            'check_previous_periods_wrapper'  # Nova task adicionada
+            'check_previous_periods_wrapper',
+            'voice_event_processor',
+            'queue_processor',
+            'db_pool_monitor',
+            'periodic_health_check',
+            'audio_state_checker'
         }
 
         for task_name in expected_tasks:
             if task_name not in active_tasks:
                 logger.warning(f"Task {task_name} não está ativa - reiniciando...")
                 if task_name == 'inactivity_check_wrapper':
-                    bot.loop.create_task(inactivity_check(), name='inactivity_check_wrapper')
+                    asyncio.create_task(inactivity_check(), name='inactivity_check_wrapper')
                 elif task_name == 'check_warnings_wrapper':
-                    bot.loop.create_task(check_warnings(), name='check_warnings_wrapper')
+                    asyncio.create_task(check_warnings(), name='check_warnings_wrapper')
                 elif task_name == 'cleanup_members_wrapper':
-                    bot.loop.create_task(cleanup_members(), name='cleanup_members_wrapper')
+                    asyncio.create_task(cleanup_members(), name='cleanup_members_wrapper')
                 elif task_name == 'database_backup_wrapper':
-                    bot.loop.create_task(database_backup(), name='database_backup_wrapper')
+                    asyncio.create_task(database_backup(), name='database_backup_wrapper')
                 elif task_name == 'cleanup_old_data_wrapper':
-                    bot.loop.create_task(cleanup_old_data(), name='cleanup_old_data_wrapper')
+                    asyncio.create_task(cleanup_old_data(), name='cleanup_old_data_wrapper')
                 elif task_name == 'monitor_rate_limits_wrapper':
-                    bot.loop.create_task(monitor_rate_limits(), name='monitor_rate_limits_wrapper')
+                    asyncio.create_task(monitor_rate_limits(), name='monitor_rate_limits_wrapper')
                 elif task_name == 'report_metrics_wrapper':
-                    bot.loop.create_task(report_metrics(), name='report_metrics_wrapper')
+                    asyncio.create_task(report_metrics(), name='report_metrics_wrapper')
                 elif task_name == 'health_check_wrapper':
-                    bot.loop.create_task(health_check(), name='health_check_wrapper')
+                    asyncio.create_task(health_check(), name='health_check_wrapper')
                 elif task_name == 'check_previous_periods_wrapper':
-                    bot.loop.create_task(check_previous_periods(), name='check_previous_periods_wrapper')
+                    asyncio.create_task(check_previous_periods(), name='check_previous_periods_wrapper')
+                elif task_name == 'voice_event_processor':
+                    asyncio.create_task(voice_event_processor(), name='voice_event_processor')
+                elif task_name == 'queue_processor':
+                    asyncio.create_task(queue_processor(), name='queue_processor')
+                elif task_name == 'db_pool_monitor':
+                    asyncio.create_task(db_pool_monitor(), name='db_pool_monitor')
+                elif task_name == 'periodic_health_check':
+                    asyncio.create_task(periodic_health_check(), name='periodic_health_check')
+                elif task_name == 'audio_state_checker':
+                    asyncio.create_task(audio_state_checker(), name='audio_state_checker')
 
         await bot.log_action("Verificação de Saúde", None, f"Tasks ativas: {', '.join(t for t in active_tasks if t)}")
     except Exception as e:
@@ -801,16 +815,16 @@ async def _database_backup():
     """Lógica original da task"""
     await bot.wait_until_ready()
     
-    # Verificar se o banco de dados está disponível
-    if not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
-        logger.error("Banco de dados não inicializado - pulando backup")
+    if not bot.db or not bot.db._is_initialized:
+        logger.error("Banco não inicializado - pulando backup")
         return
-    
-    if not hasattr(bot, 'db_backup'):
-        from database import DatabaseBackup
-        bot.db_backup = DatabaseBackup(bot.db)
-    
+        
     try:
+        if not hasattr(bot, 'db_backup') or bot.db_backup is None:
+            from database import DatabaseBackup
+            bot.db_backup = DatabaseBackup(bot.db)
+            await asyncio.sleep(1)  # Garante inicialização
+            
         start_time = time.time()
         success = await bot.db_backup.create_backup()
         perf_metrics.record_db_query(time.time() - start_time)
