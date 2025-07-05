@@ -236,12 +236,14 @@ class InactivityBot(commands.Bot):
         })
         super().__init__(*args, **kwargs)
         
+        # Configurações iniciais
+        self.config = DEFAULT_CONFIG  # Inicializa com configuração padrão
+        self.timezone = pytz.timezone('America/Sao_Paulo')
+        
         # Adicione esta linha para inicializar o atributo _ready
         self._ready = asyncio.Event()
         
         # Configurações do bot
-        self.config = {}
-        self.timezone = pytz.timezone('America/Sao_Paulo')
         self.db = None
         self.db_connection_failed = False
         self.active_sessions = {}
@@ -331,6 +333,60 @@ class InactivityBot(commands.Bot):
             self.db = Database()
             self.db.pool = None
             return False
+
+    async def save_config(self, guild_id: int = None):
+        """Salva configuração com cache (modificado)"""
+        if not hasattr(self, 'config') or not self.config:
+            return
+            
+        try:
+            with open(CONFIG_FILE, 'w') as f:
+                json.dump(self.config, f, indent=4)
+            
+            if hasattr(self, 'db') and self.db and self.db._is_initialized:
+                target_guild_id = guild_id if guild_id is not None else 0  # Usar 0 para configuração global
+                await self.db.save_config(target_guild_id, self.config)
+                logger.info(f"Configuração salva no banco para guild {target_guild_id}")
+            
+            self._last_config_save = datetime.now()
+        except Exception as e:
+            logger.error(f"Erro ao salvar configuração: {e}")
+
+    def load_config(self):
+        """Carrega configuração (modificado)"""
+        try:
+            # Tenta carregar do banco primeiro
+            if hasattr(self, 'db') and self.db and self.db._is_initialized:
+                try:
+                    db_config = asyncio.get_event_loop().run_until_complete(
+                        self.db.load_config(0)  # guild_id=0 para configuração global
+                    )
+                    if db_config:
+                        self.config = db_config
+                        logger.info("Configuração carregada do banco")
+                        return
+                except Exception as db_error:
+                    logger.error(f"Erro ao carregar do banco: {db_error}")
+            
+            # Fallback para arquivo local
+            if os.path.exists(CONFIG_FILE):
+                with open(CONFIG_FILE, 'r') as f:
+                    self.config = json.load(f)
+                logger.info("Configuração carregada do arquivo local")
+            else:
+                self.config = DEFAULT_CONFIG
+                with open(CONFIG_FILE, 'w') as f:
+                    json.dump(self.config, f, indent=4)
+                logger.info("Configuração padrão criada")
+            
+            self.timezone = pytz.timezone(self.config.get('timezone', 'America/Sao_Paulo'))
+            
+            # Garantir chaves essenciais
+            for key, value in DEFAULT_CONFIG.items():
+                self.config.setdefault(key, value)
+        except Exception as e:
+            logger.error(f"Erro ao carregar configuração: {e}")
+            self.config = DEFAULT_CONFIG
 
     async def send_with_fallback(self, destination, content=None, embed=None, file=None):
         """Envia mensagens com tratamento de erros e fallback para rate limits."""
@@ -511,51 +567,6 @@ class InactivityBot(commands.Bot):
             except Exception as e:
                 logger.error(f"Erro no health check: {e}")
                 await asyncio.sleep(60)
-
-    def load_config(self):
-        try:
-            if os.path.exists(CONFIG_FILE):
-                with open(CONFIG_FILE, 'r') as f:
-                    self.config = json.load(f)
-                logger.info("Configuração carregada do arquivo local")
-            else:
-                self.config = DEFAULT_CONFIG
-                logger.info("Usando configuração padrão")
-                with open(CONFIG_FILE, 'w') as f:
-                    json.dump(self.config, f, indent=4)
-            
-            self.timezone = pytz.timezone(self.config.get('timezone', 'America/Sao_Paulo'))
-            
-            # Garantir que chaves essenciais existam
-            for key, value in DEFAULT_CONFIG.items():
-                self.config.setdefault(key, value)
-
-            logger.info("Configuração carregada com sucesso")
-        except Exception as e:
-            logger.error(f"Erro ao carregar configuração: {e}")
-            self.config = DEFAULT_CONFIG
-            with open(CONFIG_FILE, 'w') as f:
-                json.dump(self.config, f, indent=4)
-
-    async def save_config(self):
-        if not hasattr(self, 'config') or not self.config:
-            return
-            
-        try:
-            with open(CONFIG_FILE, 'w') as f:
-                json.dump(self.config, f, indent=4)
-            
-            if hasattr(self, 'db') and self.db:
-                try:
-                    await self.db.save_config(0, self.config)
-                    logger.info("Configuração salva no banco de dados com sucesso")
-                except Exception as db_error:
-                    logger.error(f"Erro ao salvar configuração no banco de dados: {db_error}")
-                    
-            self._last_config_save = datetime.now()
-        except Exception as e:
-            logger.error(f"Erro ao salvar configuração: {e}")
-            raise
 
     async def process_queues(self):
         await self.wait_until_ready()
