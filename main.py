@@ -1161,8 +1161,26 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
         return
 
     try:
+        # Extrair informações necessárias dos estados de voz
+        before_channel_id = before.channel.id if before.channel else None
+        after_channel_id = after.channel.id if after.channel else None
+        before_self_deaf = before.self_deaf
+        before_deaf = before.deaf
+        after_self_deaf = after.self_deaf
+        after_deaf = after.deaf
+        
         # Salvar o evento no banco de dados antes de enfileirar
-        await bot.db.save_pending_voice_event('voice_state_update', member, before, after)
+        await bot.db.save_pending_voice_event(
+            'voice_state_update',
+            member.id,
+            member.guild.id,
+            before_channel_id,
+            after_channel_id,
+            before_self_deaf,
+            before_deaf,
+            after_self_deaf,
+            after_deaf
+        )
         
         # Enfileirar para processamento normal
         await bot.voice_event_queue.put(('voice_state_update', member, before, after))
