@@ -185,36 +185,23 @@ class Database:
             try:
                 db_url = os.getenv('DATABASE_URL')
                 
-                if db_url:
-                    logger.info(f"Tentando conectar ao banco de dados usando DATABASE_URL.")
-                    self.pool = await create_pool(
-                        dsn=db_url,
-                        min_size=5,
-                        max_size=25,
-                        command_timeout=60,
-                        max_inactive_connection_lifetime=300,
-                        ssl='require'
-                    )
-                else:
-                    logger.warning("DATABASE_URL não encontrada. Usando variáveis de ambiente separadas (DB_HOST, DB_USER, etc.).")
-                    required_env_vars = ['DB_HOST', 'DB_USER', 'DB_PASS', 'DB_NAME']
-                    for var in required_env_vars:
-                        if not os.getenv(var):
-                            raise ValueError(f"Variável de ambiente {var} não definida e DATABASE_URL não encontrada.")
-
-                    logger.info(f"Tentando conectar ao banco em: {os.getenv('DB_HOST')}:{os.getenv('DB_PORT', 5432)}")
-                    self.pool = await create_pool(
-                        host=os.getenv('DB_HOST'),
-                        port=int(os.getenv('DB_PORT', 5432)),
-                        user=os.getenv('DB_USER'),
-                        password=os.getenv('DB_PASS'),
-                        database=os.getenv('DB_NAME'),
-                        min_size=5,
-                        max_size=25,
-                        command_timeout=60,
-                        max_inactive_connection_lifetime=300,
-                        ssl='require'
-                    )
+                if not db_url:
+                    raise ValueError("Variável de ambiente DATABASE_URL não definida")
+                    
+                logger.info("Tentando conectar ao banco de dados usando DATABASE_URL")
+                
+                # Adicionar parâmetro sslmode='require' se não estiver presente na URL
+                if 'sslmode=' not in db_url:
+                    db_url += '?sslmode=require'
+                
+                self.pool = await create_pool(
+                    dsn=db_url,
+                    min_size=5,
+                    max_size=25,
+                    command_timeout=60,
+                    max_inactive_connection_lifetime=300,
+                    ssl='require'
+                )
                 
                 async with self.pool.acquire() as conn:
                     await asyncio.wait_for(conn.execute("SELECT 1"), timeout=10)
@@ -235,7 +222,7 @@ class Database:
                     logger.error(
                         f"Tentativa {attempt + 1} de conexão falhou: Rede inacessível (Network Unreachable). "
                         f"Isso geralmente é um problema de firewall. Verifique se o IP da sua aplicação na Render "
-                        f"está na lista de permissões (Network Restrictions) do seu banco de dados Supabase."
+                        f"está na lista de permissões (Network Restrictions) do seu banco de dados Neon."
                     )
                 else:
                     logger.error(f"Tentativa {attempt + 1} de conexão ao banco de dados falhou com erro de OS: {e}")
