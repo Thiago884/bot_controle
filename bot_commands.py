@@ -1445,7 +1445,7 @@ async def server_monitoring_status(interaction: discord.Interaction):
         await interaction.followup.send(
             "❌ Ocorreu um erro ao verificar o status do monitoramento no servidor.",
             ephemeral=True)
-python
+
 @bot.tree.command(name="set_log_channel", description="Define o canal para logs do bot")
 @allowed_roles_only()
 @commands.has_permissions(administrator=True)
@@ -1479,4 +1479,4 @@ async def set_log_channel(interaction: discord.Interaction, channel: discord.Tex
             description="Ocorreu um erro ao definir o canal de logs. Por favor, tente novamente.",
             color=discord.Color.red()
         )
-        await interaction.response.send_message(embed=embed)            
+        await interaction.response.send_message(embed=embed)        
