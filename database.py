@@ -422,6 +422,25 @@ class Database:
                 
                 await conn.execute('CREATE INDEX IF NOT EXISTS idx_last_execution ON task_executions (last_execution)')
                 
+                # Tabela de eventos de voz pendentes (nova tabela adicionada)
+                await conn.execute('''
+                CREATE TABLE IF NOT EXISTS pending_voice_events (
+                    id SERIAL PRIMARY KEY,
+                    event_type VARCHAR(20),
+                    user_id BIGINT,
+                    guild_id BIGINT,
+                    before_channel_id BIGINT,
+                    after_channel_id BIGINT,
+                    before_self_deaf BOOLEAN,
+                    before_deaf BOOLEAN,
+                    after_self_deaf BOOLEAN,
+                    after_deaf BOOLEAN,
+                    event_time TIMESTAMP,
+                    processed BOOLEAN DEFAULT FALSE
+                )''')
+                
+                await conn.execute('CREATE INDEX IF NOT EXISTS idx_pending_events ON pending_voice_events (user_id, guild_id, processed)')
+                
                 logger.info("Tabelas criadas/verificadas com sucesso")
             except Exception as e:
                 logger.error(f"Erro ao criar tabelas: {e}")
@@ -477,6 +496,76 @@ class Database:
                     if conn:
                         await self.pool.release(conn)
                     raise
+
+    async def save_pending_voice_event(self, event_type: str, user_id: int, guild_id: int,
+                                     before_channel_id: Optional[int], after_channel_id: Optional[int],
+                                     before_self_deaf: Optional[bool], before_deaf: Optional[bool],
+                                     after_self_deaf: Optional[bool], after_deaf: Optional[bool]):
+        """Salva um evento de voz pendente no banco de dados"""
+        conn = None
+        try:
+            conn = await self.pool.acquire()
+            await conn.execute('''
+                INSERT INTO pending_voice_events 
+                (event_type, user_id, guild_id, before_channel_id, after_channel_id,
+                 before_self_deaf, before_deaf, after_self_deaf, after_deaf, event_time)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ''', 
+            event_type,
+            user_id,
+            guild_id,
+            before_channel_id,
+            after_channel_id,
+            before_self_deaf,
+            before_deaf,
+            after_self_deaf,
+            after_deaf,
+            datetime.utcnow())
+        except Exception as e:
+            logger.error(f"Erro ao salvar evento pendente: {e}")
+            raise
+        finally:
+            if conn:
+                await self.pool.release(conn)
+
+    async def get_pending_voice_events(self, limit: int = 100) -> List[Dict]:
+        """Obtém eventos de voz pendentes para processamento"""
+        conn = None
+        try:
+            conn = await self.pool.acquire()
+            results = await conn.fetch('''
+                SELECT * FROM pending_voice_events
+                WHERE processed = FALSE
+                ORDER BY event_time ASC
+                LIMIT $1
+            ''', limit)
+            
+            return [dict(row) for row in results]
+        except Exception as e:
+            logger.error(f"Erro ao obter eventos pendentes: {e}")
+            return []
+        finally:
+            if conn:
+                await self.pool.release(conn)
+
+    async def mark_events_as_processed(self, event_ids: List[int]):
+        """Marca eventos como processados"""
+        if not event_ids:
+            return
+            
+        conn = None
+        try:
+            conn = await self.pool.acquire()
+            await conn.execute('''
+                UPDATE pending_voice_events
+                SET processed = TRUE
+                WHERE id = ANY($1)
+            ''', event_ids)
+        except Exception as e:
+            logger.error(f"Erro ao marcar eventos como processados: {e}")
+        finally:
+            if conn:
+                await self.pool.release(conn)
 
     async def save_config(self, guild_id: int, config: dict):
         """Salva configuração com cache"""
@@ -902,13 +991,17 @@ class Database:
                 # Limpar logs de rate limit antigos
                 rate_limits_deleted = await conn.execute("DELETE FROM rate_limit_logs WHERE log_date < $1", cutoff_date)
                 
+                # Limpar eventos de voz pendentes antigos (nova funcionalidade)
+                pending_events_deleted = await conn.execute("DELETE FROM pending_voice_events WHERE event_time < $1", cutoff_date)
+                
                 log_message = (
                     f"Limpeza de dados antigos concluída: "
                     f"Sessões de voz: {voice_deleted.split()[1]}, "
                     f"Avisos: {warnings_deleted.split()[1]}, "
                     f"Cargos removidos: {roles_deleted.split()[1]}, "
                     f"Expulsões: {kicks_deleted.split()[1]}, "
-                    f"Rate limits: {rate_limits_deleted.split()[1]}"
+                    f"Rate limits: {rate_limits_deleted.split()[1]}, "
+                    f"Eventos pendentes: {pending_events_deleted.split()[1]}"
                 )
                 logger.info(log_message)
                 return log_message

@@ -654,6 +654,17 @@ class InactivityBot(commands.Bot):
                    any(role.id in self.config.get('whitelist', {}).get('roles', []) for role in member.roles):
                     continue
                 
+                audio_key = (member.id, member.guild.id)
+                
+                # Se for uma sessão estimada e o usuário realmente saiu, ajustar o tempo
+                if audio_key in self.active_sessions and self.active_sessions[audio_key].get('estimated'):
+                    if before.channel is not None and after.channel is None:
+                        # Ajustar o tempo inicial para refletir melhor a realidade
+                        estimated_start = self.active_sessions[audio_key]['start_time']
+                        actual_start = max(estimated_start, datetime.utcnow() - timedelta(hours=1))  # No máximo 1 hora
+                        self.active_sessions[audio_key]['start_time'] = actual_start
+                        self.active_sessions[audio_key]['estimated'] = False  # Não é mais estimada
+                
                 if before.channel is None and after.channel is not None and after.channel.id != absence_channel_id:
                     await self._handle_voice_join(member, after)
                 
@@ -679,7 +690,8 @@ class InactivityBot(commands.Bot):
                 'start_time': datetime.utcnow(),
                 'last_audio_time': datetime.utcnow(),
                 'audio_disabled': after.self_deaf or after.deaf,
-                'total_audio_off_time': 0
+                'total_audio_off_time': 0,
+                'estimated': False  # Nova flag para indicar sessões estimadas
             }
             
             embed = discord.Embed(
@@ -882,6 +894,12 @@ class InactivityBot(commands.Bot):
                 elif "Aviso" in str(action):
                     color = discord.Color.gold()
                     icon = "⚠️"
+                elif "Sessão Estimada" in str(action):
+                    color = discord.Color.orange()
+                    icon = "🔄"
+                elif "Sessão Recuperada" in str(action):
+                    color = discord.Color.green()
+                    icon = "✅"
                 else:
                     color = discord.Color.blue()
                     icon = "ℹ️"
@@ -1072,7 +1090,8 @@ async def on_ready():
                 inactivity_check, check_warnings, cleanup_members,
                 database_backup, cleanup_old_data, monitor_rate_limits,
                 report_metrics, health_check, check_missed_periods,
-                check_previous_periods
+                check_previous_periods, process_pending_voice_events,
+                check_current_voice_members, detect_missing_voice_leaves
             )
             
             # Primeiro verificar períodos perdidos
@@ -1088,6 +1107,9 @@ async def on_ready():
             bot.loop.create_task(report_metrics(), name='report_metrics_wrapper')
             bot.loop.create_task(health_check(), name='health_check_wrapper')
             bot.loop.create_task(check_previous_periods(), name='check_previous_periods_wrapper')
+            bot.loop.create_task(process_pending_voice_events(), name='process_pending_voice_events')
+            bot.loop.create_task(check_current_voice_members(), name='check_current_voice_members')
+            bot.loop.create_task(detect_missing_voice_leaves(), name='detect_missing_voice_leaves')
             
             bot.voice_event_processor_task = bot.loop.create_task(bot.process_voice_events(), name='voice_event_processor')
             bot.queue_processor_task = bot.loop.create_task(bot.process_queues(), name='queue_processor')
@@ -1139,9 +1161,13 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
         return
 
     try:
+        # Salvar o evento no banco de dados antes de enfileirar
+        await bot.db.save_pending_voice_event('voice_state_update', member, before, after)
+        
+        # Enfileirar para processamento normal
         await bot.voice_event_queue.put(('voice_state_update', member, before, after))
     except asyncio.QueueFull:
-        logger.warning("Fila de eventos de voz cheia - evento descartado")
+        logger.warning("Fila de eventos de voz cheia - evento será processado na próxima inicialização")
     except Exception as e:
         logger.error(f"Erro ao enfileirar evento de voz: {e}")
 

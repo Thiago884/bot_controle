@@ -412,6 +412,7 @@ async def on_resumed():
     logger.info("Bot reconectado após queda")
     await bot.log_action("Reconexão", None, "Bot reconectado após queda")
     await check_missed_periods()  # Verificar períodos perdidos durante a queda
+    await process_pending_voice_events()  # Processar eventos pendentes após reconexão
 
 @bot.event
 async def on_disconnect():
@@ -521,7 +522,11 @@ async def _health_check():
             'queue_processor',
             'db_pool_monitor',
             'periodic_health_check',
-            'audio_state_checker'
+            'audio_state_checker',
+            'process_pending_voice_events',
+            'check_current_voice_members',
+            'detect_missing_voice_leaves',
+            'cleanup_processed_events'
         }
 
         for task_name in expected_tasks:
@@ -555,6 +560,14 @@ async def _health_check():
                     asyncio.create_task(periodic_health_check(), name='periodic_health_check')
                 elif task_name == 'audio_state_checker':
                     asyncio.create_task(audio_state_checker(), name='audio_state_checker')
+                elif task_name == 'process_pending_voice_events':
+                    asyncio.create_task(process_pending_voice_events(), name='process_pending_voice_events')
+                elif task_name == 'check_current_voice_members':
+                    asyncio.create_task(check_current_voice_members(), name='check_current_voice_members')
+                elif task_name == 'detect_missing_voice_leaves':
+                    asyncio.create_task(detect_missing_voice_leaves(), name='detect_missing_voice_leaves')
+                elif task_name == 'cleanup_processed_events':
+                    asyncio.create_task(cleanup_processed_events(), name='cleanup_processed_events')
 
         await bot.log_action("Verificação de Saúde", None, f"Tasks ativas: {', '.join(t for t in active_tasks if t)}")
     except Exception as e:
@@ -1400,3 +1413,197 @@ async def process_member_previous_periods(member: discord.Member, guild: discord
         logger.error(f"Erro ao verificar períodos anteriores para {member}: {e}")
     
     return result
+
+@log_task_metrics("process_pending_voice_events")
+async def process_pending_voice_events():
+    """Processa eventos de voz pendentes que foram salvos no banco de dados"""
+    await bot.wait_until_ready()
+    
+    if not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
+        logger.error("Banco de dados não inicializado - pulando processamento de eventos pendentes")
+        return
+    
+    try:
+        # Obter eventos pendentes
+        pending_events = await bot.db.get_pending_voice_events(limit=500)
+        if not pending_events:
+            logger.info("Nenhum evento de voz pendente para processar")
+            return
+            
+        logger.info(f"Processando {len(pending_events)} eventos de voz pendentes...")
+        
+        # Processar em lotes
+        batch_size = 50
+        processed_ids = []
+        
+        for i in range(0, len(pending_events), batch_size):
+            batch = pending_events[i:i + batch_size]
+            
+            # Recriar objetos VoiceState aproximados
+            for event in batch:
+                try:
+                    guild = bot.get_guild(event['guild_id'])
+                    if not guild:
+                        continue
+                        
+                    member = guild.get_member(event['user_id'])
+                    if not member:
+                        continue
+                    
+                    # Recriar estados before e after aproximados
+                    before_channel = guild.get_channel(event['before_channel_id']) if event['before_channel_id'] else None
+                    after_channel = guild.get_channel(event['after_channel_id']) if event['after_channel_id'] else None
+                    
+                    # Criar objetos VoiceState aproximados
+                    before = discord.VoiceState(data={
+                        'channel': before_channel,
+                        'self_deaf': event['before_self_deaf'],
+                        'deaf': event['before_deaf']
+                    }, guild=guild)
+                    
+                    after = discord.VoiceState(data={
+                        'channel': after_channel,
+                        'self_deaf': event['after_self_deaf'],
+                        'deaf': event['after_deaf']
+                    }, guild=guild)
+                    
+                    # Enfileirar para processamento
+                    await bot.voice_event_queue.put((
+                        event['event_type'],
+                        member,
+                        before,
+                        after
+                    ))
+                    
+                    processed_ids.append(event['id'])
+                    
+                except Exception as e:
+                    logger.error(f"Erro ao processar evento pendente {event['id']}: {e}")
+            
+            # Marcar como processados a cada lote
+            if processed_ids:
+                await bot.db.mark_events_as_processed(processed_ids)
+                processed_ids = []
+            
+            await asyncio.sleep(1)  # Pequeno delay entre lotes
+        
+        logger.info("Processamento de eventos pendentes concluído")
+        
+    except Exception as e:
+        logger.error(f"Erro no processamento de eventos pendentes: {e}")
+
+@log_task_metrics("check_current_voice_members")
+async def check_current_voice_members():
+    """Verifica todos os canais de voz e atualiza o estado interno"""
+    await bot.wait_until_ready()
+    
+    try:
+        logger.info("Iniciando verificação de membros em canais de voz...")
+        
+        for guild in bot.guilds:
+            for voice_channel in guild.voice_channels:
+                for member in voice_channel.members:
+                    if member.bot:
+                        continue
+                        
+                    # Verificar se já temos uma sessão ativa para este membro
+                    audio_key = (member.id, guild.id)
+                    if audio_key not in bot.active_sessions:
+                        # Criar uma sessão estimada
+                        bot.active_sessions[audio_key] = {
+                            'start_time': datetime.utcnow() - timedelta(minutes=5),  # Estimativa
+                            'last_audio_time': datetime.utcnow(),
+                            'audio_disabled': member.voice.self_deaf or member.voice.deaf,
+                            'total_audio_off_time': 0,
+                            'estimated': True  # Flag para indicar que é uma estimativa
+                        }
+                        
+                        logger.info(f"Sessão estimada criada para {member.display_name} no canal {voice_channel.name}")
+                        
+                        # Registrar como entrada no banco de dados
+                        try:
+                            await bot.db.log_voice_join(member.id, guild.id)
+                        except Exception as e:
+                            logger.error(f"Erro ao registrar entrada estimada: {e}")
+        
+        logger.info("Verificação de membros em canais de voz concluída")
+        
+    except Exception as e:
+        logger.error(f"Erro na verificação de canais de voz: {e}")
+
+@log_task_metrics("detect_missing_voice_leaves")
+async def detect_missing_voice_leaves():
+    """Detecta sessões que provavelmente foram encerradas durante uma queda"""
+    await bot.wait_until_ready()
+    
+    if not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
+        logger.error("Banco de dados não inicializado - pulando detecção de sessões perdidas")
+        return
+    
+    try:
+        logger.info("Iniciando detecção de sessões de voz perdidas...")
+        
+        # Obter todas as sessões ativas do banco de dados
+        cutoff_time = datetime.utcnow() - timedelta(minutes=10)
+        
+        async with bot.db.pool.acquire() as conn:
+            active_sessions = await conn.fetch('''
+                SELECT user_id, guild_id, last_voice_join 
+                FROM user_activity 
+                WHERE last_voice_leave IS NULL OR last_voice_leave < last_voice_join
+                AND last_voice_join < $1
+            ''', cutoff_time)
+            
+        for session in active_sessions:
+            guild = bot.get_guild(session['guild_id'])
+            if not guild:
+                continue
+                
+            member = guild.get_member(session['user_id'])
+            if not member:
+                continue
+                
+            # Verificar se o membro não está mais em um canal de voz
+            if not member.voice or not member.voice.channel:
+                # Calcular duração estimada
+                duration = (datetime.utcnow() - session['last_voice_join']).total_seconds()
+                
+                # Registrar saída no banco de dados
+                try:
+                    await bot.db.log_voice_leave(member.id, guild.id, int(duration))
+                    
+                    # Se tínhamos uma sessão ativa, remover
+                    audio_key = (member.id, guild.id)
+                    if audio_key in bot.active_sessions:
+                        del bot.active_sessions[audio_key]
+                        
+                    logger.info(f"Sessão estimada encerrada para {member.display_name} com duração de {duration//60} minutos")
+                    
+                except Exception as e:
+                    logger.error(f"Erro ao registrar saída estimada: {e}")
+        
+        logger.info("Detecção de sessões de voz perdidas concluída")
+        
+    except Exception as e:
+        logger.error(f"Erro na detecção de sessões perdidas: {e}")
+
+@log_task_metrics("cleanup_processed_events")
+async def cleanup_processed_events():
+    """Limpa eventos de voz já processados"""
+    await bot.wait_until_ready()
+    
+    while True:
+        try:
+            if hasattr(bot, 'db') and bot.db and bot.db._is_initialized:
+                async with bot.db.pool.acquire() as conn:
+                    # Limpar eventos com mais de 7 dias
+                    await conn.execute('''
+                        DELETE FROM pending_voice_events
+                        WHERE processed = TRUE
+                        AND event_time < NOW() - INTERVAL '7 days'
+                    ''')
+            
+            await asyncio.sleep(86400)  # Executar uma vez por dia
+        except Exception as e:
+            logger.error(f"Erro na limpeza de eventos processados: {e}")
+            await asyncio.sleep(3600)  # Tentar novamente em 1 hora se falhar
