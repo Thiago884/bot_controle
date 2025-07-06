@@ -340,31 +340,36 @@ class InactivityBot(commands.Bot):
             return
             
         try:
+            # Salvar no arquivo local
             with open(CONFIG_FILE, 'w') as f:
                 json.dump(self.config, f, indent=4)
             
+            # Salvar no banco de dados para cada guild relevante
             if hasattr(self, 'db') and self.db and self.db._is_initialized:
-                target_guild_id = guild_id if guild_id is not None else 0  # Usar 0 para configuração global
-                await self.db.save_config(target_guild_id, self.config)
-                logger.info(f"Configuração salva no banco para guild {target_guild_id}")
+                # Se guild_id não foi especificado, salvar para todas as guilds do bot
+                guilds_to_save = [guild_id] if guild_id is not None else [guild.id for guild in self.guilds]
+                
+                for gid in guilds_to_save:
+                    await self.db.save_config(gid, self.config)
+                    logger.info(f"Configuração salva no banco para guild {gid}")
             
             self._last_config_save = datetime.now()
         except Exception as e:
             logger.error(f"Erro ao salvar configuração: {e}")
 
-    def load_config(self):
-        """Carrega configuração (modificado)"""
+    async def load_config(self):
+        """Carrega configuração de forma assíncrona"""
         try:
-            # Tenta carregar do banco primeiro
+            # Primeiro tentar carregar do banco de dados
             if hasattr(self, 'db') and self.db and self.db._is_initialized:
                 try:
-                    db_config = asyncio.get_event_loop().run_until_complete(
-                        self.db.load_config(0)  # guild_id=0 para configuração global
-                    )
-                    if db_config:
-                        self.config = db_config
-                        logger.info("Configuração carregada do banco")
-                        return
+                    # Carregar configuração da primeira guild (assumindo configuração global)
+                    if self.guilds:
+                        db_config = await self.db.load_config(self.guilds[0].id)
+                        if db_config:
+                            self.config = db_config
+                            logger.info("Configuração carregada do banco de dados")
+                            return
                 except Exception as db_error:
                     logger.error(f"Erro ao carregar do banco: {db_error}")
             
@@ -387,6 +392,31 @@ class InactivityBot(commands.Bot):
         except Exception as e:
             logger.error(f"Erro ao carregar configuração: {e}")
             self.config = DEFAULT_CONFIG
+
+    async def setup_hook(self):
+        """Configurações assíncronas antes do bot ficar pronto"""
+        if self._setup_complete:
+            return
+        
+        # Carregar configurações de forma assíncrona
+        await self.load_config()
+        
+        # Inicializar banco de dados
+        await self.initialize_db()
+        
+        # Prossiga apenas se a conexão com o DB for bem-sucedida
+        if self.db and not self.db_connection_failed:
+            try:
+                synced = await self.tree.sync()
+                logger.info(f"Comandos slash sincronizados: {len(synced)} comandos.")
+            except Exception as e:
+                logger.error(f"Erro ao sincronizar comandos slash: {e}")
+
+            self._setup_complete = True
+            logger.info("Setup hook concluído.")
+        else:
+            logger.critical("Falha na inicialização do banco de dados. As tarefas não serão iniciadas.")
+            self.db_connection_failed = True
 
     async def send_with_fallback(self, destination, content=None, embed=None, file=None):
         """Envia mensagens com tratamento de erros e fallback para rate limits."""
@@ -421,35 +451,6 @@ class InactivityBot(commands.Bot):
             f"```python\n{tb_details[:1800]}\n```"
         )
         await self.log_action("Erro Crítico de Evento", details=log_message)
-
-    async def setup_hook(self):
-        """
-        Este hook é executado automaticamente após o login, mas antes de o bot
-        ser marcado como pronto. É o local ideal para configurações assíncronas.
-        """
-        # Adicione esta flag para controlar o início das tasks
-        self._tasks_started = False
-
-        if self._setup_complete:
-            return
-        
-        self.load_config()
-        await self.initialize_db()
-        
-        # Prossiga apenas se a conexão com o DB for bem-sucedida
-        if self.db and not self.db_connection_failed:
-            # Sincronizar comandos slash
-            try:
-                synced = await self.tree.sync()
-                logger.info(f"Comandos slash sincronizados: {len(synced)} comandos.")
-            except Exception as e:
-                logger.error(f"Erro ao sincronizar comandos slash: {e}")
-
-            self._setup_complete = True
-            logger.info("Setup hook concluído. A inicialização das tarefas aguardará o evento on_ready.")
-        else:
-            logger.critical("Falha na inicialização do banco de dados. As tarefas não serão iniciadas.")
-            self.db_connection_failed = True
 
     async def check_audio_states(self):
         await self.wait_until_ready()
@@ -1071,6 +1072,9 @@ async def on_ready():
         
         logger.info(f'Bot conectado como {bot.user}')
         logger.info(f"Latência: {round(bot.latency * 1000)}ms")
+        
+        # Garantir que as configurações estão salvas no banco
+        await bot.save_config()
         
         if hasattr(bot, '_ready_set') and bot._ready_set:
             return
