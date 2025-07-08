@@ -63,31 +63,24 @@ class DatabaseBackup:
                 with open(backup_file, 'w', encoding='utf-8') as f:
                     for table in tables:
                         table_name = table['table_name']
-                        # Obter a estrutura da tabela de forma mais simples e confiável
                         try:
-                            # Primeiro tentar com pg_dump (se disponível)
-                            create_table = await conn.fetchval(f"""
-                                SELECT pg_get_tabledef('{table_name}')
-                            """)
-                            
-                            if not create_table:
-                                # Fallback para query mais simples se pg_get_tabledef não funcionar
-                                create_table = await conn.fetchval(f"""
-                                    SELECT 'CREATE TABLE ' || quote_ident(table_name) || ' (' || 
-                                           string_agg(column_definition, ', ') || ');'
-                                    FROM (
-                                        SELECT 
-                                            table_name,
-                                            quote_ident(column_name) || ' ' || 
-                                            data_type || 
-                                            CASE WHEN is_nullable = 'NO' THEN ' NOT NULL' ELSE '' END || 
-                                            CASE WHEN column_default IS NOT NULL THEN ' DEFAULT ' || column_default ELSE '' END AS column_definition
-                                        FROM information_schema.columns
-                                        WHERE table_name = $1 AND table_schema = 'public'
-                                        ORDER by ordinal_position
-                                    ) AS cols
-                                    GROUP BY table_name;
-                                """, table_name)
+                            # Usar apenas a query alternativa, removendo a tentativa com pg_get_tabledef
+                            create_table = await conn.fetchval('''
+                                SELECT 'CREATE TABLE ' || quote_ident(table_name) || ' (' || 
+                                       string_agg(column_definition, ', ') || ');'
+                                FROM (
+                                    SELECT 
+                                        table_name,
+                                        quote_ident(column_name) || ' ' || 
+                                        data_type || 
+                                        CASE WHEN is_nullable = 'NO' THEN ' NOT NULL' ELSE '' END || 
+                                        CASE WHEN column_default IS NOT NULL THEN ' DEFAULT ' || column_default ELSE '' END AS column_definition
+                                    FROM information_schema.columns
+                                    WHERE table_name = $1 AND table_schema = 'public'
+                                    ORDER by ordinal_position
+                                ) AS cols
+                                GROUP BY table_name;
+                            ''', table_name)
                             
                             if create_table:
                                 f.write(f"{create_table};\n\n")
@@ -973,7 +966,7 @@ class Database:
         """Limpa dados antigos do banco de dados"""
         conn = None
         try:
-            cutoff_date = datetime.now(pytz.utc) - timedelta(days=days)
+            cutoff_date = datetime.now(pytz.utc) - timedelta(days=days)  # Garantir UTC
             
             conn = await self.pool.acquire()
             async with conn.transaction():
