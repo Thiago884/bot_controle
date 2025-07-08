@@ -228,7 +228,7 @@ def dashboard():
         bot_user_name = bot.user.name if hasattr(bot, 'user') and bot.user else "Inactivity Bot"
         uptime = "N/A"
         if hasattr(bot, 'start_time'):
-            delta = datetime.datetime.now() - bot.start_time
+            delta = datetime.datetime.now(pytz.utc) - bot.start_time
             uptime = str(delta).split('.')[0]
         
         guild_stats = []
@@ -346,7 +346,7 @@ def panel_status():
             'status': 'running',
             'bot_ready': is_bot_ready(),
             'guild_count': len(bot.guilds) if hasattr(bot, 'guilds') else 0,
-            'last_heartbeat': datetime.datetime.now().isoformat(),
+            'last_heartbeat': datetime.datetime.now(pytz.utc).isoformat(),
             'panel_version': '1.0.0'
         })
     except Exception as e:
@@ -362,7 +362,7 @@ def system_info():
             'memory_usage': psutil.virtual_memory().percent,
             'disk_usage': psutil.disk_usage('/').percent,
             'process_memory': psutil.Process().memory_info().rss / 1024 / 1024,  # em MB
-            'uptime': str(datetime.datetime.now() - bot.start_time).split('.')[0] if hasattr(bot, 'start_time') else 'N/A'
+            'uptime': str(datetime.datetime.now(pytz.utc) - bot.start_time).split('.')[0] if hasattr(bot, 'start_time') else 'N/A'
         })
     except Exception as e:
         web_logger.error(f"Erro ao obter informações do sistema: {e}", exc_info=True)
@@ -394,7 +394,7 @@ def get_system_status():
         
         uptime = "N/A"
         if hasattr(bot, 'start_time'):
-            delta = datetime.datetime.now() - bot.start_time
+            delta = datetime.datetime.now(pytz.utc) - bot.start_time
             uptime = str(delta).split('.')[0]
         
         guild_count = len(bot.guilds) if hasattr(bot, 'guilds') else 0

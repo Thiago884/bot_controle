@@ -1183,7 +1183,7 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
         after_self_deaf = after.self_deaf
         after_deaf = after.deaf
         
-        # Salvar o evento no banco de dados antes de enfileirar
+        # Salvar o evento no banco de dados com timestamp UTC
         await bot.db.save_pending_voice_event(
             'voice_state_update',
             member.id,

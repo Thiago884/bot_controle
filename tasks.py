@@ -1492,6 +1492,8 @@ async def process_pending_voice_events():
     except Exception as e:
         logger.error(f"Erro no processamento de eventos pendentes: {e}")
 
+# /src/tasks.py
+
 @log_task_metrics("check_current_voice_members")
 async def check_current_voice_members():
     """Verifica todos os canais de voz e atualiza o estado interno"""
@@ -1511,8 +1513,8 @@ async def check_current_voice_members():
                     if audio_key not in bot.active_sessions:
                         # Criar uma sessão estimada
                         bot.active_sessions[audio_key] = {
-                            'start_time': datetime.utcnow() - timedelta(minutes=5),  # Estimativa
-                            'last_audio_time': datetime.utcnow(),
+                            'start_time': datetime.now(pytz.utc) - timedelta(minutes=5),  # CORRIGIDO: Usando UTC
+                            'last_audio_time': datetime.now(pytz.utc), # CORRIGIDO: Usando UTC
                             'audio_disabled': member.voice.self_deaf or member.voice.deaf,
                             'total_audio_off_time': 0,
                             'estimated': True  # Flag para indicar que é uma estimativa
@@ -1543,15 +1545,13 @@ async def detect_missing_voice_leaves():
         logger.info("Iniciando detecção de sessões de voz perdidas...")
         
         # Obter todas as sessões ativas do banco de dados
-        cutoff_time = datetime.now(pytz.utc) - timedelta(minutes=10)
-        
         async with bot.db.pool.acquire() as conn:
             active_sessions = await conn.fetch('''
                 SELECT user_id, guild_id, last_voice_join 
                 FROM user_activity 
                 WHERE last_voice_leave IS NULL OR last_voice_leave < last_voice_join
-                AND last_voice_join < $1
-            ''', cutoff_time)
+                AND last_voice_join < NOW() - INTERVAL '10 minutes'
+            ''')
             
         for session in active_sessions:
             guild = bot.get_guild(session['guild_id'])
@@ -1564,13 +1564,8 @@ async def detect_missing_voice_leaves():
                 
             # Verificar se o membro não está mais em um canal de voz
             if not member.voice or not member.voice.channel:
-                # Converter last_voice_join para UTC se necessário
-                last_join = session['last_voice_join']
-                if last_join.tzinfo is None:
-                    last_join = last_join.replace(tzinfo=pytz.utc)
-                
                 # Calcular duração estimada
-                duration = (datetime.now(pytz.utc) - last_join).total_seconds()
+                duration = (datetime.now(pytz.utc) - session['last_voice_join']).total_seconds()
                 
                 # Registrar saída no banco de dados
                 try:
@@ -1589,7 +1584,7 @@ async def detect_missing_voice_leaves():
         logger.info("Detecção de sessões de voz perdidas concluída")
     except Exception as e:
         logger.error(f"Erro na detecção de sessões perdidas: {e}")
-
+        
 @log_task_metrics("cleanup_processed_events")
 async def cleanup_processed_events():
     """Limpa eventos de voz já processados"""

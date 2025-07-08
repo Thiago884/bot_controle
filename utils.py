@@ -9,6 +9,7 @@ import time
 from datetime import datetime, timedelta
 import numpy as np
 from collections import deque
+import pytz
 
 logger = logging.getLogger('inactivity_bot')
 
@@ -48,7 +49,7 @@ def calculate_most_active_days(sessions: List[Dict], days: int) -> List[Tuple[st
     day_stats = {}
     
     for session in sessions:
-        join_time = session['join_time'].replace(tzinfo=None)
+        join_time = session['join_time'].astimezone(pytz.utc)
         date_str = join_time.strftime('%d/%m/%Y')
         day_name = weekdays[join_time.weekday()]
         duration_min = session['duration'] // 60
@@ -88,8 +89,8 @@ async def generate_activity_graph(member: discord.Member, sessions: List[Dict], 
         await check_graph_rate_limit()
         
         # Filtrar sessões para o período solicitado
-        cutoff_date = datetime.now() - timedelta(days=days)
-        filtered_sessions = [s for s in sessions if s['join_time'].replace(tzinfo=None) >= cutoff_date]
+        cutoff_date = datetime.now(pytz.utc) - timedelta(days=days)
+        filtered_sessions = [s for s in sessions if s['join_time'].astimezone(pytz.utc) >= cutoff_date]
         
         if not filtered_sessions:
             return None
@@ -98,7 +99,7 @@ async def generate_activity_graph(member: discord.Member, sessions: List[Dict], 
         dates = []
         durations = []
         for session in filtered_sessions:
-            join_time = session['join_time'].replace(tzinfo=None)
+            join_time = session['join_time'].astimezone(pytz.utc)
             dates.append(join_time)
             durations.append(session['duration'] / 60)  # Converter para minutos
 
@@ -132,8 +133,8 @@ async def generate_activity_graph(member: discord.Member, sessions: List[Dict], 
                         ha='center', va='bottom', fontsize=9)
 
         # Configurar título e labels com o período
-        start_date = (datetime.now() - timedelta(days=days)).strftime('%d/%m/%Y')
-        end_date = datetime.now().strftime('%d/%m/%Y')
+        start_date = (datetime.now(pytz.utc) - timedelta(days=days)).strftime('%d/%m/%Y')
+        end_date = datetime.now(pytz.utc).strftime('%d/%m/%Y')
         plt.title(f'Atividade de Voz - {member.display_name}\nPeríodo: {start_date} a {end_date} ({days} dias)', 
                  fontsize=12, pad=12)
         plt.xlabel('Data', fontsize=10)
