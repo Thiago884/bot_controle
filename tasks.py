@@ -350,7 +350,7 @@ async def execute_task_with_persistent_interval(task_name: str, monitoring_perio
         try:
             # Verificar última execução
             last_exec = await bot.db.get_last_task_execution(task_name)
-            now = datetime.utcnow()
+            now = datetime.now(pytz.utc)  # Usar UTC
             
             # Calcular se deve executar agora
             should_execute = False
@@ -360,7 +360,8 @@ async def execute_task_with_persistent_interval(task_name: str, monitoring_perio
                 logger.info(f"Primeira execução da task {task_name}")
             else:
                 # Verificar se passou 24h desde a última execução
-                time_since_last = now - last_exec['last_execution']
+                last_exec_time = last_exec['last_execution'].replace(tzinfo=pytz.utc) if last_exec['last_execution'].tzinfo is None else last_exec['last_execution']
+                time_since_last = now - last_exec_time
                 if time_since_last >= timedelta(hours=24):
                     should_execute = True
                     logger.info(f"24h passaram - executando task {task_name}")
@@ -883,8 +884,11 @@ async def _cleanup_old_data():
         return
     
     try:
+        # Usar UTC para o cutoff_date
+        cutoff_date = datetime.now(pytz.utc) - timedelta(days=60)
+        
         start_time = time.time()
-        log_message = await bot.db.cleanup_old_data()
+        log_message = await bot.db.cleanup_old_data(days=60)
         perf_metrics.record_db_query(time.time() - start_time)
         
         if log_message:
@@ -1561,8 +1565,13 @@ async def detect_missing_voice_leaves():
                 
             # Verificar se o membro não está mais em um canal de voz
             if not member.voice or not member.voice.channel:
+                # Converter last_voice_join para UTC se necessário
+                last_join = session['last_voice_join']
+                if last_join.tzinfo is None:
+                    last_join = last_join.replace(tzinfo=pytz.utc)
+                
                 # Calcular duração estimada
-                duration = (datetime.now(pytz.utc) - session['last_voice_join']).total_seconds()
+                duration = (datetime.now(pytz.utc) - last_join).total_seconds()
                 
                 # Registrar saída no banco de dados
                 try:

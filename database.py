@@ -491,36 +491,36 @@ class Database:
                         await self.pool.release(conn)
                     raise
 
-    async def save_pending_voice_event(self, event_type: str, user_id: int, guild_id: int,
-                                     before_channel_id: Optional[int], after_channel_id: Optional[int],
-                                     before_self_deaf: Optional[bool], before_deaf: Optional[bool],
-                                     after_self_deaf: Optional[bool], after_deaf: Optional[bool]):
-        """Salva um evento de voz pendente no banco de dados"""
-        conn = None
-        try:
-            conn = await self.pool.acquire()
-            await conn.execute('''
-                INSERT INTO pending_voice_events 
-                (event_type, user_id, guild_id, before_channel_id, after_channel_id,
-                 before_self_deaf, before_deaf, after_self_deaf, after_deaf, event_time)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-            ''', 
-            event_type,
-            user_id,
-            guild_id,
-            before_channel_id,
-            after_channel_id,
-            before_self_deaf,
-            before_deaf,
-            after_self_deaf,
-            after_deaf,
-            datetime.now(pytz.utc))  # Garantir UTC timezone
-        except Exception as e:
-            logger.error(f"Erro ao salvar evento pendente: {e}")
-            raise
-        finally:
-            if conn:
-                await self.pool.release(conn)
+async def save_pending_voice_event(self, event_type: str, user_id: int, guild_id: int,
+                                 before_channel_id: Optional[int], after_channel_id: Optional[int],
+                                 before_self_deaf: Optional[bool], before_deaf: Optional[bool],
+                                 after_self_deaf: Optional[bool], after_deaf: Optional[bool]):
+    """Salva um evento de voz pendente no banco de dados"""
+    conn = None
+    try:
+        conn = await self.pool.acquire()
+        await conn.execute('''
+            INSERT INTO pending_voice_events 
+            (event_type, user_id, guild_id, before_channel_id, after_channel_id,
+             before_self_deaf, before_deaf, after_self_deaf, after_deaf, event_time)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        ''', 
+        event_type,
+        user_id,
+        guild_id,
+        before_channel_id,
+        after_channel_id,
+        before_self_deaf,
+        before_deaf,
+        after_self_deaf,
+        after_deaf,
+        datetime.now(pytz.utc))  # Garantir UTC timezone
+    except Exception as e:
+        logger.error(f"Erro ao salvar evento pendente: {e}")
+        raise
+    finally:
+        if conn:
+            await self.pool.release(conn)
 
     async def get_pending_voice_events(self, limit: int = 100) -> List[Dict]:
         """Obtém eventos de voz pendentes para processamento"""
@@ -1093,26 +1093,25 @@ class Database:
         finally:
             if conn:
                 await self.pool.release(conn)
-
-    async def log_task_execution(self, task_name: str, monitoring_period: int):
-        """Registra execução de uma task"""
-        conn = None
-        try:
-            conn = await self.pool.acquire()
-            await conn.execute('''
-                INSERT INTO task_executions 
-                (task_name, last_execution, monitoring_period) 
-                VALUES ($1, $2, $3)
-                ON CONFLICT (task_name) DO UPDATE 
-                SET last_execution = EXCLUDED.last_execution,
-                    monitoring_period = EXCLUDED.monitoring_period
-            ''', task_name, datetime.now(pytz.utc), monitoring_period)
-        except Exception as e:
-            logger.error(f"Erro ao registrar execução da task: {e}")
-            raise
-        finally:
-            if conn:
-                await self.pool.release(conn)
+async def log_task_execution(self, task_name: str, monitoring_period: int):
+    """Registra execução de uma task"""
+    conn = None
+    try:
+        conn = await self.pool.acquire()
+        await conn.execute('''
+            INSERT INTO task_executions 
+            (task_name, last_execution, monitoring_period) 
+            VALUES ($1, $2, $3)
+            ON CONFLICT (task_name) DO UPDATE 
+            SET last_execution = EXCLUDED.last_execution,
+                monitoring_period = EXCLUDED.monitoring_period
+        ''', task_name, datetime.now(pytz.utc), monitoring_period)  # Garantir UTC timezone
+    except Exception as e:
+        logger.error(f"Erro ao registrar execução da task: {e}")
+        raise
+    finally:
+        if conn:
+            await self.pool.release(conn)
 
     async def health_check(self):
         """Verifica a saúde do banco de dados e reinicia tasks se necessário"""
