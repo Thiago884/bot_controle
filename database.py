@@ -521,7 +521,7 @@ class Database:
             before_deaf,
             after_self_deaf,
             after_deaf,
-            datetime.now(pytz.utc))  # CORRIGIDO
+            datetime.now(pytz.utc))  # Garantir UTC timezone
         except Exception as e:
             logger.error(f"Erro ao salvar evento pendente: {e}")
             raise
@@ -574,7 +574,7 @@ class Database:
         try:
             # Atualizar cache
             self._config_cache[guild_id] = config
-            self._last_config_update = datetime.now(pytz.utc)  # CORRIGIDO
+            self._last_config_update = datetime.now(pytz.utc)  # Garantir UTC timezone
             
             # Serializar para JSON
             config_json = json.dumps(config)
@@ -586,7 +586,7 @@ class Database:
                 ON CONFLICT (guild_id) DO UPDATE
                 SET config_json = EXCLUDED.config_json,
                     last_updated = EXCLUDED.last_updated
-            ''', guild_id, config_json, datetime.now(pytz.utc))  # CORRIGIDO
+            ''', guild_id, config_json, datetime.now(pytz.utc))  # Garantir UTC timezone
             
             logger.info(f"Configuração salva no banco de dados para a guild {guild_id}")
             return True
@@ -608,7 +608,7 @@ class Database:
             return DEFAULT_CONFIG.get(guild_id, None)
         
         # Forçar atualização do cache a cada hora
-        if self._last_config_update and (datetime.now(pytz.utc) - self._last_config_update).total_seconds() > 3600:  # CORRIGIDO
+        if self._last_config_update and (datetime.now(pytz.utc) - self._last_config_update).total_seconds() > 3600:
             if guild_id in self._config_cache:
                 del self._config_cache[guild_id]
         
@@ -629,7 +629,7 @@ class Database:
                 config = json.loads(result['config_json'])
                 # Atualizar cache
                 self._config_cache[guild_id] = config
-                self._last_config_update = datetime.now(pytz.utc)  # CORRIGIDO
+                self._last_config_update = datetime.now(pytz.utc)
                 
                 logger.info(f"Configuração carregada do banco de dados para a guild {guild_id}")
                 return config
@@ -663,7 +663,7 @@ class Database:
                 except json.JSONDecodeError as e:
                     logger.error(f"Erro ao decodificar JSON para guild {row['guild_id']}: {e}")
             
-            self._last_config_update = datetime.now(pytz.utc)  # CORRIGIDO
+            self._last_config_update = datetime.now(pytz.utc)
             return configs
         except Exception as e:
             logger.error(f"Erro ao carregar configurações múltiplas: {e}")
@@ -674,7 +674,7 @@ class Database:
 
     async def log_voice_join(self, user_id: int, guild_id: int):
         """Registra entrada em canal de voz"""
-        now = datetime.now(pytz.utc)  # CORRIGIDO
+        now = datetime.now(pytz.utc)
         conn = None
         try:
             conn = await self.pool.acquire()
@@ -695,7 +695,7 @@ class Database:
 
     async def log_voice_leave(self, user_id: int, guild_id: int, duration: int):
         """Registra saída de canal de voz"""
-        now = datetime.now(pytz.utc)  # CORRIGIDO
+        now = datetime.now(pytz.utc)
         conn = None
         try:
             conn = await self.pool.acquire()
@@ -808,7 +808,7 @@ class Database:
 
     async def log_warning(self, user_id: int, guild_id: int, warning_type: str):
         """Registra aviso enviado ao usuário"""
-        now = datetime.now(pytz.utc)  # CORRIGIDO
+        now = datetime.now(pytz.utc)
         conn = None
         try:
             conn = await self.pool.acquire()
@@ -862,7 +862,7 @@ class Database:
                         VALUES ($1, $2, $3, $4)
                         ON CONFLICT (user_id, guild_id, role_id) DO UPDATE 
                         SET removal_date = EXCLUDED.removal_date
-                    ''', user_id, guild_id, role_id, datetime.now(pytz.utc))  # CORRIGIDO
+                    ''', user_id, guild_id, role_id, datetime.now(pytz.utc))
         except Exception as e:
             logger.error(f"Erro ao registrar cargos removidos: {e}")
             raise
@@ -872,7 +872,7 @@ class Database:
 
     async def log_kicked_member(self, user_id: int, guild_id: int, reason: str):
         """Registra membro expulso por inatividade"""
-        now = datetime.now(pytz.utc)  # CORRIGIDO
+        now = datetime.now(pytz.utc)
         conn = None
         try:
             conn = await self.pool.acquire()
@@ -973,7 +973,7 @@ class Database:
         """Limpa dados antigos do banco de dados"""
         conn = None
         try:
-            cutoff_date = datetime.now(pytz.utc) - timedelta(days=days)  # CORRIGIDO
+            cutoff_date = datetime.now(pytz.utc) - timedelta(days=days)
             
             conn = await self.pool.acquire()
             async with conn.transaction():
@@ -1018,7 +1018,7 @@ class Database:
         conn = None
         try:
             # Converter reset timestamp para datetime se existir
-            reset_at = datetime.fromtimestamp(data['reset'], pytz.utc) if data.get('reset') else None  # CORRIGIDO
+            reset_at = datetime.fromtimestamp(data['reset'], pytz.utc) if data.get('reset') else None
             
             conn = await self.pool.acquire()
             await conn.execute('''
@@ -1048,7 +1048,7 @@ class Database:
         """Obtém histórico de rate limits para uma guild"""
         conn = None
         try:
-            since = datetime.now(pytz.utc) - timedelta(hours=hours)  # CORRIGIDO
+            since = datetime.now(pytz.utc) - timedelta(hours=hours)
             conn = await self.pool.acquire()
             results = await conn.fetch('''
                 SELECT bucket, limit_count, remaining, reset_at, scope, endpoint, retry_after, log_date
@@ -1069,7 +1069,7 @@ class Database:
         """Limpa logs de rate limit antigos"""
         conn = None
         try:
-            cutoff_date = datetime.now(pytz.utc) - timedelta(days=days)  # CORRIGIDO
+            cutoff_date = datetime.now(pytz.utc) - timedelta(days=days)
             conn = await self.pool.acquire()
             result = await conn.execute("DELETE FROM rate_limit_logs WHERE log_date < $1", cutoff_date)
             deleted_count = int(result.split()[1])
@@ -1113,7 +1113,7 @@ class Database:
                 ON CONFLICT (task_name) DO UPDATE 
                 SET last_execution = EXCLUDED.last_execution,
                     monitoring_period = EXCLUDED.monitoring_period
-            ''', task_name, datetime.now(pytz.utc), monitoring_period)  # CORRIGIDO
+            ''', task_name, datetime.now(pytz.utc), monitoring_period)
         except Exception as e:
             logger.error(f"Erro ao registrar execução da task: {e}")
             raise

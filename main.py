@@ -721,6 +721,9 @@ class InactivityBot(commands.Bot):
         session_data = self.active_sessions.get((member.id, member.guild.id))
         if session_data:
             try:
+                # Verificar se o canal existe antes de acessar o nome
+                channel_name = before.channel.name if before.channel else "Canal desconhecido"
+                
                 total_time = (datetime.now(pytz.utc) - session_data['start_time']).total_seconds()
                 audio_off_time = session_data.get('total_audio_off_time', 0)
                 
@@ -730,16 +733,15 @@ class InactivityBot(commands.Bot):
                 
                 effective_time = total_time - audio_off_time
                 
-                if effective_time >= self.config['required_minutes'] * 60:
-                    try:
-                        # Registrar saída no banco de dados
-                        await self.db.log_voice_leave(member.id, member.guild.id, int(effective_time))
-                    except Exception as e:
-                        logger.error(f"Erro ao registrar saída de voz: {e}")
-                        await self.log_action(
-                            "Erro DB - Saída de voz",
-                            member,
-                            str(e))
+                # Registrar saída no banco de dados mesmo que o tempo seja menor que o requerido
+                try:
+                    await self.db.log_voice_leave(member.id, member.guild.id, int(effective_time))
+                except Exception as e:
+                    logger.error(f"Erro ao registrar saída de voz: {e}")
+                    await self.log_action(
+                        "Erro DB - Saída de voz",
+                        member,
+                        str(e))
                 
                 embed = discord.Embed(
                     title="🚪 Saiu de Voz",
@@ -747,7 +749,7 @@ class InactivityBot(commands.Bot):
                     timestamp=datetime.now(self.timezone))
                 embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
                 embed.add_field(name="Usuário", value=member.mention, inline=True)
-                embed.add_field(name="Canal", value=before.channel.name, inline=True)
+                embed.add_field(name="Canal", value=channel_name, inline=True)
                 embed.add_field(name="Tempo Efetivo", 
                               value=f"{int(effective_time//60)} minutos {int(effective_time%60)} segundos", 
                               inline=True)
@@ -758,11 +760,13 @@ class InactivityBot(commands.Bot):
                 
                 await self.log_action(None, None, embed=embed)
                 
-                del self.active_sessions[(member.id, member.guild.id)]
-            except KeyError:
-                pass
+            except KeyError as e:
+                logger.warning(f"Chave não encontrada em session_data: {e}")
             except Exception as e:
                 logger.error(f"Erro ao processar saída de voz: {e}")
+            finally:
+                # Garantir que a sessão seja removida mesmo em caso de erro
+                self.active_sessions.pop((member.id, member.guild.id), None)
 
     async def _handle_voice_move(self, member, before, after, absence_channel_id):
         audio_key = (member.id, member.guild.id)

@@ -1540,7 +1540,7 @@ async def detect_missing_voice_leaves():
         logger.info("Iniciando detecção de sessões de voz perdidas...")
         
         # Obter todas as sessões ativas do banco de dados
-        cutoff_time = datetime.utcnow() - timedelta(minutes=10)
+        cutoff_time = datetime.now(pytz.utc) - timedelta(minutes=10)
         
         async with bot.db.pool.acquire() as conn:
             active_sessions = await conn.fetch('''
@@ -1562,7 +1562,7 @@ async def detect_missing_voice_leaves():
             # Verificar se o membro não está mais em um canal de voz
             if not member.voice or not member.voice.channel:
                 # Calcular duração estimada
-                duration = (datetime.utcnow() - session['last_voice_join']).total_seconds()
+                duration = (datetime.now(pytz.utc) - session['last_voice_join']).total_seconds()
                 
                 # Registrar saída no banco de dados
                 try:
