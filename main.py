@@ -353,7 +353,7 @@ class InactivityBot(commands.Bot):
                     await self.db.save_config(gid, self.config)
                     logger.info(f"Configuração salva no banco para guild {gid}")
             
-            self._last_config_save = datetime.now()
+            self._last_config_save = datetime.now(pytz.utc)
         except Exception as e:
             logger.error(f"Erro ao salvar configuração: {e}")
 
@@ -465,9 +465,9 @@ class InactivityBot(commands.Bot):
                                 
                                 if current_audio_state and not self.active_sessions[audio_key]['audio_disabled']:
                                     self.active_sessions[audio_key]['audio_disabled'] = True
-                                    self.active_sessions[audio_key]['audio_off_time'] = datetime.utcnow()
+                                    self.active_sessions[audio_key]['audio_off_time'] = datetime.now(pytz.utc)
                                     
-                                    time_in_voice = (datetime.utcnow() - self.active_sessions[audio_key]['start_time']).total_seconds()
+                                    time_in_voice = (datetime.now(pytz.utc) - self.active_sessions[audio_key]['start_time']).total_seconds()
                                     embed = discord.Embed(
                                         title="🔇 Áudio Desativado (Verificação Periódica)",
                                         color=discord.Color.orange(),
@@ -483,12 +483,12 @@ class InactivityBot(commands.Bot):
                                 elif not current_audio_state and self.active_sessions[audio_key]['audio_disabled']:
                                     self.active_sessions[audio_key]['audio_disabled'] = False
                                     if 'audio_off_time' in self.active_sessions[audio_key]:
-                                        audio_off_duration = (datetime.utcnow() - self.active_sessions[audio_key]['audio_off_time']).total_seconds()
+                                        audio_off_duration = (datetime.now(pytz.utc) - self.active_sessions[audio_key]['audio_off_time']).total_seconds()
                                         self.active_sessions[audio_key]['total_audio_off_time'] = \
                                             self.active_sessions[audio_key].get('total_audio_off_time', 0) + audio_off_duration
                                         del self.active_sessions[audio_key]['audio_off_time']
                                         
-                                        total_time = (datetime.utcnow() - self.active_sessions[audio_key]['start_time']).total_seconds()
+                                        total_time = (datetime.now(pytz.utc) - self.active_sessions[audio_key]['start_time']).total_seconds()
                                         embed = discord.Embed(
                                             title="🔊 Áudio Reativado (Verificação Periódica)",
                                             color=discord.Color.green(),
@@ -561,7 +561,7 @@ class InactivityBot(commands.Bot):
                         )
                 
                 if (self._last_config_save is None or 
-                    (datetime.now() - self._last_config_save).total_seconds() > self._config_save_interval):
+                    (datetime.now(pytz.utc) - self._last_config_save).total_seconds() > self._config_save_interval):
                     await self.save_config()
                 
                 await asyncio.sleep(self._health_check_interval)
@@ -662,7 +662,7 @@ class InactivityBot(commands.Bot):
                     if before.channel is not None and after.channel is None:
                         # Ajustar o tempo inicial para refletir melhor a realidade
                         estimated_start = self.active_sessions[audio_key]['start_time']
-                        actual_start = max(estimated_start, datetime.utcnow() - timedelta(hours=1))  # No máximo 1 hora
+                        actual_start = max(estimated_start, datetime.now(pytz.utc) - timedelta(hours=1))  # No máximo 1 hora
                         self.active_sessions[audio_key]['start_time'] = actual_start
                         self.active_sessions[audio_key]['estimated'] = False  # Não é mais estimada
                 
@@ -688,8 +688,8 @@ class InactivityBot(commands.Bot):
             await self.db.log_voice_join(member.id, member.guild.id)
             
             self.active_sessions[(member.id, member.guild.id)] = {
-                'start_time': datetime.utcnow(),
-                'last_audio_time': datetime.utcnow(),
+                'start_time': datetime.now(pytz.utc),
+                'last_audio_time': datetime.now(pytz.utc),
                 'audio_disabled': after.self_deaf or after.deaf,
                 'total_audio_off_time': 0,
                 'estimated': False  # Nova flag para indicar sessões estimadas
@@ -721,11 +721,11 @@ class InactivityBot(commands.Bot):
         session_data = self.active_sessions.get((member.id, member.guild.id))
         if session_data:
             try:
-                total_time = (datetime.utcnow() - session_data['start_time']).total_seconds()
+                total_time = (datetime.now(pytz.utc) - session_data['start_time']).total_seconds()
                 audio_off_time = session_data.get('total_audio_off_time', 0)
                 
                 if session_data.get('audio_disabled'):
-                    audio_off_duration = (datetime.utcnow() - session_data.get('audio_off_time', session_data['start_time'])).total_seconds()
+                    audio_off_duration = (datetime.now(pytz.utc) - session_data.get('audio_off_time', session_data['start_time'])).total_seconds()
                     audio_off_time += audio_off_duration
                 
                 effective_time = total_time - audio_off_time
@@ -798,12 +798,12 @@ class InactivityBot(commands.Bot):
         if audio_was_off and not audio_is_off:
             self.active_sessions[audio_key]['audio_disabled'] = False
             if 'audio_off_time' in self.active_sessions[audio_key]:
-                audio_off_duration = (datetime.utcnow() - self.active_sessions[audio_key]['audio_off_time']).total_seconds()
+                audio_off_duration = (datetime.now(pytz.utc) - self.active_sessions[audio_key]['audio_off_time']).total_seconds()
                 self.active_sessions[audio_key]['total_audio_off_time'] = \
                     self.active_sessions[audio_key].get('total_audio_off_time', 0) + audio_off_duration
                 del self.active_sessions[audio_key]['audio_off_time']
                 
-                total_time = (datetime.utcnow() - self.active_sessions[audio_key]['start_time']).total_seconds()
+                total_time = (datetime.now(pytz.utc) - self.active_sessions[audio_key]['start_time']).total_seconds()
                 embed = discord.Embed(
                     title="🔊 Áudio Reativado",
                     color=discord.Color.green(),
@@ -823,9 +823,9 @@ class InactivityBot(commands.Bot):
         
         elif not audio_was_off and audio_is_off:
             self.active_sessions[audio_key]['audio_disabled'] = True
-            self.active_sessions[audio_key]['audio_off_time'] = datetime.utcnow()
+            self.active_sessions[audio_key]['audio_off_time'] = datetime.now(pytz.utc)
             
-            time_in_voice = (datetime.utcnow() - self.active_sessions[audio_key]['start_time']).total_seconds()
+            time_in_voice = (datetime.now(pytz.utc) - self.active_sessions[audio_key]['start_time']).total_seconds()
             embed = discord.Embed(
                 title="🔇 Áudio Desativado",
                 color=discord.Color.orange(),

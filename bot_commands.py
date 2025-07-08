@@ -10,6 +10,7 @@ from utils import generate_activity_report, calculate_most_active_days
 import numpy as np
 import time
 from tasks import perf_metrics
+import pytz  # Added import for UTC timezone handling
 
 logger = logging.getLogger('inactivity_bot')
 
@@ -694,8 +695,8 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
         # Adicionar delay inicial para evitar rate limit
         await asyncio.sleep(2)
         
-        # Definir período de análise
-        end_date = datetime.now(bot.timezone)
+        # Definir período de análise em UTC
+        end_date = datetime.now(pytz.utc)
         start_date = end_date - timedelta(days=days)
         
         # Coletar dados básicos
@@ -908,7 +909,8 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
                 
         await interaction.response.defer(thinking=True)
         
-        end_date = datetime.now(bot.timezone)
+        # Definir período de análise em UTC
+        end_date = datetime.now(pytz.utc)
         start_date = end_date - timedelta(days=days)
         
         # Obter ranking completo do banco de dados
@@ -1496,4 +1498,4 @@ async def set_log_channel(interaction: discord.Interaction, channel: discord.Tex
             description="Ocorreu um erro ao definir o canal de logs. Por favor, tente novamente.",
             color=discord.Color.red()
         )
-        await interaction.response.send_message(embed=embed)        
+        await interaction.response.send_message(embed=embed)     

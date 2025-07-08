@@ -9,6 +9,7 @@ from typing import Optional, Dict, List
 from utils import generate_activity_graph
 from collections import defaultdict
 import time
+import pytz  # Added import
 
 logger = logging.getLogger('inactivity_bot')
 
@@ -183,10 +184,10 @@ class BatchProcessor:
             
             result['processed'] = 1
             
-            now = datetime.now(self.bot.timezone)
+            now = datetime.now(pytz.utc)  # CORRIGIDO: Usando UTC
             
             # Se não há verificação anterior ou o período acabou
-            if not last_check or now >= last_check.get('period_end', datetime.min).replace(tzinfo=self.bot.timezone):
+            if not last_check or now >= last_check.get('period_end', datetime.min.replace(tzinfo=pytz.utc)):  # CORRIGIDO
                 # Definir período de verificação (últimos X dias)
                 monitoring_period = self.bot.config['monitoring_period']
                 period_end = now
@@ -211,7 +212,7 @@ class BatchProcessor:
                 if sessions:
                     for session in sessions:
                         if session['duration'] >= required_minutes * 60:
-                            day = session['join_time'].replace(tzinfo=self.bot.timezone).date()
+                            day = session['join_time'].date()  # Já está em UTC
                             valid_days.add(day)
                     
                     meets_requirements = len(valid_days) >= required_days
@@ -709,24 +710,19 @@ async def process_member_warnings(member: discord.Member, guild: discord.Guild,
         if not last_check:
             # Se não tem verificação anterior, criar um novo período
             monitoring_period = bot.config['monitoring_period']
-            period_end = datetime.now(bot.timezone) + timedelta(days=monitoring_period)
+            period_end = datetime.now(pytz.utc) + timedelta(days=monitoring_period)  # CORRIGIDO
             await bot.db.log_period_check(
                 member.id, guild.id, 
-                datetime.now(bot.timezone), 
+                datetime.now(pytz.utc),  # CORRIGIDO
                 period_end, 
                 False
             )
             return
         
-        # Calcular dias restantes (garantir que é timezone aware)
+        # Calcular dias restantes
         period_end = last_check['period_end']
-        if not period_end.tzinfo:
-            period_end = period_end.replace(tzinfo=bot.timezone)
-        else:
-            period_end = period_end.astimezone(bot.timezone)
+        days_remaining = (period_end - datetime.now(pytz.utc)).days  # CORRIGIDO
             
-        days_remaining = (period_end - datetime.now(bot.timezone)).days
-        
         # Obter último aviso
         start_time = time.time()
         last_warning = await bot.db.get_last_warning(member.id, guild.id)
@@ -734,12 +730,12 @@ async def process_member_warnings(member: discord.Member, guild: discord.Guild,
         
         # Verificar necessidade de avisos
         if days_remaining <= first_warning_days and (
-            not last_warning or (datetime.now(bot.timezone) - last_warning[1]).days >= 1):
+            not last_warning or (datetime.now(pytz.utc) - last_warning[1]).days >= 1):  # CORRIGIDO
             await bot.send_warning(member, 'first')
             warnings_sent['first'] += 1
         
         elif days_remaining <= second_warning_days and (
-            not last_warning or (datetime.now(bot.timezone) - last_warning[1]).days >= 1):
+            not last_warning or (datetime.now(pytz.utc) - last_warning[1]).days >= 1):  # CORRIGIDO
             await bot.send_warning(member, 'second')
             warnings_sent['second'] += 1
             
@@ -761,7 +757,7 @@ async def _cleanup_members():
         logger.info("Expulsão de membros inativos desativada na configuração")
         return
     
-    cutoff_date = datetime.now(bot.timezone) - timedelta(days=kick_after_days)
+    cutoff_date = datetime.now(pytz.utc) - timedelta(days=kick_after_days)  # CORRIGIDO
     members_kicked = 0
     batch_size = bot._batch_processing_size
     
@@ -797,7 +793,7 @@ async def process_member_cleanup(member: discord.Member, guild: discord.Guild,
             
         # Verificar se tem apenas o cargo @everyone (len=1) ou nenhum cargo (len=0)
         if len(member.roles) <= 1:  # Considera @everyone como um cargo
-            joined_at = member.joined_at.replace(tzinfo=bot.timezone) if member.joined_at else None
+            joined_at = member.joined_at.replace(tzinfo=pytz.utc) if member.joined_at else None  # CORRIGIDO
             
             if joined_at and joined_at < cutoff_date:
                 try:
@@ -806,7 +802,7 @@ async def process_member_cleanup(member: discord.Member, guild: discord.Guild,
                     last_kick = await bot.db.get_last_kick(member.id, guild.id)
                     perf_metrics.record_db_query(time.time() - start_time)
                     
-                    if last_kick and (datetime.now(bot.timezone) - last_kick['kick_date']).days < kick_after_days:
+                    if last_kick and (datetime.now(pytz.utc) - last_kick['kick_date']).days < kick_after_days:  # CORRIGIDO
                         return
                         
                     start_time = time.time()
@@ -1037,8 +1033,8 @@ async def _execute_force_check(member: discord.Member):
         required_days = bot.config['required_days']
         monitoring_period = bot.config['monitoring_period']
         
-        # Definir período de verificação
-        period_end = datetime.now(bot.timezone)
+        # Definir período de verificação em UTC
+        period_end = datetime.now(pytz.utc)  # CORRIGIDO
         period_start = period_end - timedelta(days=monitoring_period)
         
         # Obter sessões de voz no período
@@ -1053,7 +1049,7 @@ async def _execute_force_check(member: discord.Member):
         if sessions:
             for session in sessions:
                 if session['duration'] >= required_minutes * 60:
-                    day = session['join_time'].replace(tzinfo=bot.timezone).date()
+                    day = session['join_time'].date()  # Já está em UTC
                     valid_days.add(day)
             
             meets_requirements = len(valid_days) >= required_days
@@ -1128,7 +1124,7 @@ async def process_member_missed_periods(member_id: int, guild: discord.Guild,
             return
             
         # Obter todos os períodos não verificados
-        now = datetime.now(bot.timezone)
+        now = datetime.now(pytz.utc)  # CORRIGIDO
         last_check = await bot.db.get_last_period_check(member.id, guild.id)
         
         if not last_check:
@@ -1139,7 +1135,7 @@ async def process_member_missed_periods(member_id: int, guild: discord.Guild,
             
         # Calcular quantos períodos completos foram perdidos
         period_duration = timedelta(days=monitoring_period)
-        last_period_end = last_check['period_end'].replace(tzinfo=bot.timezone)
+        last_period_end = last_check['period_end']
         missed_periods = []
         
         current_start = last_period_end
@@ -1158,7 +1154,7 @@ async def process_member_missed_periods(member_id: int, guild: discord.Guild,
             if sessions:
                 for session in sessions:
                     if session['duration'] >= required_minutes * 60:
-                        day = session['join_time'].replace(tzinfo=bot.timezone).date()
+                        day = session['join_time'].date()  # Já está em UTC
                         valid_days.add(day)
                 
                 meets_requirements = len(valid_days) >= required_days
@@ -1303,7 +1299,7 @@ async def process_member_previous_periods(member: discord.Member, guild: discord
         
         result['processed'] = 1
         
-        now = datetime.now(bot.timezone)
+        now = datetime.now(pytz.utc)  # CORRIGIDO
         
         # Obter todos os períodos verificados onde não cumpriu os requisitos
         start_time = time.time()
