@@ -1587,7 +1587,6 @@ async def detect_missing_voice_leaves():
                     logger.error(f"Erro ao registrar saída estimada: {e}")
         
         logger.info("Detecção de sessões de voz perdidas concluída")
-        
     except Exception as e:
         logger.error(f"Erro na detecção de sessões perdidas: {e}")
 
