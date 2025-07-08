@@ -1531,7 +1531,6 @@ async def check_current_voice_members():
     except Exception as e:
         logger.error(f"Erro na verificação de canais de voz: {e}")
 
-@log_task_metrics("detect_missing_voice_leaves")
 async def detect_missing_voice_leaves():
     """Detecta sessões que provavelmente foram encerradas durante uma queda"""
     await bot.wait_until_ready()
