@@ -334,28 +334,28 @@ class InactivityBot(commands.Bot):
             self.db.pool = None
             return False
 
-async def save_config(self, guild_id: int = None):
-    """Salva configuração com cache (modificado)"""
-    if not hasattr(self, 'config') or not self.config:
-        return
-        
-    try:
-        # Salvar no arquivo local
-        with open(CONFIG_FILE, 'w') as f:
-            json.dump(self.config, f, indent=4)
-        
-        # Salvar no banco de dados para cada guild relevante
-        if hasattr(self, 'db') and self.db and self.db._is_initialized:
-            # Se guild_id não foi especificado, salvar para todas as guilds do bot
-            guilds_to_save = [guild_id] if guild_id is not None else [guild.id for guild in self.guilds]
+    async def save_config(self, guild_id: int = None):
+        """Salva configuração com cache (modificado)"""
+        if not hasattr(self, 'config') or not self.config:
+            return
             
-            for gid in guilds_to_save:
-                await self.db.save_config(gid, self.config)
-                logger.info(f"Configuração salva no banco para guild {gid}")
-        
-        self._last_config_save = datetime.now(pytz.utc)
-    except Exception as e:
-        logger.error(f"Erro ao salvar configuração: {e}")
+        try:
+            # Salvar no arquivo local
+            with open(CONFIG_FILE, 'w') as f:
+                json.dump(self.config, f, indent=4)
+            
+            # Salvar no banco de dados para cada guild relevante
+            if hasattr(self, 'db') and self.db and self.db._is_initialized:
+                # Se guild_id não foi especificado, salvar para todas as guilds do bot
+                guilds_to_save = [guild_id] if guild_id is not None else [guild.id for guild in self.guilds]
+                
+                for gid in guilds_to_save:
+                    await self.db.save_config(gid, self.config)
+                    logger.info(f"Configuração salva no banco para guild {gid}")
+            
+            self._last_config_save = datetime.now(pytz.utc)
+        except Exception as e:
+            logger.error(f"Erro ao salvar configuração: {e}")
 
     async def load_config(self):
         """Carrega configuração de forma assíncrona"""
@@ -1077,20 +1077,21 @@ async def on_ready():
         logger.info(f'Bot conectado como {bot.user}')
         logger.info(f"Latência: {round(bot.latency * 1000)}ms")
         
-        # Garantir que as configurações estão salvas no banco
-        await bot.save_config()
-        
-        if hasattr(bot, '_ready_set') and bot._ready_set:
-            return
-            
-        bot._ready_set = True
-        
         # Inicializar o banco de dados antes de qualquer coisa
         db_initialized = await bot.initialize_db()
         if not db_initialized:
             logger.critical("Falha na inicialização do banco de dados. As tarefas não serão iniciadas.")
             return
             
+        # Garantir que as configurações estão salvas no banco
+        if hasattr(bot, 'save_config'):
+            await bot.save_config()
+            
+        if hasattr(bot, '_ready_set') and bot._ready_set:
+            return
+            
+        bot._ready_set = True
+        
         if not bot._tasks_started:
             logger.info("Bot está pronto. Iniciando tarefas de fundo...")
             
@@ -1169,6 +1170,11 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
         return
 
     try:
+        # Verificar se o banco de dados está inicializado
+        if not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
+            logger.error("Banco de dados não inicializado - pulando evento de voz")
+            return
+            
         # Extrair informações necessárias dos estados de voz
         before_channel_id = before.channel.id if before.channel else None
         after_channel_id = after.channel.id if after.channel else None
