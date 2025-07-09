@@ -278,7 +278,7 @@ class Database:
         return None
 
     async def create_tables(self):
-        """Cria tabelas necessárias com índices otimizados"""
+        """Cria tabelas necessárias com índices otimizados e TIMESTAMPTZ"""
         async with self.semaphore:
             conn = None
             try:
@@ -289,8 +289,8 @@ class Database:
                 CREATE TABLE IF NOT EXISTS user_activity (
                     user_id BIGINT,
                     guild_id BIGINT,
-                    last_voice_join TIMESTAMP,
-                    last_voice_leave TIMESTAMP,
+                    last_voice_join TIMESTAMPTZ,
+                    last_voice_leave TIMESTAMPTZ,
                     voice_sessions INT DEFAULT 0,
                     total_voice_time INT DEFAULT 0,
                     PRIMARY KEY (user_id, guild_id)
@@ -308,8 +308,8 @@ class Database:
                     id SERIAL PRIMARY KEY,
                     user_id BIGINT,
                     guild_id BIGINT,
-                    join_time TIMESTAMP,
-                    leave_time TIMESTAMP,
+                    join_time TIMESTAMPTZ,
+                    leave_time TIMESTAMPTZ,
                     duration INT
                 )''')
                 
@@ -327,7 +327,7 @@ class Database:
                     user_id BIGINT,
                     guild_id BIGINT,
                     warning_type VARCHAR(20),
-                    warning_date TIMESTAMP,
+                    warning_date TIMESTAMPTZ,
                     PRIMARY KEY (user_id, guild_id, warning_type)
                 )''')
                 
@@ -340,7 +340,7 @@ class Database:
                     user_id BIGINT,
                     guild_id BIGINT,
                     role_id BIGINT,
-                    removal_date TIMESTAMP,
+                    removal_date TIMESTAMPTZ,
                     PRIMARY KEY (user_id, guild_id, role_id)
                 )''')
                 
@@ -353,7 +353,7 @@ class Database:
                     id SERIAL PRIMARY KEY,
                     user_id BIGINT,
                     guild_id BIGINT,
-                    kick_date TIMESTAMP,
+                    kick_date TIMESTAMPTZ,
                     reason TEXT
                 )''')
                 
@@ -365,8 +365,8 @@ class Database:
                 CREATE TABLE IF NOT EXISTS checked_periods (
                     user_id BIGINT,
                     guild_id BIGINT,
-                    period_start TIMESTAMP,
-                    period_end TIMESTAMP,
+                    period_start TIMESTAMPTZ,
+                    period_end TIMESTAMPTZ,
                     meets_requirements BOOLEAN,
                     PRIMARY KEY (user_id, guild_id, period_start)
                 )''')
@@ -380,7 +380,7 @@ class Database:
                 CREATE TABLE IF NOT EXISTS bot_config (
                     guild_id BIGINT PRIMARY KEY,
                     config_json TEXT,
-                    last_updated TIMESTAMP
+                    last_updated TIMESTAMPTZ
                 )''')
                 
                 await conn.execute('CREATE INDEX IF NOT EXISTS idx_last_updated ON bot_config (last_updated)')
@@ -393,11 +393,11 @@ class Database:
                     bucket VARCHAR(100),
                     limit_count INT,
                     remaining INT,
-                    reset_at TIMESTAMP,
+                    reset_at TIMESTAMPTZ,
                     scope VARCHAR(50),
                     endpoint VARCHAR(255),
                     retry_after FLOAT,
-                    log_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    log_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
                 )''')
                 
                 await conn.execute('CREATE INDEX IF NOT EXISTS idx_guild ON rate_limit_logs (guild_id)')
@@ -410,7 +410,7 @@ class Database:
                 await conn.execute('''
                 CREATE TABLE IF NOT EXISTS task_executions (
                     task_name VARCHAR(50) PRIMARY KEY,
-                    last_execution TIMESTAMP,
+                    last_execution TIMESTAMPTZ,
                     monitoring_period INT
                 )''')
                 
@@ -429,7 +429,7 @@ class Database:
                     before_deaf BOOLEAN,
                     after_self_deaf BOOLEAN,
                     after_deaf BOOLEAN,
-                    event_time TIMESTAMP,
+                    event_time TIMESTAMPTZ,
                     processed BOOLEAN DEFAULT FALSE
                 )''')
                 

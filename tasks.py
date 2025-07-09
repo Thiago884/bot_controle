@@ -359,8 +359,9 @@ async def execute_task_with_persistent_interval(task_name: str, monitoring_perio
                 should_execute = True
                 logger.info(f"Primeira execução da task {task_name}")
             else:
-                # Verificar se passou 24h desde a última execução
-                last_exec_time = last_exec['last_execution'].replace(tzinfo=pytz.utc) if last_exec['last_execution'].tzinfo is None else last_exec['last_execution']
+                # CORRIGIDO: Simplificada a obtenção do tempo. 
+                # O banco agora retorna um objeto 'datetime' com fuso horário (aware).
+                last_exec_time = last_exec['last_execution']
                 time_since_last = now - last_exec_time
                 if time_since_last >= timedelta(hours=24):
                     should_execute = True
@@ -1584,7 +1585,7 @@ async def detect_missing_voice_leaves():
         logger.info("Detecção de sessões de voz perdidas concluída")
     except Exception as e:
         logger.error(f"Erro na detecção de sessões perdidas: {e}")
-        
+
 @log_task_metrics("cleanup_processed_events")
 async def cleanup_processed_events():
     """Limpa eventos de voz já processados"""
