@@ -499,6 +499,7 @@ class Database:
         conn = None
         try:
             conn = await self.pool.acquire()
+            event_time = datetime.now(pytz.utc)  # Garantir UTC timezone
             await conn.execute('''
                 INSERT INTO pending_voice_events 
                 (event_type, user_id, guild_id, before_channel_id, after_channel_id,
@@ -514,7 +515,7 @@ class Database:
             before_deaf,
             after_self_deaf,
             after_deaf,
-            datetime.now(pytz.utc))  # Garantir UTC timezone
+            event_time)
         except Exception as e:
             logger.error(f"Erro ao salvar evento pendente: {e}")
             raise
@@ -1053,7 +1054,16 @@ class Database:
                 WHERE task_name = $1
             ''', task_name)
             
-            return dict(result) if result else None
+            if result:
+                # Garantir que o datetime retornado está com timezone
+                last_execution = result['last_execution']
+                if last_execution and last_execution.tzinfo is None:
+                    last_execution = last_execution.replace(tzinfo=pytz.utc)
+                    result = dict(result)  # Criar uma cópia mutável
+                    result['last_execution'] = last_execution
+                
+                return result
+            return None
         except Exception as e:
             logger.error(f"Erro ao obter última execução da task: {e}")
             return None

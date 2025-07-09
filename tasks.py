@@ -359,9 +359,11 @@ async def execute_task_with_persistent_interval(task_name: str, monitoring_perio
                 should_execute = True
                 logger.info(f"Primeira execução da task {task_name}")
             else:
-                # CORRIGIDO: Simplificada a obtenção do tempo. 
-                # O banco agora retorna um objeto 'datetime' com fuso horário (aware).
+                # Garantir que last_exec_time está com timezone (aware)
                 last_exec_time = last_exec['last_execution']
+                if last_exec_time.tzinfo is None:
+                    last_exec_time = last_exec_time.replace(tzinfo=pytz.utc)
+                
                 time_since_last = now - last_exec_time
                 if time_since_last >= timedelta(hours=24):
                     should_execute = True
