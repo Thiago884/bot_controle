@@ -561,37 +561,37 @@ class Database:
             if conn:
                 await self.pool.release(conn)
 
-async def save_config(self, guild_id: int, config: dict):
-    """Salva configuração com cache"""
-    conn = None
-    try:
-        # Atualizar cache
-        self._config_cache[guild_id] = config
-        self._last_config_update = datetime.now(pytz.utc)
-        
-        # Serializar para JSON
-        config_json = json.dumps(config)
-        
-        conn = await self.pool.acquire()
-        await conn.execute('''
-            INSERT INTO bot_config (guild_id, config_json, last_updated)
-            VALUES ($1, $2, NOW())
-            ON CONFLICT (guild_id) DO UPDATE
-            SET config_json = EXCLUDED.config_json,
-                last_updated = EXCLUDED.last_updated
-        ''', guild_id, config_json)
-        
-        logger.info(f"Configuração salva no banco de dados para a guild {guild_id}")
-        return True
-    except Exception as e:
-        logger.error(f"Erro ao salvar configuração: {e}")
-        # Remover do cache em caso de erro
-        if guild_id in self._config_cache:
-            del self._config_cache[guild_id]
-        return False
-    finally:
-        if conn:
-            await self.pool.release(conn)
+    async def save_config(self, guild_id: int, config: dict):
+        """Salva configuração com cache"""
+        conn = None
+        try:
+            # Atualizar cache
+            self._config_cache[guild_id] = config
+            self._last_config_update = datetime.now(pytz.utc)
+            
+            # Serializar para JSON
+            config_json = json.dumps(config)
+            
+            conn = await self.pool.acquire()
+            await conn.execute('''
+                INSERT INTO bot_config (guild_id, config_json, last_updated)
+                VALUES ($1, $2, NOW())
+                ON CONFLICT (guild_id) DO UPDATE
+                SET config_json = EXCLUDED.config_json,
+                    last_updated = EXCLUDED.last_updated
+            ''', guild_id, config_json)
+            
+            logger.info(f"Configuração salva no banco de dados para a guild {guild_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Erro ao salvar configuração: {e}")
+            # Remover do cache em caso de erro
+            if guild_id in self._config_cache:
+                del self._config_cache[guild_id]
+            return False
+        finally:
+            if conn:
+                await self.pool.release(conn)
 
     async def load_config(self, guild_id: int) -> Optional[dict]:
         """Carrega configuração com cache"""
@@ -962,47 +962,47 @@ async def save_config(self, guild_id: int, config: dict):
             if conn:
                 await self.pool.release(conn)
 
-async def cleanup_old_data(self, days: int = 60):
-    """Limpa dados antigos do banco de dados"""
-    conn = None
-    try:
-        conn = await self.pool.acquire()
-        async with conn.transaction():
-            # Limpar sessões de voz antigas
-            voice_deleted = await conn.execute("DELETE FROM voice_sessions WHERE leave_time < NOW() - $1 * INTERVAL '1 day'", days)
-            
-            # Limpar avisos antigos
-            warnings_deleted = await conn.execute("DELETE FROM user_warnings WHERE warning_date < NOW() - $1 * INTERVAL '1 day'", days)
-            
-            # Limpar registros de cargos removidos antigos
-            roles_deleted = await conn.execute("DELETE FROM removed_roles WHERE removal_date < NOW() - $1 * INTERVAL '1 day'", days)
-            
-            # Limpar membros expulsos antigos
-            kicks_deleted = await conn.execute("DELETE FROM kicked_members WHERE kick_date < NOW() - $1 * INTERVAL '1 day'", days)
-            
-            # Limpar logs de rate limit antigos
-            rate_limits_deleted = await conn.execute("DELETE FROM rate_limit_logs WHERE log_date < NOW() - $1 * INTERVAL '1 day'", days)
-            
-            # Limpar eventos de voz pendentes antigos (nova funcionalidade)
-            pending_events_deleted = await conn.execute("DELETE FROM pending_voice_events WHERE event_time < NOW() - $1 * INTERVAL '1 day'", days)
-            
-            log_message = (
-                f"Limpeza de dados antigos concluída: "
-                f"Sessões de voz: {voice_deleted.split()[1]}, "
-                f"Avisos: {warnings_deleted.split()[1]}, "
-                f"Cargos removidos: {roles_deleted.split()[1]}, "
-                f"Expulsões: {kicks_deleted.split()[1]}, "
-                f"Rate limits: {rate_limits_deleted.split()[1]}, "
-                f"Eventos pendentes: {pending_events_deleted.split()[1]}"
-            )
-            logger.info(log_message)
-            return log_message
-    except Exception as e:
-        logger.error(f"Erro ao limpar dados antigos: {e}")
-        raise
-    finally:
-        if conn:
-            await self.pool.release(conn)
+    async def cleanup_old_data(self, days: int = 60):
+        """Limpa dados antigos do banco de dados"""
+        conn = None
+        try:
+            conn = await self.pool.acquire()
+            async with conn.transaction():
+                # Limpar sessões de voz antigas
+                voice_deleted = await conn.execute("DELETE FROM voice_sessions WHERE leave_time < NOW() - $1 * INTERVAL '1 day'", days)
+                
+                # Limpar avisos antigos
+                warnings_deleted = await conn.execute("DELETE FROM user_warnings WHERE warning_date < NOW() - $1 * INTERVAL '1 day'", days)
+                
+                # Limpar registros de cargos removidos antigos
+                roles_deleted = await conn.execute("DELETE FROM removed_roles WHERE removal_date < NOW() - $1 * INTERVAL '1 day'", days)
+                
+                # Limpar membros expulsos antigos
+                kicks_deleted = await conn.execute("DELETE FROM kicked_members WHERE kick_date < NOW() - $1 * INTERVAL '1 day'", days)
+                
+                # Limpar logs de rate limit antigos
+                rate_limits_deleted = await conn.execute("DELETE FROM rate_limit_logs WHERE log_date < NOW() - $1 * INTERVAL '1 day'", days)
+                
+                # Limpar eventos de voz pendentes antigos (nova funcionalidade)
+                pending_events_deleted = await conn.execute("DELETE FROM pending_voice_events WHERE event_time < NOW() - $1 * INTERVAL '1 day'", days)
+                
+                log_message = (
+                    f"Limpeza de dados antigos concluída: "
+                    f"Sessões de voz: {voice_deleted.split()[1]}, "
+                    f"Avisos: {warnings_deleted.split()[1]}, "
+                    f"Cargos removidos: {roles_deleted.split()[1]}, "
+                    f"Expulsões: {kicks_deleted.split()[1]}, "
+                    f"Rate limits: {rate_limits_deleted.split()[1]}, "
+                    f"Eventos pendentes: {pending_events_deleted.split()[1]}"
+                )
+                logger.info(log_message)
+                return log_message
+        except Exception as e:
+            logger.error(f"Erro ao limpar dados antigos: {e}")
+            raise
+        finally:
+            if conn:
+                await self.pool.release(conn)
 
     async def get_rate_limit_history(self, guild_id: int, hours: int = 24) -> List[Dict]:
         """Obtém histórico de rate limits para uma guild"""
@@ -1042,44 +1042,44 @@ async def cleanup_old_data(self, days: int = 60):
             if conn:
                 await self.pool.release(conn)
 
-async def get_last_task_execution(self, task_name: str) -> Optional[Dict]:
-    """Obtém a última execução de uma task"""
-    conn = None
-    try:
-        conn = await self.pool.acquire()
-        result = await conn.fetchrow('''
-            SELECT last_execution, monitoring_period 
-            FROM task_executions 
-            WHERE task_name = $1
-        ''', task_name)
-        
-        return dict(result) if result else None
-    except Exception as e:
-        logger.error(f"Erro ao obter última execução da task: {e}")
-        return None
-    finally:
-        if conn:
-            await self.pool.release(conn)
+    async def get_last_task_execution(self, task_name: str) -> Optional[Dict]:
+        """Obtém a última execução de uma task"""
+        conn = None
+        try:
+            conn = await self.pool.acquire()
+            result = await conn.fetchrow('''
+                SELECT last_execution, monitoring_period 
+                FROM task_executions 
+                WHERE task_name = $1
+            ''', task_name)
+            
+            return dict(result) if result else None
+        except Exception as e:
+            logger.error(f"Erro ao obter última execução da task: {e}")
+            return None
+        finally:
+            if conn:
+                await self.pool.release(conn)
 
-async def log_task_execution(self, task_name: str, monitoring_period: int):
-    """Registra execução de uma task"""
-    conn = None
-    try:
-        conn = await self.pool.acquire()
-        await conn.execute('''
-            INSERT INTO task_executions 
-            (task_name, last_execution, monitoring_period) 
-            VALUES ($1, $2, $3)
-            ON CONFLICT (task_name) DO UPDATE 
-            SET last_execution = EXCLUDED.last_execution,
-                monitoring_period = EXCLUDED.monitoring_period
-        ''', task_name, datetime.now(pytz.utc), monitoring_period)
-    except Exception as e:
-        logger.error(f"Erro ao registrar execução da task: {e}")
-        raise
-    finally:
-        if conn:
-            await self.pool.release(conn)
+    async def log_task_execution(self, task_name: str, monitoring_period: int):
+        """Registra execução de uma task"""
+        conn = None
+        try:
+            conn = await self.pool.acquire()
+            await conn.execute('''
+                INSERT INTO task_executions 
+                (task_name, last_execution, monitoring_period) 
+                VALUES ($1, $2, $3)
+                ON CONFLICT (task_name) DO UPDATE 
+                SET last_execution = EXCLUDED.last_execution,
+                    monitoring_period = EXCLUDED.monitoring_period
+            ''', task_name, datetime.now(pytz.utc), monitoring_period)
+        except Exception as e:
+            logger.error(f"Erro ao registrar execução da task: {e}")
+            raise
+        finally:
+            if conn:
+                await self.pool.release(conn)
 
     async def health_check(self):
         """Verifica a saúde do banco de dados e reinicia tasks se necessário"""

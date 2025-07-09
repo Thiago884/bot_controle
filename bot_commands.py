@@ -578,6 +578,13 @@ async def set_absence_channel(interaction: discord.Interaction, channel: discord
 async def show_config(interaction: discord.Interaction):
     """Mostra todas as configurações atuais do bot"""
     try:
+        # Verificar banco de dados
+        if not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
+            await interaction.response.send_message(
+                "⚠️ Banco de dados não disponível no momento.",
+                ephemeral=True)
+            return
+            
         logger.info(f"Comando show_config acionado por {interaction.user}")
         
         config = bot.config
@@ -692,197 +699,189 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
             await interaction.followup.send("⚠️ O período deve ser entre 1 e 30 dias.", ephemeral=True)
             return
         
-        # Adicionar delay inicial para evitar rate limit
-        await asyncio.sleep(2)
-        
-        # Definir período de análise em UTC
+        # Usar UTC consistentemente
         end_date = datetime.now(pytz.utc)
         start_date = end_date - timedelta(days=days)
         
-        # Coletar dados básicos
         try:
+            # Verificar se o banco está disponível
+            if not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
+                raise RuntimeError("Banco de dados não disponível")
+                
             user_data = await bot.db.get_user_activity(member.id, member.guild.id)
-        except Exception as e:
-            logger.error(f"Erro ao obter dados básicos de atividade: {e}")
-            await interaction.followup.send(
-                "❌ Ocorreu um erro ao obter os dados de atividade. Por favor, tente novamente mais tarde.",
-                ephemeral=True)
-            return
-        
-        # Coletar dados históricos com tratamento de rate limit
-        try:
             voice_sessions = await bot.db.get_voice_sessions(member.id, member.guild.id, start_date, end_date)
-        except Exception as e:
-            logger.error(f"Erro ao obter sessões de voz: {e}")
-            await interaction.followup.send(
-                "❌ Ocorreu um erro ao obter o histórico de voz. Por favor, tente novamente mais tarde.",
-                ephemeral=True)
-            return
-        
-        # Calcular tempo total apenas para o período solicitado
-        total_time = sum(session['duration'] for session in voice_sessions) if voice_sessions else 0
-        total_minutes = total_time / 60
-        sessions_count = len(voice_sessions)
-        avg_session_duration = total_minutes / sessions_count if sessions_count else 0
-        
-        # Calcular dias mais ativos com datas
-        most_active_days = calculate_most_active_days(voice_sessions, days)
-        
-        # Formatar a lista de dias mais ativos com datas
-        active_days_text = "Nenhum dia com atividade significativa"
-        if most_active_days:
-            active_days_text = "\n".join(
-                f"• {day_name} ({date_str}): {total} min (⌀ {avg} min/sessão)" 
-                for day_name, date_str, total, avg in most_active_days[:3]  # Mostrar top 3 dias
-            )
+            
+            # Calcular tempo total apenas para o período solicitado
+            total_time = sum(session['duration'] for session in voice_sessions) if voice_sessions else 0
+            total_minutes = total_time / 60
+            sessions_count = len(voice_sessions)
+            avg_session_duration = total_minutes / sessions_count if sessions_count else 0
+            
+            # Calcular dias mais ativos com datas
+            most_active_days = calculate_most_active_days(voice_sessions, days)
+            
+            # Formatar a lista de dias mais ativos com datas
+            active_days_text = "Nenhum dia com atividade significativa"
+            if most_active_days:
+                active_days_text = "\n".join(
+                    f"• {day_name} ({date_str}): {total} min (⌀ {avg} min/sessão)" 
+                    for day_name, date_str, total, avg in most_active_days[:3]  # Mostrar top 3 dias
+                )
 
-        # Configurações de requisitos
-        required_min = bot.config['required_minutes']
-        required_days = bot.config['required_days']
-        monitoring_period = bot.config['monitoring_period']
-        
-        # Criar embed principal
-        embed = discord.Embed(
-            title=f"📊 Atividade de {member.display_name} (últimos {days} dias)",
-            color=discord.Color.blue(),
-            timestamp=datetime.now(bot.timezone)
-        )
-        
-        embed.set_thumbnail(url=member.display_avatar.url)
-        
-        # Seção de estatísticas básicas
-        embed.add_field(
-            name="📈 Estatísticas Gerais",
-            value=(
-                f"**Sessões:** {sessions_count}\n"
-                f"**Tempo Total:** {int(total_minutes)} min\n"
-                f"**Duração Média:** {int(avg_session_duration)} min/sessão\n"
-                f"**Dias Mais Ativos:**\n{active_days_text}\n"
-                f"**Última Atividade:** {max(s['join_time'] for s in voice_sessions).strftime('%d/%m %H:%M') if voice_sessions else 'N/D'}"
-            ),
-            inline=True
-        )
-        
-        # Seção de requisitos do servidor
-        embed.add_field(
-            name="📋 Requisitos do Servidor",
-            value=(
-                f"**Minutos necessários:** {required_min} min\n"
-                f"**Dias necessários:** {required_days} dias\n"
-                f"**Período de monitoramento:** {monitoring_period} dias"
-            ),
-            inline=True
-        )
-        
-        # Seção de status atual
-        last_check = await bot.db.get_last_period_check(member.id, member.guild.id)
-        if last_check:
-            period_start = last_check['period_start'].replace(tzinfo=bot.timezone)
-            period_end = last_check['period_end'].replace(tzinfo=bot.timezone)
-            days_remaining = (period_end - datetime.now(bot.timezone)).days
+            # Configurações de requisitos
+            required_min = bot.config['required_minutes']
+            required_days = bot.config['required_days']
+            monitoring_period = bot.config['monitoring_period']
             
-            status_emoji = "✅" if last_check['meets_requirements'] else "⚠️"
-            status_text = "Cumprindo" if last_check['meets_requirements'] else "Não cumprindo"
+            # Criar embed principal
+            embed = discord.Embed(
+                title=f"📊 Atividade de {member.display_name} (últimos {days} dias)",
+                color=discord.Color.blue(),
+                timestamp=datetime.now(pytz.utc)
+            )
+            embed.set_thumbnail(url=member.display_avatar.url)
             
+            # Seção de estatísticas básicas
             embed.add_field(
-                name="🔄 Status Atual",
+                name="📈 Estatísticas Gerais",
                 value=(
-                    f"{status_emoji} **{status_text}** os requisitos\n"
-                    f"**Período:** {period_start.strftime('%d/%m/%Y')} a {period_end.strftime('%d/%m/%Y')}\n"
-                    f"**Dias Restantes:** {days_remaining}"
+                    f"**Sessões:** {sessions_count}\n"
+                    f"**Tempo Total:** {int(total_minutes)} min\n"
+                    f"**Duração Média:** {int(avg_session_duration)} min/sessão\n"
+                    f"**Dias Mais Ativos:**\n{active_days_text}\n"
+                    f"**Última Atividade:** {max(s['join_time'] for s in voice_sessions).strftime('%d/%m %H:%M') if voice_sessions else 'N/D'}"
                 ),
                 inline=True
             )
             
-            # Calcular dias válidos para o período atual
-            valid_days = set()
-            current_sessions = await bot.db.get_voice_sessions(member.id, member.guild.id, period_start, period_end)
-            for session in current_sessions:
-                if session['duration'] >= required_min * 60:
-                    day = session['join_time'].replace(tzinfo=bot.timezone).date()
-                    valid_days.add(day)
-            
-            # Barra de progresso
-            progress = min(1.0, len(valid_days) / required_days)
-            progress_bar = "[" + "█" * int(progress * 10) + " " * (10 - int(progress * 10)) + "]"
-            progress_text = f"{progress*100:.0f}% ({len(valid_days)}/{required_days} dias)"
-            
+            # Seção de requisitos do servidor
             embed.add_field(
-                name="📊 Progresso",
-                value=f"{progress_bar}\n{progress_text}",
-                inline=False
-            )
-        
-        # Seção de avisos
-        all_warnings = []
-        try:
-            async with bot.db.pool.acquire() as conn:
-                async with conn.cursor() as cursor:
-                    await cursor.execute('''
-                        SELECT warning_type, warning_date 
-                        FROM user_warnings 
-                        WHERE user_id = %s AND guild_id = %s
-                        ORDER BY warning_date DESC
-                        LIMIT 3
-                    ''', (member.id, member.guild.id))
-                    all_warnings = await cursor.fetchall()
-        except Exception as e:
-            logger.error(f"Erro ao obter avisos: {e}")
-
-        if all_warnings:
-            warnings_text = "\n".join(
-                f"• {warn['warning_type'].capitalize()} - {warn['warning_date'].strftime('%d/%m/%Y %H:%M')}"
-                for warn in all_warnings
-            )
-            embed.add_field(
-                name="⚠️ Histórico de Avisos",
-                value=warnings_text,
-                inline=False
-            )
-        
-        # Seção de cargos monitorados
-        tracked_roles = [
-            role for role in member.roles 
-            if role.id in bot.config['tracked_roles']
-        ]
-        
-        if tracked_roles:
-            embed.add_field(
-                name="🎖️ Cargos Monitorados",
-                value="\n".join(role.mention for role in tracked_roles),
+                name="📋 Requisitos do Servidor",
+                value=(
+                    f"**Minutos necessários:** {required_min} min\n"
+                    f"**Dias necessários:** {required_days} dias\n"
+                    f"**Período de monitoramento:** {monitoring_period} dias"
+                ),
                 inline=True
             )
-        
-        # Enviar resposta com tratamento de rate limit
-        try:
-            if voice_sessions:
-                try:
-                    report_file = await generate_activity_report(member, voice_sessions, days)
-                    if report_file:
-                        await interaction.followup.send(embed=embed, file=report_file)
-                        return
-                except Exception as e:
-                    logger.error(f"Erro ao gerar gráfico: {e}")
             
-            await interaction.followup.send(embed=embed)
+            # Seção de status atual
+            last_check = await bot.db.get_last_period_check(member.id, member.guild.id)
+            if last_check:
+                period_start = last_check['period_start'].replace(tzinfo=pytz.utc)
+                period_end = last_check['period_end'].replace(tzinfo=pytz.utc)
+                days_remaining = (period_end - datetime.now(pytz.utc)).days
+                
+                status_emoji = "✅" if last_check['meets_requirements'] else "⚠️"
+                status_text = "Cumprindo" if last_check['meets_requirements'] else "Não cumprindo"
+                
+                embed.add_field(
+                    name="🔄 Status Atual",
+                    value=(
+                        f"{status_emoji} **{status_text}** os requisitos\n"
+                        f"**Período:** {period_start.strftime('%d/%m/%Y')} a {period_end.strftime('%d/%m/%Y')}\n"
+                        f"**Dias Restantes:** {days_remaining}"
+                    ),
+                    inline=True
+                )
+                
+                # Calcular dias válidos para o período atual
+                valid_days = set()
+                current_sessions = await bot.db.get_voice_sessions(member.id, member.guild.id, period_start, period_end)
+                for session in current_sessions:
+                    if session['duration'] >= required_min * 60:
+                        day = session['join_time'].replace(tzinfo=pytz.utc).date()
+                        valid_days.add(day)
+                
+                # Barra de progresso
+                progress = min(1.0, len(valid_days) / required_days)
+                progress_bar = "[" + "█" * int(progress * 10) + " " * (10 - int(progress * 10)) + "]"
+                progress_text = f"{progress*100:.0f}% ({len(valid_days)}/{required_days} dias)"
+                
+                embed.add_field(
+                    name="📊 Progresso",
+                    value=f"{progress_bar}\n{progress_text}",
+                    inline=False
+                )
             
-        except discord.errors.HTTPException as e:
-            if e.status == 429:
-                retry_after = float(e.response.headers.get('Retry-After', 60))
-                logger.warning(f"Rate limit ao enviar resposta. Tentando novamente em {retry_after} segundos")
-                await asyncio.sleep(retry_after)
-                try:
-                    await interaction.followup.send(embed=embed)
-                except Exception as e:
-                    logger.error(f"Erro ao enviar resposta após rate limit: {e}")
-            else:
-                raise
+            # Seção de avisos
+            all_warnings = []
+            try:
+                async with bot.db.pool.acquire() as conn:
+                    async with conn.cursor() as cursor:
+                        await cursor.execute('''
+                            SELECT warning_type, warning_date 
+                            FROM user_warnings 
+                            WHERE user_id = %s AND guild_id = %s
+                            ORDER BY warning_date DESC
+                            LIMIT 3
+                        ''', (member.id, member.guild.id))
+                        all_warnings = await cursor.fetchall()
+            except Exception as e:
+                logger.error(f"Erro ao obter avisos: {e}")
+
+            if all_warnings:
+                warnings_text = "\n".join(
+                    f"• {warn['warning_type'].capitalize()} - {warn['warning_date'].strftime('%d/%m/%Y %H:%M')}"
+                    for warn in all_warnings
+                )
+                embed.add_field(
+                    name="⚠️ Histórico de Avisos",
+                    value=warnings_text,
+                    inline=False
+                )
+            
+            # Seção de cargos monitorados
+            tracked_roles = [
+                role for role in member.roles 
+                if role.id in bot.config['tracked_roles']
+            ]
+            
+            if tracked_roles:
+                embed.add_field(
+                    name="🎖️ Cargos Monitorados",
+                    value="\n".join(role.mention for role in tracked_roles),
+                    inline=True
+                )
+            
+            # Enviar resposta com tratamento de rate limit
+            try:
+                if voice_sessions:
+                    try:
+                        report_file = await generate_activity_report(member, voice_sessions, days)
+                        if report_file:
+                            await interaction.followup.send(embed=embed, file=report_file)
+                            return
+                    except Exception as e:
+                        logger.error(f"Erro ao gerar gráfico: {e}")
+                
+                await interaction.followup.send(embed=embed)
+                
+            except discord.errors.HTTPException as e:
+                if e.status == 429:
+                    retry_after = float(e.response.headers.get('Retry-After', 60))
+                    logger.warning(f"Rate limit ao enviar resposta. Tentando novamente em {retry_after} segundos")
+                    await asyncio.sleep(retry_after)
+                    try:
+                        await interaction.followup.send(embed=embed)
+                    except Exception as e:
+                        logger.error(f"Erro ao enviar resposta após rate limit: {e}")
+                else:
+                    raise
+                    
+        except Exception as db_error:
+            logger.error(f"Erro de banco de dados: {db_error}")
+            await interaction.followup.send(
+                "❌ Erro ao acessar o banco de dados. Tente novamente mais tarde.",
+                ephemeral=True)
+            return
                 
     except Exception as e:
-        logger.error(f"Erro ao verificar atividade do usuário: {e}")
+        logger.error(f"Erro no comando user_activity: {e}")
         try:
             await interaction.followup.send(
-                "❌ Ocorreu um erro ao verificar a atividade do usuário.", ephemeral=True)
+                "❌ Ocorreu um erro inesperado.", 
+                ephemeral=True)
         except:
             pass
 
@@ -908,6 +907,13 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
             return
                 
         await interaction.response.defer(thinking=True)
+        
+        # Verificar se o banco está disponível
+        if not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
+            await interaction.followup.send(
+                "⚠️ Banco de dados não disponível no momento.",
+                ephemeral=True)
+            return
         
         # Definir período de análise em UTC
         end_date = datetime.now(pytz.utc)
@@ -982,7 +988,7 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
             title=f"🏆 Ranking de Atividade (últimos {days} dias)",
             description="\n".join(ranking),
             color=discord.Color.gold(),
-            timestamp=datetime.now(bot.timezone))
+            timestamp=datetime.now(pytz.utc))
         # Adicionar estatísticas gerais
         embed.add_field(
             name="📊 Estatísticas Gerais",
@@ -1061,6 +1067,15 @@ async def force_check(interaction: discord.Interaction, member: discord.Member):
     """Força uma verificação imediata de inatividade para um usuário específico"""
     try:
         await interaction.response.defer(thinking=True)
+        
+        # Verificar se o banco está disponível
+        if not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
+            raise RuntimeError("Banco de dados não disponível")
+        
+        # Usar UTC para todas as datas
+        now = datetime.now(pytz.utc)
+        period_end = now
+        period_start = now - timedelta(days=bot.config['monitoring_period'])
         
         from tasks import _execute_force_check
         result = await _execute_force_check(member)
@@ -1167,9 +1182,10 @@ async def force_check(interaction: discord.Interaction, member: discord.Member):
             f"Resultado: {'Cumpre' if result['meets_requirements'] else 'Não cumpre'} requisitos"
         )
     except Exception as e:
-        logger.error(f"Erro ao forçar verificação: {e}")
+        logger.error(f"Erro no force_check: {e}")
         await interaction.followup.send(
-            "❌ Ocorreu um erro ao forçar a verificação. Por favor, tente novamente.")
+            "❌ Ocorreu um erro ao executar a verificação.",
+            ephemeral=True)
 
 @force_check.error
 async def force_check_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
@@ -1211,6 +1227,13 @@ async def cleanup_data(interaction: discord.Interaction, days: int = 60):
             
         await interaction.response.defer(thinking=True)
         
+        # Verificar se o banco está disponível
+        if not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
+            await interaction.followup.send(
+                "⚠️ Banco de dados não disponível no momento.",
+                ephemeral=True)
+            return
+        
         result = await bot.db.cleanup_old_data(days)
         await interaction.followup.send(
             f"✅ Limpeza de dados concluída: {result}")
@@ -1223,247 +1246,6 @@ async def cleanup_data(interaction: discord.Interaction, days: int = 60):
         logger.error(f"Erro ao limpar dados antigos: {e}")
         await interaction.followup.send(
             "❌ Ocorreu um erro ao limpar os dados. Por favor, tente novamente.")
-
-@bot.tree.command(name="server_monitoring_status", description="Mostra o status global do monitoramento no servidor")
-@allowed_roles_only()
-@app_commands.checks.cooldown(1, 30.0, key=lambda i: (i.guild_id, i.user.id))
-async def server_monitoring_status(interaction: discord.Interaction):
-    """Mostra informações globais sobre o monitoramento no servidor"""
-    try:
-        await interaction.response.defer(thinking=True)
-        
-        # Verificar rate limit antes de continuar
-        if bot.rate_limit_monitor.should_delay():
-            retry_after = bot.rate_limit_monitor.adaptive_delay
-            logger.warning(f"Rate limit detectado. Adiando execução por {retry_after} segundos")
-            await asyncio.sleep(retry_after)
-        
-        # Pequeno delay inicial para evitar rate limit
-        await asyncio.sleep(1)
-        
-        # Obter informações da última execução da task com tratamento de erro
-        last_exec = None
-        try:
-            last_exec = await bot.db.get_last_task_execution("inactivity_check")
-        except Exception as db_error:
-            logger.error(f"Erro ao obter última execução: {db_error}")
-            await interaction.followup.send(
-                "❌ Ocorreu um erro ao obter informações do banco de dados.",
-                ephemeral=True
-            )
-            return
-            
-        now = datetime.now(bot.timezone)
-        monitoring_period = bot.config['monitoring_period']
-        
-        # Obter estatísticas adicionais do banco de dados com tratamento de erro
-        try:
-            async with bot.db.pool.acquire() as conn:
-                # Contar membros com cargos monitorados (consulta otimizada)
-                tracked_members = 0
-                if bot.config['tracked_roles']:
-                    result = await conn.fetchrow('''
-                        SELECT COUNT(DISTINCT members.user_id) as tracked_members
-                        FROM (
-                            SELECT user_id, guild_id 
-                            FROM user_activity 
-                            WHERE guild_id = $1
-                            UNION
-                            SELECT user_id, guild_id 
-                            FROM removed_roles 
-                            WHERE guild_id = $1 AND role_id = ANY($2)
-                        ) AS members
-                    ''', interaction.guild.id, bot.config['tracked_roles'])
-                    tracked_members = result['tracked_members'] if result else 0
-                
-                # Consulta única para todas as estatísticas
-                stats = await conn.fetchrow('''
-                    SELECT 
-                        COALESCE(SUM(CASE WHEN meets_requirements = true THEN 1 ELSE 0 END), 0) as compliant,
-                        COALESCE(SUM(CASE WHEN meets_requirements = false THEN 1 ELSE 0 END), 0) as non_compliant,
-                        COUNT(DISTINCT user_id) as total_members,
-                        COUNT(DISTINCT CASE WHEN warning_date >= $1 THEN user_id END) as warned_users,
-                        COUNT(DISTINCT CASE WHEN removal_date >= $1 THEN user_id END) as removed_roles,
-                        COUNT(DISTINCT CASE WHEN kick_date >= $1 THEN user_id END) as kicked_members
-                    FROM (
-                        SELECT user_id, guild_id, meets_requirements, NULL as warning_date, NULL as removal_date, NULL as kick_date
-                        FROM checked_periods
-                        WHERE guild_id = $2 AND period_start >= $3
-                        
-                        UNION ALL
-                        
-                        SELECT user_id, guild_id, NULL as meets_requirements, warning_date, NULL as removal_date, NULL as kick_date
-                        FROM user_warnings
-                        WHERE guild_id = $2 AND warning_date >= $1
-                        
-                        UNION ALL
-                        
-                        SELECT user_id, guild_id, NULL as meets_requirements, NULL as warning_date, removal_date, NULL as kick_date
-                        FROM removed_roles
-                        WHERE guild_id = $2 AND removal_date >= $1
-                        
-                        UNION ALL
-                        
-                        SELECT user_id, guild_id, NULL as meets_requirements, NULL as warning_date, NULL as removal_date, kick_date
-                        FROM kicked_members
-                        WHERE guild_id = $2 AND kick_date >= $1
-                    ) AS combined_data
-                ''', (
-                    now - timedelta(days=7),
-                    interaction.guild.id,
-                    last_exec['last_execution'] if last_exec else datetime.min
-                ))
-                
-                # Consulta de avisos otimizada
-                warnings = await conn.fetch('''
-                    SELECT 
-                        warning_type,
-                        COUNT(*) as count
-                    FROM user_warnings
-                    WHERE guild_id = $1
-                    AND warning_date >= $2
-                    GROUP BY warning_type
-                ''', interaction.guild.id, now - timedelta(days=7))
-                
-        except Exception as e:
-            logger.error(f"Erro ao consultar banco de dados: {e}")
-            await interaction.followup.send(
-                "❌ Ocorreu um erro ao consultar o banco de dados.",
-                ephemeral=True
-            )
-            return
-            
-        # Processar resultados
-        warnings_summary = {w['warning_type']: w['count'] for w in warnings} if warnings else {}
-        role_removals = stats['removed_roles'] if stats else 0
-        kicks = stats['kicked_members'] if stats else 0
-        
-        # Criar embed
-        embed = discord.Embed(
-            title="🔄 Status Global do Monitoramento",
-            color=discord.Color.blue(),
-            timestamp=now
-        )
-        
-        # Seção de Configuração
-        embed.add_field(
-            name="⚙️ Configuração Atual",
-            value=(
-                f"**Período de monitoramento:** {monitoring_period} dias\n"
-                f"**Minutos necessários:** {bot.config['required_minutes']} min/dia\n"
-                f"**Dias necessários:** {bot.config['required_days']} dias\n"
-                f"**Cargos monitorados:** {len(bot.config['tracked_roles'])}\n"
-                f"**Membros monitorados:** {tracked_members}"
-            ),
-            inline=False
-        )
-        
-        # Seção de Status de Execução
-        if last_exec:
-            last_exec_time = last_exec['last_execution'].replace(tzinfo=bot.timezone)
-            next_check = last_exec_time + timedelta(hours=24)
-            time_to_next_check = next_check - now
-            
-            # Calcular o término do período atual de monitoramento
-            period_end = last_exec_time + timedelta(days=monitoring_period)
-            time_to_period_end = period_end - now
-            
-            # Calcular quando ocorrerá a próxima remoção de cargos
-            next_removal = None
-            if now < period_end:
-                next_removal = period_end
-                time_to_removal = period_end - now
-            else:
-                # Se o período já terminou, a remoção ocorrerá na próxima execução
-                next_removal = next_check
-                time_to_removal = time_to_next_check
-            
-            embed.add_field(
-                name="⏳ Ciclo Atual",
-                value=(
-                    f"**Última verificação:** {last_exec_time.strftime('%d/%m/%Y %H:%M')}\n"
-                    f"**Próxima verificação:** {next_check.strftime('%d/%m/%Y %H:%M')}\n"
-                    f"**Faltam:** {time_to_next_check.days}d {time_to_next_check.seconds//3600}h\n"
-                    f"**Término do período:** {period_end.strftime('%d/%m/%Y %H:%M')}\n"
-                    f"**Faltam:** {time_to_period_end.days}d {time_to_period_end.seconds//3600}h"
-                ),
-                inline=False
-            )
-            
-            embed.add_field(
-                name="⚠️ Próxima Remoção de Cargos",
-                value=(
-                    f"**Ocorrerá em:** {next_removal.strftime('%d/%m/%Y %H:%M')}\n"
-                    f"**Faltam:** {time_to_removal.days}d {time_to_removal.seconds//3600}h\n"
-                    f"(Na próxima verificação após término do período)"
-                ),
-                inline=False
-            )
-        else:
-            embed.add_field(
-                name="⏳ Status de Execução",
-                value="ℹ️ O sistema de monitoramento ainda não foi executado neste servidor.",
-                inline=False
-            )
-        
-        # Seção de Estatísticas
-        if stats and stats['total_members'] > 0:
-            embed.add_field(
-                name="📊 Estatísticas do Período Atual",
-                value=(
-                    f"**Membros verificados:** {stats['total_members']}\n"
-                    f"**Cumprem requisitos:** {stats['compliant']} ({stats['compliant']/stats['total_members']:.0%})\n"
-                    f"**Não cumprem:** {stats['non_compliant']} ({stats['non_compliant']/stats['total_members']:.0%})"
-                ),
-                inline=True
-            )
-        
-        # Seção de Ações Recentes
-        recent_actions = []
-        if role_removals > 0:
-            recent_actions.append(f"**Cargos removidos:** {role_removals}")
-        if kicks > 0:
-            recent_actions.append(f"**Expulsões:** {kicks}")
-        
-        if recent_actions:
-            embed.add_field(
-                name="🔨 Ações Recentes (últimos 7 dias)",
-                value="\n".join(recent_actions),
-                inline=True
-            )
-        
-        # Seção de Avisos Recentes
-        if warnings_summary:
-            warnings_text = []
-            for warn_type in ['first', 'second', 'final']:
-                if warn_type in warnings_summary:
-                    warnings_text.append(f"**{warn_type.capitalize()}:** {warnings_summary[warn_type]}")
-            
-            embed.add_field(
-                name="⚠️ Avisos Recentes (últimos 7 dias)",
-                value="\n".join(warnings_text),
-                inline=True
-            )
-        
-        embed.set_footer(text=f"Servidor: {interaction.guild.name}")
-        
-        # Enviar resposta com tratamento de rate limit
-        try:
-            await interaction.followup.send(embed=embed)
-        except discord.errors.HTTPException as e:
-            if e.status == 429:
-                retry_after = float(e.response.headers.get('Retry-After', 60))
-                logger.warning(f"Rate limit ao enviar resposta. Tentando novamente em {retry_after} segundos")
-                await asyncio.sleep(retry_after)
-                await interaction.followup.send(embed=embed)
-            else:
-                raise
-        
-    except Exception as e:
-        logger.error(f"Erro ao verificar status global do monitoramento: {e}")
-        await interaction.followup.send(
-            "❌ Ocorreu um erro ao verificar o status do monitoramento no servidor.",
-            ephemeral=True)
 
 @bot.tree.command(name="set_log_channel", description="Define o canal para logs do bot")
 @allowed_roles_only()
@@ -1498,4 +1280,4 @@ async def set_log_channel(interaction: discord.Interaction, channel: discord.Tex
             description="Ocorreu um erro ao definir o canal de logs. Por favor, tente novamente.",
             color=discord.Color.red()
         )
-        await interaction.response.send_message(embed=embed)     
+        await interaction.response.send_message(embed=embed)    
