@@ -523,47 +523,47 @@ class Database:
             if conn:
                 await self.pool.release(conn)
 
-async def get_pending_voice_events(self, limit: int = 100) -> List[Dict]:
-    """Obtém eventos de voz pendentes para processamento"""
-    conn = None
-    try:
-        conn = await self.pool.acquire()
-        results = await conn.fetch('''
-            SELECT * FROM pending_voice_events
-            WHERE processed = FALSE
-            ORDER BY event_time ASC
-            LIMIT $1
-        ''', limit)
-        
-        # Converter os resultados para dicionários e ajustar os nomes dos campos
-        events = []
-        for row in results:
-            event = dict(row)
-            # Renomear campos para compatibilidade com a criação do VoiceState
-            event['before'] = {
-                'channel_id': event['before_channel_id'],
-                'self_deaf': event['before_self_deaf'],
-                'deaf': event['before_deaf']
-            }
-            event['after'] = {
-                'channel_id': event['after_channel_id'],
-                'self_deaf': event['after_self_deaf'],
-                'self_mute': False,  # Adicionar campos padrão necessários
-                'mute': False,
-                'deaf': event['after_deaf'],
-                'afk': False,
-                'self_stream': False,
-                'self_video': False
-            }
-            events.append(event)
+    async def get_pending_voice_events(self, limit: int = 100) -> List[Dict]:
+        """Obtém eventos de voz pendentes para processamento"""
+        conn = None
+        try:
+            conn = await self.pool.acquire()
+            results = await conn.fetch('''
+                SELECT * FROM pending_voice_events
+                WHERE processed = FALSE
+                ORDER BY event_time ASC
+                LIMIT $1
+            ''', limit)
             
-        return events
-    except Exception as e:
-        logger.error(f"Erro ao obter eventos pendentes: {e}")
-        return []
-    finally:
-        if conn:
-            await self.pool.release(conn)
+            # Converter os resultados para dicionários e ajustar os nomes dos campos
+            events = []
+            for row in results:
+                event = dict(row)
+                # Renomear campos para compatibilidade com a criação do VoiceState
+                event['before'] = {
+                    'channel_id': event['before_channel_id'],
+                    'self_deaf': event['before_self_deaf'],
+                    'deaf': event['before_deaf']
+                }
+                event['after'] = {
+                    'channel_id': event['after_channel_id'],
+                    'self_deaf': event['after_self_deaf'],
+                    'self_mute': False,  # Adicionar campos padrão necessários
+                    'mute': False,
+                    'deaf': event['after_deaf'],
+                    'afk': False,
+                    'self_stream': False,
+                    'self_video': False
+                }
+                events.append(event)
+                
+            return events
+        except Exception as e:
+            logger.error(f"Erro ao obter eventos pendentes: {e}")
+            return []
+        finally:
+            if conn:
+                await self.pool.release(conn)
 
     async def mark_events_as_processed(self, event_ids: List[int]):
         """Marca eventos como processados"""

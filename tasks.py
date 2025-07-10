@@ -349,7 +349,13 @@ async def execute_task_with_persistent_interval(task_name: str, monitoring_perio
     while True:
         try:
             # Verificar última execução
-            last_exec = await bot.db.get_last_task_execution(task_name)
+            last_exec = None
+            if hasattr(bot.db, 'get_last_task_execution'):
+                try:
+                    last_exec = await bot.db.get_last_task_execution(task_name)
+                except AttributeError:
+                    logger.warning(f"Método get_last_task_execution não disponível no banco de dados")
+            
             now = datetime.now(pytz.utc)  # Usar UTC
             
             # Calcular se deve executar agora
@@ -375,13 +381,17 @@ async def execute_task_with_persistent_interval(task_name: str, monitoring_perio
                 await task_func()
                 perf_metrics.record_task_execution(task_name, time.time() - start_time)
 
-                # Para as tarefas principais, busca o valor mais recente da configuração antes de registrar.
-                # Isso garante que o valor no banco de dados sempre reflita a configuração atual.
-                period_to_log = monitoring_period
-                if task_name in ['inactivity_check', 'check_warnings', 'cleanup_members', 'check_previous_periods']:
-                    period_to_log = bot.config.get('monitoring_period', monitoring_period)
+                # Registrar execução se o método estiver disponível
+                if hasattr(bot.db, 'log_task_execution'):
+                    try:
+                        period_to_log = monitoring_period
+                        if task_name in ['inactivity_check', 'check_warnings', 'cleanup_members', 'check_previous_periods']:
+                            period_to_log = bot.config.get('monitoring_period', monitoring_period)
+                        
+                        await bot.db.log_task_execution(task_name, period_to_log)
+                    except AttributeError:
+                        logger.warning(f"Método log_task_execution não disponível no banco de dados")
                 
-                await bot.db.log_task_execution(task_name, period_to_log)
                 logger.info(f"Task {task_name} concluída com sucesso")
             
             # Esperar 1h antes de verificar novamente (evita loops muito rápidos)
