@@ -584,37 +584,37 @@ class Database:
             if conn:
                 await self.pool.release(conn)
 
-async def save_config(self, guild_id: int, config: dict):
-    """Salva configuração com cache"""
-    conn = None
-    try:
-        # Atualizar cache
-        self._config_cache[guild_id] = config
-        self._last_config_update = datetime.now(pytz.utc)
-        
-        # Serializar para JSON
-        config_json = json.dumps(config)
-        
-        conn = await self.pool.acquire()
-        await conn.execute('''
-            INSERT INTO bot_config (guild_id, config_json, last_updated)
-            VALUES ($1, $2, NOW())
-            ON CONFLICT (guild_id) DO UPDATE
-            SET config_json = EXCLUDED.config_json,
-                last_updated = EXCLUDED.last_updated
-        ''', guild_id, config_json)
-        
-        logger.info(f"Configuração salva no banco de dados para a guild {guild_id}")
-        return True
-    except Exception as e:
-        logger.error(f"Erro ao salvar configuração: {e}")
-        # Remover do cache em caso de erro
-        if guild_id in self._config_cache:
-            del self._config_cache[guild_id]
-        return False
-    finally:
-        if conn:
-            await self.pool.release(conn)
+    async def save_config(self, guild_id: int, config: dict):
+        """Salva configuração com cache"""
+        conn = None
+        try:
+            # Atualizar cache
+            self._config_cache[guild_id] = config
+            self._last_config_update = datetime.now(pytz.utc)
+            
+            # Serializar para JSON
+            config_json = json.dumps(config)
+            
+            conn = await self.pool.acquire()
+            await conn.execute('''
+                INSERT INTO bot_config (guild_id, config_json, last_updated)
+                VALUES ($1, $2, NOW())
+                ON CONFLICT (guild_id) DO UPDATE
+                SET config_json = EXCLUDED.config_json,
+                    last_updated = EXCLUDED.last_updated
+            ''', guild_id, config_json)
+            
+            logger.info(f"Configuração salva no banco de dados para a guild {guild_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Erro ao salvar configuração: {e}")
+            # Remover do cache em caso de erro
+            if guild_id in self._config_cache:
+                del self._config_cache[guild_id]
+            return False
+        finally:
+            if conn:
+                await self.pool.release(conn)
 
     async def load_config(self, guild_id: int) -> Optional[dict]:
         """Carrega configuração com cache"""
