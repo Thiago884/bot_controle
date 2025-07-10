@@ -64,15 +64,10 @@ def run_bot_in_thread():
         try:
             web_logger.info("Iniciando o loop de eventos do bot no thread de background.")
             
-            # Atribuir o loop ao bot ANTES de iniciar
-            bot.loop = loop
+            # Não atribua o loop ao bot manualmente
             bot_running = True
-            
-            # O bot agora está 'inicializado' no sentido de ter um loop e estar prestes a rodar.
-            # O estado 'pronto' (is_ready) será tratado internamente pelo bot.
             bot_initialized = True
             
-            # bot.start() é bloqueante e só retorna quando o bot é fechado.
             loop.run_until_complete(bot.start(DISCORD_TOKEN))
             
         except discord.LoginFailure:
@@ -84,11 +79,8 @@ def run_bot_in_thread():
             bot_running = False
             bot_initialized = False
             if not bot.is_closed():
-                # run_until_complete não pode ser chamado em um loop fechado
-                if not loop.is_closed():
-                    loop.run_until_complete(bot.close())
-            if not loop.is_closed():
-                loop.close()
+                loop.run_until_complete(bot.close())
+            loop.close()
 
     bot_thread = threading.Thread(target=bot_runner, daemon=True)
     bot_thread.start()

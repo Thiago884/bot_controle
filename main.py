@@ -235,7 +235,6 @@ class InactivityBot(commands.Bot):
             'shard_ids': None,
             'activity': None,
             'status': discord.Status.online,
-            'loop': asyncio.new_event_loop()  # Adicionado para evitar _delay_ready
         })
         super().__init__(*args, **kwargs)
         
@@ -1114,6 +1113,9 @@ async def on_ready():
         
         logger.info(f'Bot conectado como {bot.user}')
         logger.info(f"Latência: {round(bot.latency * 1000)}ms")
+        
+        # Desative o chunking automático se estiver causando problemas
+        bot._connection._chunk_guilds = False
         
         # Inicializar o banco de dados antes de qualquer coisa
         db_initialized = await bot.initialize_db()

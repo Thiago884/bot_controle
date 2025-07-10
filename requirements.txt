@@ -15,4 +15,4 @@ nest-asyncio>=1.5.8
 gevent>=22.10.2
 pycares>=3.0.0
 idna>=2.10
-psycopg2-binary>=2.9.9  # Adicione esta linha
+psycopg2-binary>=2.9.9
