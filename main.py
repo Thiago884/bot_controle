@@ -309,11 +309,7 @@ class InactivityBot(commands.Bot):
 
         try:
             self.db = Database()
-            success = await self.db.initialize()
-            if not success:
-                logger.error("Falha na inicialização do banco de dados")
-                self.db_connection_failed = True
-                return False
+            await self.db.initialize()  # Isso já retorna None, não um booleano
                 
             logger.info("Conexão com o banco de dados (via asyncpg) estabelecida com sucesso.")
             
@@ -1126,8 +1122,10 @@ async def on_ready():
         bot._connection._chunk_guilds = False
         
         # Inicializar o banco de dados antes de qualquer coisa
-        db_initialized = await bot.initialize_db()
-        if not db_initialized:
+        if not hasattr(bot, 'db') or not bot.db:
+            await bot.initialize_db()
+        
+        if not bot._is_initialized or bot.db_connection_failed:
             logger.critical("Falha na inicialização do banco de dados. As tarefas não serão iniciadas.")
             return
             

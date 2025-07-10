@@ -172,69 +172,69 @@ class Database:
         self._last_config_update = None
         self._active_tasks = set()
 
-    async def initialize(self):
-        if self._is_initialized:
-            return
+async def initialize(self):
+    if self._is_initialized:
+        return
             
-        max_retries = 5
-        initial_delay = 2
-        for attempt in range(max_retries):
-            try:
-                db_url = os.getenv('DATABASE_URL')
+    max_retries = 5
+    initial_delay = 2
+    for attempt in range(max_retries):
+        try:
+            db_url = os.getenv('DATABASE_URL')
+            
+            if not db_url:
+                raise ValueError("Variável de ambiente DATABASE_URL não definida")
                 
-                if not db_url:
-                    raise ValueError("Variável de ambiente DATABASE_URL não definida")
-                    
-                logger.info("Tentando conectar ao banco de dados usando DATABASE_URL")
+            logger.info("Tentando conectar ao banco de dados usando DATABASE_URL")
+            
+            # Adicionar parâmetro sslmode='require' se não estiver presente na URL
+            if 'sslmode=' not in db_url:
+                db_url += '?sslmode=require'
+            
+            self.pool = await create_pool(
+                dsn=db_url,
+                min_size=5,
+                max_size=50,
+                command_timeout=60,
+                max_inactive_connection_lifetime=300,
+                ssl='require'
+            )
+            
+            async with self.pool.acquire() as conn:
+                await asyncio.wait_for(conn.execute("SELECT 1"), timeout=10)
+            
+            await self.create_tables()
+            self._is_initialized = True
+            logger.info("Banco de dados inicializado com sucesso")
                 
-                # Adicionar parâmetro sslmode='require' se não estiver presente na URL
-                if 'sslmode=' not in db_url:
-                    db_url += '?sslmode=require'
-                
-                self.pool = await create_pool(
-                    dsn=db_url,
-                    min_size=5,
-                    max_size=50,
-                    command_timeout=60,
-                    max_inactive_connection_lifetime=300,
-                    ssl='require'
+            self.heartbeat_task = asyncio.create_task(self._db_heartbeat(interval=300))
+            self.heartbeat_task._name = 'database_heartbeat'
+            self._active_tasks.add(self.heartbeat_task)
+            logger.info("Task de heartbeat do banco de dados iniciada")
+            
+            return  # Retorna None em caso de sucesso
+            
+        except OSError as e:
+            if e.errno == 101: # Network is unreachable
+                logger.error(
+                    f"Tentativa {attempt + 1} de conexão falhou: Rede inacessível (Network Unreachable). "
+                    f"Isso geralmente é um problema de firewall. Verifique se o IP da sua aplicação na Render "
+                    f"está na lista de permissões (Network Restrictions) do seu banco de dados Neon."
                 )
-                
-                async with self.pool.acquire() as conn:
-                    await asyncio.wait_for(conn.execute("SELECT 1"), timeout=10)
-                
-                await self.create_tables()
-                self._is_initialized = True
-                logger.info("Banco de dados inicializado com sucesso")
-                    
-                self.heartbeat_task = asyncio.create_task(self._db_heartbeat(interval=300))
-                self.heartbeat_task._name = 'database_heartbeat'
-                self._active_tasks.add(self.heartbeat_task)
-                logger.info("Task de heartbeat do banco de dados iniciada")
-                
-                return
-            
-            except OSError as e:
-                if e.errno == 101: # Network is unreachable
-                    logger.error(
-                        f"Tentativa {attempt + 1} de conexão falhou: Rede inacessível (Network Unreachable). "
-                        f"Isso geralmente é um problema de firewall. Verifique se o IP da sua aplicação na Render "
-                        f"está na lista de permissões (Network Restrictions) do seu banco de dados Neon."
-                    )
-                else:
-                    logger.error(f"Tentativa {attempt + 1} de conexão ao banco de dados falhou com erro de OS: {e}")
+            else:
+                logger.error(f"Tentativa {attempt + 1} de conexão ao banco de dados falhou com erro de OS: {e}")
 
-            except Exception as e:
-                logger.error(f"Tentativa {attempt + 1} de conexão ao banco de dados falhou: {e}")
-            
-            if attempt == max_retries - 1:
-                logger.critical("Falha ao conectar ao banco de dados após várias tentativas.")
-                self.pool = None
-                raise
-            
-            sleep_time = initial_delay * (2 ** attempt)
-            logger.info(f"Tentando novamente em {sleep_time} segundos...")
-            await asyncio.sleep(sleep_time)
+        except Exception as e:
+            logger.error(f"Tentativa {attempt + 1} de conexão ao banco de dados falhou: {e}")
+        
+        if attempt == max_retries - 1:
+            logger.critical("Falha ao conectar ao banco de dados após várias tentativas.")
+            self.pool = None
+            raise  # Lança a exceção para ser tratada pelo chamador
+        
+        sleep_time = initial_delay * (2 ** attempt)
+        logger.info(f"Tentando novamente em {sleep_time} segundos...")
+        await asyncio.sleep(sleep_time)
 
     async def _db_heartbeat(self, interval: int = 300):
         """Envia um ping periódico para manter conexões ativas"""
