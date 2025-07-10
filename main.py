@@ -219,12 +219,12 @@ class SmartPriorityQueue:
 
 class InactivityBot(commands.Bot):
     def __init__(self, *args, **kwargs):
-        # Habilitar o cache de membros é crucial para as tarefas de verificação
-        member_cache_flags = discord.MemberCacheFlags.all()  # Alteração 1: Habilitar cache de membros
-
+        # Configuração do cache de membros
+        member_cache_flags = discord.MemberCacheFlags.all()
+        
         kwargs.update({
             'max_messages': 100,
-            'chunk_guilds_at_startup': True,  # Alteração 2: Habilitar chunking no startup
+            'chunk_guilds_at_startup': True,
             'member_cache_flags': member_cache_flags,
             'enable_debug_events': False,
             'heartbeat_timeout': 120.0,
@@ -234,7 +234,8 @@ class InactivityBot(commands.Bot):
             'shard_count': 1,
             'shard_ids': None,
             'activity': None,
-            'status': discord.Status.online
+            'status': discord.Status.online,
+            'loop': asyncio.new_event_loop()  # Adicionado para evitar _delay_ready
         })
         super().__init__(*args, **kwargs)
         
@@ -326,6 +327,10 @@ class InactivityBot(commands.Bot):
                 return False
                 
             self._is_initialized = True
+            
+            # Carregar configuração após inicializar o banco
+            await self.load_config()
+            
             return True
             
         except Exception as e:
@@ -362,7 +367,22 @@ class InactivityBot(commands.Bot):
     async def load_config(self, guild_id: int = None):
         """Carrega configuração de forma assíncrona com tratamento melhorado"""
         try:
-            # Primeiro tentar carregar do banco de dados
+            # Primeiro tentar carregar do arquivo local
+            if os.path.exists(CONFIG_FILE):
+                try:
+                    with open(CONFIG_FILE, 'r') as f:
+                        file_config = json.load(f)
+                        self._update_config(file_config)
+                        logger.info("Configuração carregada do arquivo local")
+                        logger.debug(f"Configuração carregada: {self.config}")
+                except json.JSONDecodeError:
+                    logger.error("Arquivo de configuração corrompido, usando padrão")
+                    self._update_config(DEFAULT_CONFIG)
+                except Exception as e:
+                    logger.error(f"Erro ao carregar configuração do arquivo: {e}")
+                    self._update_config(DEFAULT_CONFIG)
+                
+            # Depois tentar carregar do banco de dados se estiver disponível
             if hasattr(self, 'db') and self.db and self.db._is_initialized:
                 try:
                     # Se guild_id foi especificado, carregar apenas essa
@@ -383,23 +403,17 @@ class InactivityBot(commands.Bot):
                 except Exception as db_error:
                     logger.error(f"Erro ao carregar do banco: {db_error}")
             
-            # Fallback para arquivo local
-            if os.path.exists(CONFIG_FILE):
-                with open(CONFIG_FILE, 'r') as f:
-                    file_config = json.load(f)
-                    self._update_config(file_config)
-                logger.info("Configuração carregada do arquivo local")
-                return True
-            
-            # Fallback para padrão
-            self._update_config(DEFAULT_CONFIG)
-            with open(CONFIG_FILE, 'w') as f:
-                json.dump(DEFAULT_CONFIG, f, indent=4)
-            logger.info("Configuração padrão criada")
+            # Fallback para padrão se nenhuma configuração for encontrada
+            if not hasattr(self, 'config') or not self.config:
+                self._update_config(DEFAULT_CONFIG)
+                with open(CONFIG_FILE, 'w') as f:
+                    json.dump(DEFAULT_CONFIG, f, indent=4)
+                logger.info("Configuração padrão criada")
+                
             return True
             
         except Exception as e:
-            logger.error(f"Erro crítico ao carregar configuração: {e}")
+            logger.error(f"Erro crítico ao carregar configurações: {e}")
             self._update_config(DEFAULT_CONFIG)
             return False
 
@@ -1121,9 +1135,8 @@ async def on_ready():
                 bot.config[key] = DEFAULT_CONFIG[key]
         
         # Garantir que as configurações estão salvas no banco
-        if hasattr(bot, 'save_config'):
-            await bot.save_config()
-            
+        await bot.save_config()
+        
         if hasattr(bot, '_ready_set') and bot._ready_set:
             return
             
