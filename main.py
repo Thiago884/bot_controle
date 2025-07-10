@@ -423,45 +423,19 @@ async def load_config(self, guild_id: int = None):
         self._update_config(DEFAULT_CONFIG)
         return False
 
-    def _update_config(self, new_config: dict):
-        """Atualiza a configuração garantindo que todas as chaves necessárias existam"""
-        # Garantir que todas as chaves padrão existam
-        for key, value in DEFAULT_CONFIG.items():
-            if key not in new_config:
-                new_config[key] = value
-        
-        # Atualizar timezone
-        self.timezone = pytz.timezone(new_config.get('timezone', 'America/Sao_Paulo'))
-        
-        # Atualizar configuração
-        self.config = new_config
-        logger.info("Configuração atualizada com sucesso")
-
-    async def setup_hook(self):
-        """Configurações assíncronas antes do bot ficar pronto"""
-        if self._setup_complete:
-            return
-        
-        # Carregar configurações de forma assíncrona
-        await self.load_config()
-        
-        # Inicializar banco de dados
-        await self.initialize_db()
-        
-        # Prossiga apenas se a conexão com o DB for bem-sucedida
-        if self.db and not self.db_connection_failed:
-            try:
-                synced = await self.tree.sync()
-                logger.info(f"Comandos slash sincronizados: {len(synced)} comandos.")
-            except Exception as e:
-                logger.error(f"Erro ao sincronizar comandos slash: {e}")
-
-            self._setup_complete = True
-            logger.info("Setup hook concluído.")
-        else:
-            logger.critical("Falha na inicialização do banco de dados. As tarefas não serão iniciadas.")
-            self.db_connection_failed = True
-
+def _update_config(self, new_config: dict):
+    """Atualiza a configuração garantindo que todas as chaves necessárias existam"""
+    # Garantir que todas as chaves padrão existam
+    for key, value in DEFAULT_CONFIG.items():
+        if key not in new_config:
+            new_config[key] = value
+    
+    # Atualizar timezone
+    self.timezone = pytz.timezone(new_config.get('timezone', 'America/Sao_Paulo'))
+    
+    # Atualizar configuração
+    self.config = new_config
+    logger.info("Configuração atualizada com sucesso")
     async def send_with_fallback(self, destination, content=None, embed=None, file=None):
         """Envia mensagens com tratamento de erros e fallback para rate limits."""
         try:
