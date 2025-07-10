@@ -219,11 +219,13 @@ class SmartPriorityQueue:
 
 class InactivityBot(commands.Bot):
     def __init__(self, *args, **kwargs):
-        # Initialize the bot with optimized settings
+        # Habilitar o cache de membros é crucial para as tarefas de verificação
+        member_cache_flags = discord.MemberCacheFlags.all()  # Alteração 1: Habilitar cache de membros
+
         kwargs.update({
             'max_messages': 100,
-            'chunk_guilds_at_startup': False,
-            'member_cache_flags': discord.MemberCacheFlags.none(),
+            'chunk_guilds_at_startup': True,  # Alteração 2: Habilitar chunking no startup
+            'member_cache_flags': member_cache_flags,
             'enable_debug_events': False,
             'heartbeat_timeout': 120.0,
             'guild_ready_timeout': 30.0,
@@ -1106,6 +1108,9 @@ async def on_ready():
             # Primeiro verificar períodos perdidos
             await check_missed_periods()
             
+            # Alteração 3: Forçar verificação imediata de membros
+            bot.loop.create_task(cleanup_members(), name='initial_cleanup_members')
+            
             # Criar tasks com nomes identificáveis
             bot.loop.create_task(inactivity_check(), name='inactivity_check_wrapper')
             bot.loop.create_task(check_warnings(), name='check_warnings_wrapper')
@@ -1129,8 +1134,14 @@ async def on_ready():
             bot._tasks_started = True
             logger.info("Todas as tarefas de fundo foram agendadas com sucesso.")
 
+        # Alteração 4: Verificar membros atuais
         for guild in bot.guilds:
             try:
+                # Forçar fetch de todos os membros
+                logger.info(f"Carregando membros para a guilda {guild.name}...")
+                await guild.chunk()
+                logger.info(f"{len(guild.members)} membros carregados para {guild.name}")
+                
                 log_channel_id = bot.config.get('log_channel')
                 if log_channel_id:
                     log_channel = bot.get_channel(log_channel_id)

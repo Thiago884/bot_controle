@@ -374,7 +374,14 @@ async def execute_task_with_persistent_interval(task_name: str, monitoring_perio
                 start_time = time.time()
                 await task_func()
                 perf_metrics.record_task_execution(task_name, time.time() - start_time)
-                await bot.db.log_task_execution(task_name, monitoring_period)
+
+                # Para as tarefas principais, busca o valor mais recente da configuração antes de registrar.
+                # Isso garante que o valor no banco de dados sempre reflita a configuração atual.
+                period_to_log = monitoring_period
+                if task_name in ['inactivity_check', 'check_warnings', 'cleanup_members', 'check_previous_periods']:
+                    period_to_log = bot.config.get('monitoring_period', monitoring_period)
+                
+                await bot.db.log_task_execution(task_name, period_to_log)
                 logger.info(f"Task {task_name} concluída com sucesso")
             
             # Esperar 1h antes de verificar novamente (evita loops muito rápidos)
@@ -797,7 +804,7 @@ async def process_member_cleanup(member: discord.Member, guild: discord.Guild,
             
         # Verificar se tem apenas o cargo @everyone (len=1) ou nenhum cargo (len=0)
         if len(member.roles) <= 1:  # Considera @everyone como um cargo
-            joined_at = member.joined_at.replace(tzinfo=pytz.utc) if member.joined_at else None  # CORRIGIDO
+            joined_at = member.joined_at.replace(tzinfo=pytz.utc) if member.joined_at else None
             
             if joined_at and joined_at < cutoff_date:
                 try:
@@ -806,13 +813,26 @@ async def process_member_cleanup(member: discord.Member, guild: discord.Guild,
                     last_kick = await bot.db.get_last_kick(member.id, guild.id)
                     perf_metrics.record_db_query(time.time() - start_time)
                     
-                    if last_kick and (datetime.now(pytz.utc) - last_kick['kick_date']).days < kick_after_days:  # CORRIGIDO
+                    if last_kick and (datetime.now(pytz.utc) - last_kick['kick_date']).days < kick_after_days:
                         return
                         
+                    # Verificar atividade recente antes de expulsar
+                    start_time = time.time()
+                    last_activity = await bot.db.get_user_activity(member.id, guild.id)
+                    perf_metrics.record_db_query(time.time() - start_time)
+                    
+                    # Se o usuário teve atividade recente, não expulsar
+                    if last_activity and last_activity.get('last_voice_join'):
+                        last_active = last_activity['last_voice_join']
+                        if (datetime.now(pytz.utc) - last_active).days < kick_after_days:
+                            return
+                    
+                    # Expulsar o membro
                     start_time = time.time()
                     await member.kick(reason=f"Sem cargos há mais de {kick_after_days} dias")
                     perf_metrics.record_api_call(time.time() - start_time)
                     
+                    # Registrar no banco de dados
                     start_time = time.time()
                     await bot.db.log_kicked_member(
                         member.id, guild.id, 
@@ -820,11 +840,13 @@ async def process_member_cleanup(member: discord.Member, guild: discord.Guild,
                     )
                     perf_metrics.record_db_query(time.time() - start_time)
                     
+                    # Logar a ação
                     await bot.log_action(
                         "Membro Expulso",
                         member,
                         f"Motivo: Sem cargos há mais de {kick_after_days} dias\n"
-                        f"Entrou no servidor em: {joined_at.strftime('%d/%m/%Y')}"
+                        f"Entrou no servidor em: {joined_at.strftime('%d/%m/%Y')}\n"
+                        f"Última atividade em voz: {last_active.strftime('%d/%m/%Y') if last_active else 'Nunca'}"
                     )
                     await bot.notify_roles(
                         f"👢 {member.mention} foi expulso por estar sem cargos há mais de {kick_after_days} dias")
@@ -1494,8 +1516,6 @@ async def process_pending_voice_events():
         
     except Exception as e:
         logger.error(f"Erro no processamento de eventos pendentes: {e}")
-
-# /src/tasks.py
 
 @log_task_metrics("check_current_voice_members")
 async def check_current_voice_members():
