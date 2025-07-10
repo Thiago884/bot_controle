@@ -359,41 +359,63 @@ class InactivityBot(commands.Bot):
         except Exception as e:
             logger.error(f"Erro ao salvar configuração: {e}")
 
-    async def load_config(self):
-        """Carrega configuração de forma assíncrona"""
+    async def load_config(self, guild_id: int = None):
+        """Carrega configuração de forma assíncrona com tratamento melhorado"""
         try:
             # Primeiro tentar carregar do banco de dados
             if hasattr(self, 'db') and self.db and self.db._is_initialized:
                 try:
-                    # Carregar configuração da primeira guild (assumindo configuração global)
-                    if self.guilds:
-                        db_config = await self.db.load_config(self.guilds[0].id)
+                    # Se guild_id foi especificado, carregar apenas essa
+                    if guild_id is not None:
+                        db_config = await self.db.load_config(guild_id)
                         if db_config:
-                            self.config = db_config
-                            logger.info("Configuração carregada do banco de dados")
-                            return
+                            self._update_config(db_config)
+                            logger.info(f"Configuração carregada do banco para guild {guild_id}")
+                            return True
+                    
+                    # Se não, carregar para todas as guilds
+                    for guild in self.guilds:
+                        db_config = await self.db.load_config(guild.id)
+                        if db_config:
+                            self._update_config(db_config)
+                            logger.info(f"Configuração carregada do banco para guild {guild.id}")
+                            return True
                 except Exception as db_error:
                     logger.error(f"Erro ao carregar do banco: {db_error}")
             
             # Fallback para arquivo local
             if os.path.exists(CONFIG_FILE):
                 with open(CONFIG_FILE, 'r') as f:
-                    self.config = json.load(f)
+                    file_config = json.load(f)
+                    self._update_config(file_config)
                 logger.info("Configuração carregada do arquivo local")
-            else:
-                self.config = DEFAULT_CONFIG
-                with open(CONFIG_FILE, 'w') as f:
-                    json.dump(self.config, f, indent=4)
-                logger.info("Configuração padrão criada")
+                return True
             
-            self.timezone = pytz.timezone(self.config.get('timezone', 'America/Sao_Paulo'))
+            # Fallback para padrão
+            self._update_config(DEFAULT_CONFIG)
+            with open(CONFIG_FILE, 'w') as f:
+                json.dump(DEFAULT_CONFIG, f, indent=4)
+            logger.info("Configuração padrão criada")
+            return True
             
-            # Garantir chaves essenciais
-            for key, value in DEFAULT_CONFIG.items():
-                self.config.setdefault(key, value)
         except Exception as e:
-            logger.error(f"Erro ao carregar configuração: {e}")
-            self.config = DEFAULT_CONFIG
+            logger.error(f"Erro crítico ao carregar configuração: {e}")
+            self._update_config(DEFAULT_CONFIG)
+            return False
+
+    def _update_config(self, new_config: dict):
+        """Atualiza a configuração garantindo que todas as chaves necessárias existam"""
+        # Garantir que todas as chaves padrão existam
+        for key, value in DEFAULT_CONFIG.items():
+            if key not in new_config:
+                new_config[key] = value
+        
+        # Atualizar timezone
+        self.timezone = pytz.timezone(new_config.get('timezone', 'America/Sao_Paulo'))
+        
+        # Atualizar configuração
+        self.config = new_config
+        logger.info("Configuração atualizada com sucesso")
 
     async def setup_hook(self):
         """Configurações assíncronas antes do bot ficar pronto"""
@@ -1085,6 +1107,19 @@ async def on_ready():
             logger.critical("Falha na inicialização do banco de dados. As tarefas não serão iniciadas.")
             return
             
+        # Carregar configurações e garantir que estão corretas
+        config_loaded = await bot.load_config()
+        if not config_loaded:
+            logger.error("Falha ao carregar configurações - usando padrão")
+        
+        # Verificar consistência das configurações
+        required_keys = ['required_minutes', 'required_days', 'monitoring_period', 
+                        'kick_after_days', 'tracked_roles', 'warnings']
+        for key in required_keys:
+            if key not in bot.config:
+                logger.error(f"Configuração essencial faltando: {key}")
+                bot.config[key] = DEFAULT_CONFIG[key]
+        
         # Garantir que as configurações estão salvas no banco
         if hasattr(bot, 'save_config'):
             await bot.save_config()
@@ -1095,7 +1130,7 @@ async def on_ready():
         bot._ready_set = True
         
         if not bot._tasks_started:
-            logger.info("Bot está pronto. Iniciando tarefas de fundo...")
+            logger.info("Configurações verificadas. Iniciando tarefas de fundo...")
             
             from tasks import (
                 inactivity_check, check_warnings, cleanup_members,

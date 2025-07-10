@@ -590,10 +590,19 @@ async def _inactivity_check():
     """Verifica a inatividade dos membros e remove cargos se necessário"""
     await bot.wait_until_ready()
     
+    # Verificar configuração essencial
+    if 'tracked_roles' not in bot.config or not bot.config['tracked_roles']:
+        logger.info("Nenhum cargo monitorado definido - verificação de inatividade ignorada")
+        return
+    
     # Verificar se o banco de dados está disponível
     if not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
         logger.error("Banco de dados não inicializado - pulando verificação de inatividade")
         return
+    
+    # Log de depuração para configurações
+    logger.debug(f"Configuração atual: {bot.config}")
+    logger.debug(f"Monitoring period: {bot.config.get('monitoring_period')}")
     
     required_minutes = bot.config['required_minutes']
     required_days = bot.config['required_days']
@@ -657,10 +666,19 @@ async def _check_warnings():
     """Lógica original da task"""
     await bot.wait_until_ready()
     
+    # Verificar configuração essencial
+    if 'tracked_roles' not in bot.config or not bot.config['tracked_roles'] or 'warnings' not in bot.config:
+        logger.info("Cargos monitorados ou configurações de aviso não definidos - verificação ignorada")
+        return
+    
     # Verificar se o banco de dados está disponível
     if not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
         logger.error("Banco de dados não inicializado - pulando verificação de avisos")
         return
+    
+    # Log de depuração para configurações
+    logger.debug(f"Configuração atual: {bot.config}")
+    logger.debug(f"Monitoring period: {bot.config.get('monitoring_period')}")
     
     required_minutes = bot.config['required_minutes']
     required_days = bot.config['required_days']
@@ -762,6 +780,10 @@ async def _cleanup_members():
     if not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
         logger.error("Banco de dados não inicializado - pulando limpeza de membros")
         return
+    
+    # Log de depuração para configurações
+    logger.debug(f"Configuração atual: {bot.config}")
+    logger.debug(f"Kick after days: {bot.config.get('kick_after_days')}")
     
     kick_after_days = bot.config['kick_after_days']
     if kick_after_days <= 0:
