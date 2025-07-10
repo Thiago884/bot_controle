@@ -436,6 +436,32 @@ def _update_config(self, new_config: dict):
     # Atualizar configuração
     self.config = new_config
     logger.info("Configuração atualizada com sucesso")
+
+    async def setup_hook(self):
+        """Configurações assíncronas antes do bot ficar pronto"""
+        if self._setup_complete:
+            return
+        
+        # Carregar configurações de forma assíncrona
+        await self.load_config()
+        
+        # Inicializar banco de dados
+        await self.initialize_db()
+        
+        # Prossiga apenas se a conexão com o DB for bem-sucedida
+        if self.db and not self.db_connection_failed:
+            try:
+                synced = await self.tree.sync()
+                logger.info(f"Comandos slash sincronizados: {len(synced)} comandos.")
+            except Exception as e:
+                logger.error(f"Erro ao sincronizar comandos slash: {e}")
+
+            self._setup_complete = True
+            logger.info("Setup hook concluído.")
+        else:
+            logger.critical("Falha na inicialização do banco de dados. As tarefas não serão iniciadas.")
+            self.db_connection_failed = True
+
     async def send_with_fallback(self, destination, content=None, embed=None, file=None):
         """Envia mensagens com tratamento de erros e fallback para rate limits."""
         try:
