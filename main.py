@@ -340,6 +340,80 @@ class InactivityBot(commands.Bot):
             self.db.pool = None
             return False
 
+    async def load_config(self, guild_id: int = None):
+        """Carrega configuração de forma assíncrona com tratamento melhorado"""
+        try:
+            # Primeiro tentar carregar do arquivo local
+            if os.path.exists(CONFIG_FILE):
+                try:
+                    with open(CONFIG_FILE, 'r') as f:
+                        file_config = json.load(f)
+                        self._update_config(file_config)
+                        logger.info("Configuração carregada do arquivo local")
+                        logger.debug(f"Configuração carregada: {self.config}")
+                except json.JSONDecodeError:
+                    logger.error("Arquivo de configuração corrompido, usando padrão")
+                    self._update_config(DEFAULT_CONFIG)
+                except Exception as e:
+                    logger.error(f"Erro ao carregar configuração do arquivo: {e}")
+                    self._update_config(DEFAULT_CONFIG)
+                
+            # Depois tentar carregar do banco de dados se estiver disponível
+            if hasattr(self, 'db') and self.db and self.db._is_initialized:
+                try:
+                    # Se guild_id foi especificado, carregar apenas essa
+                    if guild_id is not None:
+                        try:
+                            db_config = await self.db.load_config(guild_id)
+                            if db_config:
+                                self._update_config(db_config)
+                                logger.info(f"Configuração carregada do banco para guild {guild_id}")
+                                return True
+                        except AttributeError:
+                            logger.warning("Método load_config não disponível no banco de dados")
+                    
+                    # Se não, carregar para todas as guilds
+                    for guild in self.guilds:
+                        try:
+                            db_config = await self.db.load_config(guild.id)
+                            if db_config:
+                                self._update_config(db_config)
+                                logger.info(f"Configuração carregada do banco para guild {guild.id}")
+                                return True
+                        except AttributeError:
+                            logger.warning(f"Método load_config não disponível para guild {guild.id}")
+                            continue
+                except Exception as db_error:
+                    logger.error(f"Erro ao carregar do banco: {db_error}")
+            
+            # Fallback para padrão se nenhuma configuração for encontrada
+            if not hasattr(self, 'config') or not self.config:
+                self._update_config(DEFAULT_CONFIG)
+                with open(CONFIG_FILE, 'w') as f:
+                    json.dump(DEFAULT_CONFIG, f, indent=4)
+                logger.info("Configuração padrão criada")
+                
+            return True
+            
+        except Exception as e:
+            logger.error(f"Erro crítico ao carregar configurações: {e}")
+            self._update_config(DEFAULT_CONFIG)
+            return False
+
+    def _update_config(self, new_config: dict):
+        """Atualiza a configuração garantindo que todas as chaves necessárias existam"""
+        # Garantir que todas as chaves padrão existam
+        for key, value in DEFAULT_CONFIG.items():
+            if key not in new_config:
+                new_config[key] = value
+        
+        # Atualizar timezone
+        self.timezone = pytz.timezone(new_config.get('timezone', 'America/Sao_Paulo'))
+        
+        # Atualizar configuração
+        self.config = new_config
+        logger.info("Configuração atualizada com sucesso")
+
     async def save_config(self, guild_id: int = None):
         """Salva configuração com cache (modificado)"""
         if not hasattr(self, 'config') or not self.config:
@@ -362,80 +436,6 @@ class InactivityBot(commands.Bot):
             self._last_config_save = datetime.now(pytz.utc)
         except Exception as e:
             logger.error(f"Erro ao salvar configuração: {e}")
-
-async def load_config(self, guild_id: int = None):
-    """Carrega configuração de forma assíncrona com tratamento melhorado"""
-    try:
-        # Primeiro tentar carregar do arquivo local
-        if os.path.exists(CONFIG_FILE):
-            try:
-                with open(CONFIG_FILE, 'r') as f:
-                    file_config = json.load(f)
-                    self._update_config(file_config)
-                    logger.info("Configuração carregada do arquivo local")
-                    logger.debug(f"Configuração carregada: {self.config}")
-            except json.JSONDecodeError:
-                logger.error("Arquivo de configuração corrompido, usando padrão")
-                self._update_config(DEFAULT_CONFIG)
-            except Exception as e:
-                logger.error(f"Erro ao carregar configuração do arquivo: {e}")
-                self._update_config(DEFAULT_CONFIG)
-            
-        # Depois tentar carregar do banco de dados se estiver disponível
-        if hasattr(self, 'db') and self.db and self.db._is_initialized:
-            try:
-                # Se guild_id foi especificado, carregar apenas essa
-                if guild_id is not None:
-                    try:
-                        db_config = await self.db.load_config(guild_id)
-                        if db_config:
-                            self._update_config(db_config)
-                            logger.info(f"Configuração carregada do banco para guild {guild_id}")
-                            return True
-                    except AttributeError:
-                        logger.warning("Método load_config não disponível no banco de dados")
-                
-                # Se não, carregar para todas as guilds
-                for guild in self.guilds:
-                    try:
-                        db_config = await self.db.load_config(guild.id)
-                        if db_config:
-                            self._update_config(db_config)
-                            logger.info(f"Configuração carregada do banco para guild {guild.id}")
-                            return True
-                    except AttributeError:
-                        logger.warning(f"Método load_config não disponível para guild {guild.id}")
-                        continue
-            except Exception as db_error:
-                logger.error(f"Erro ao carregar do banco: {db_error}")
-        
-        # Fallback para padrão se nenhuma configuração for encontrada
-        if not hasattr(self, 'config') or not self.config:
-            self._update_config(DEFAULT_CONFIG)
-            with open(CONFIG_FILE, 'w') as f:
-                json.dump(DEFAULT_CONFIG, f, indent=4)
-            logger.info("Configuração padrão criada")
-            
-        return True
-        
-    except Exception as e:
-        logger.error(f"Erro crítico ao carregar configurações: {e}")
-        self._update_config(DEFAULT_CONFIG)
-        return False
-
-def _update_config(self, new_config: dict):
-    """Atualiza a configuração garantindo que todas as chaves necessárias existam"""
-    # Garantir que todas as chaves padrão existam
-    for key, value in DEFAULT_CONFIG.items():
-        if key not in new_config:
-            new_config[key] = value
-    
-    # Atualizar timezone
-    self.timezone = pytz.timezone(new_config.get('timezone', 'America/Sao_Paulo'))
-    
-    # Atualizar configuração
-    self.config = new_config
-    logger.info("Configuração atualizada com sucesso")
 
     async def setup_hook(self):
         """Configurações assíncronas antes do bot ficar pronto"""
