@@ -523,38 +523,38 @@ class Database:
             if conn:
                 await self.pool.release(conn)
 
-async def get_pending_voice_events(self, limit: int = 100) -> List[Dict]:
-    """Obtém eventos de voz pendentes para processamento"""
-    conn = None
-    try:
-        conn = await self.pool.acquire()
-        results = await conn.fetch('''
-            SELECT * FROM pending_voice_events
-            WHERE processed = FALSE
-            ORDER BY event_time ASC
-            LIMIT $1
-        ''', limit)
-        
-        # Converter os resultados para dicionários
-        events = []
-        for row in results:
-            event = dict(row)
-            # Converter valores para os tipos corretos
-            event['before_channel_id'] = event.get('before_channel_id')
-            event['after_channel_id'] = event.get('after_channel_id')
-            event['before_self_deaf'] = bool(event.get('before_self_deaf', False))
-            event['before_deaf'] = bool(event.get('before_deaf', False))
-            event['after_self_deaf'] = bool(event.get('after_self_deaf', False))
-            event['after_deaf'] = bool(event.get('after_deaf', False))
-            events.append(event)
+    async def get_pending_voice_events(self, limit: int = 100) -> List[Dict]:
+        """Obtém eventos de voz pendentes para processamento"""
+        conn = None
+        try:
+            conn = await self.pool.acquire()
+            results = await conn.fetch('''
+                SELECT * FROM pending_voice_events
+                WHERE processed = FALSE
+                ORDER BY event_time ASC
+                LIMIT $1
+            ''', limit)
             
-        return events
-    except Exception as e:
-        logger.error(f"Erro ao obter eventos pendentes: {e}")
-        return []
-    finally:
-        if conn:
-            await self.pool.release(conn)
+            # Converter os resultados para dicionários
+            events = []
+            for row in results:
+                event = dict(row)
+                # Converter valores para os tipos corretos
+                event['before_channel_id'] = event.get('before_channel_id')
+                event['after_channel_id'] = event.get('after_channel_id')
+                event['before_self_deaf'] = bool(event.get('before_self_deaf', False))
+                event['before_deaf'] = bool(event.get('before_deaf', False))
+                event['after_self_deaf'] = bool(event.get('after_self_deaf', False))
+                event['after_deaf'] = bool(event.get('after_deaf', False))
+                events.append(event)
+                
+            return events
+        except Exception as e:
+            logger.error(f"Erro ao obter eventos pendentes: {e}")
+            return []
+        finally:
+            if conn:
+                await self.pool.release(conn)
 
     async def mark_events_as_processed(self, event_ids: List[int]):
         """Marca eventos como processados"""

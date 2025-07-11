@@ -658,29 +658,29 @@ class InactivityBot(commands.Bot):
                 logger.error(f"Erro no processador de filas: {e}")
                 await asyncio.sleep(1)
 
-async def _process_voice_batch(self, batch):
-    processed = {}
-    
-    for event in batch:
-        try:
-            event_type, member, before, after = event
-            key = (member.id, member.guild.id)
-            
-            if key not in processed:
-                processed[key] = {
-                    'member': member,
-                    'events': []
-                }
-            processed[key]['events'].append((before, after))
-        except Exception as e:
-            logger.error(f"Erro ao processar evento de voz: {e}")
-            continue
-    
-    for user_data in processed.values():
-        try:
-            await self._process_user_voice_events(user_data['member'], user_data['events'])
-        except Exception as e:
-            logger.error(f"Erro ao processar eventos para {user_data['member']}: {e}")
+    async def _process_voice_batch(self, batch):
+        processed = {}
+        
+        for event in batch:
+            try:
+                event_type, member, before, after = event
+                key = (member.id, member.guild.id)
+                
+                if key not in processed:
+                    processed[key] = {
+                        'member': member,
+                        'events': []
+                    }
+                processed[key]['events'].append((before, after))
+            except Exception as e:
+                logger.error(f"Erro ao processar evento de voz: {e}")
+                continue
+        
+        for user_data in processed.values():
+            try:
+                await self._process_user_voice_events(user_data['member'], user_data['events'])
+            except Exception as e:
+                logger.error(f"Erro ao processar eventos para {user_data['member']}: {e}")
 
     async def _process_user_voice_events(self, member, events):
         if not hasattr(self, 'config') or 'absence_channel' not in self.config:
@@ -975,7 +975,7 @@ async def _process_voice_batch(self, batch):
                     embed,
                     file
                 ), priority='high')
-            
+                
         except Exception as e:
             logger.error(f"Erro ao registrar ação no log: {e}")
 
