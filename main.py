@@ -313,6 +313,11 @@ class InactivityBot(commands.Bot):
                 
             logger.info("Conexão com o banco de dados (via asyncpg) estabelecida com sucesso.")
             
+            # Inicializar o backup após o banco estar pronto
+            from database import DatabaseBackup
+            self.db_backup = DatabaseBackup(self.db)
+            logger.info("Backup do banco de dados inicializado")
+            
             # Verificar se a conexão está realmente funcionando
             try:
                 async with self.db.pool.acquire() as conn:
@@ -1199,7 +1204,7 @@ async def on_ready():
             bot._tasks_started = True
             logger.info("Todas as tarefas de fundo foram agendadas com sucesso.")
 
-        # Alteração 4: Verificar membros atuais
+        # Alteração 4: Verificar membros ativos e canais
         for guild in bot.guilds:
             try:
                 # Forçar fetch de todos os membros
@@ -1207,17 +1212,30 @@ async def on_ready():
                 await guild.chunk()
                 logger.info(f"{len(guild.members)} membros carregados para {guild.name}")
                 
+                # Verificar canais de log e notificação
                 log_channel_id = bot.config.get('log_channel')
                 if log_channel_id:
-                    log_channel = bot.get_channel(log_channel_id)
+                    log_channel = bot.get_channel(int(log_channel_id))
                     if not log_channel:
-                        logger.error(f"Canal de logs (ID: {log_channel_id}) não encontrado no servidor {guild.name}.")
+                        logger.error(f"Canal de logs (ID: {log_channel_id}) não encontrado - criando fallback")
+                        # Tentar encontrar um canal padrão
+                        for channel in guild.text_channels:
+                            if 'log' in channel.name.lower():
+                                bot.config['log_channel'] = channel.id
+                                await bot.save_config(guild.id)
+                                break
                 
                 notification_channel_id = bot.config.get('notification_channel')
                 if notification_channel_id:
-                    notify_channel = bot.get_channel(notification_channel_id)
+                    notify_channel = bot.get_channel(int(notification_channel_id))
                     if not notify_channel:
-                        logger.error(f"Canal de notificações (ID: {notification_channel_id}) não encontrado no servidor {guild.name}.")
+                        logger.error(f"Canal de notificações (ID: {notification_channel_id}) não encontrado - criando fallback")
+                        # Tentar encontrar um canal padrão
+                        for channel in guild.text_channels:
+                            if 'geral' in channel.name.lower() or 'notif' in channel.name.lower():
+                                bot.config['notification_channel'] = channel.id
+                                await bot.save_config(guild.id)
+                                break
 
             except Exception as e:
                 logger.error(f"Erro durante a validação de canais no on_ready para a guilda {guild.name}: {e}", exc_info=True)

@@ -501,21 +501,33 @@ async def emergency_backup():
     """Realiza um backup emergencial dos dados críticos."""
     try:
         logger.info("Iniciando backup emergencial...")
-        if not hasattr(bot, 'db_backup'):
+        if not hasattr(bot, 'db_backup') or bot.db_backup is None:
             try:
+                if not hasattr(bot, 'db') or not bot.db:
+                    logger.error("Banco de dados não disponível para backup")
+                    return False
+                    
                 from database import DatabaseBackup
                 bot.db_backup = DatabaseBackup(bot.db)
+                await asyncio.sleep(1)  # Garante inicialização
             except Exception as e:
                 logger.error(f"Erro ao criar instância de DatabaseBackup: {e}")
                 return False
         
         try:
-            success = await bot.db_backup.create_backup()
-            if success:
-                logger.info("Backup emergencial concluído com sucesso.")
-                return True
+            if hasattr(bot.db_backup, 'create_backup'):
+                start_time = time.time()
+                success = await bot.db_backup.create_backup()
+                perf_metrics.record_db_query(time.time() - start_time)
+                
+                if success:
+                    logger.info("Backup emergencial concluído com sucesso.")
+                    return True
+                else:
+                    logger.error("Backup emergencial falhou.")
+                    return False
             else:
-                logger.error("Backup emergencial falhou.")
+                logger.error("Método create_backup não disponível no DatabaseBackup")
                 return False
         except Exception as e:
             logger.error(f"Falha no backup emergencial: {e}")
@@ -1556,7 +1568,11 @@ async def process_pending_voice_events():
                     processed_ids.append(event['id'])
                     continue
                 
-                # Criar objetos VoiceState aproximados sem o parâmetro guild
+                # Verificar se os canais existem
+                before_channel = guild.get_channel(event['before_channel_id']) if event['before_channel_id'] else None
+                after_channel = guild.get_channel(event['after_channel_id']) if event['after_channel_id'] else None
+                
+                # Criar objetos VoiceState
                 before_data = {
                     'channel_id': event['before_channel_id'],
                     'self_deaf': event['before_self_deaf'],
@@ -1585,8 +1601,8 @@ async def process_pending_voice_events():
                 await bot.voice_event_queue.put((
                     event['event_type'],
                     member,
-                    discord.VoiceState(data=before_data, channel=guild.get_channel(event['before_channel_id']) if event['before_channel_id'] else None),
-                    discord.VoiceState(data=after_data, channel=guild.get_channel(event['after_channel_id']) if event['after_channel_id'] else None)
+                    discord.VoiceState(data=before_data, channel=before_channel),
+                    discord.VoiceState(data=after_data, channel=after_channel)
                 ))
                 
                 processed_ids.append(event['id'])
@@ -1594,7 +1610,7 @@ async def process_pending_voice_events():
             except Exception as e:
                 logger.error(f"Erro ao processar evento pendente {event['id']}: {e}")
                 continue
-            
+                
             # Marcar como processados a cada lote
             if len(processed_ids) >= batch_size:
                 await bot.db.mark_events_as_processed(processed_ids)
