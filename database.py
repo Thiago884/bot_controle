@@ -1104,6 +1104,26 @@ class Database:
             if conn:
                 await self.pool.release(conn)
 
+    async def sync_task_periods(self, monitoring_period: int):
+        """Sincroniza os períodos de monitoramento em todas as tasks"""
+        conn = None
+        try:
+            conn = await self.pool.acquire()
+            await conn.execute('''
+                UPDATE task_executions 
+                SET monitoring_period = $1
+                WHERE task_name IN (
+                    'inactivity_check', 'check_warnings', 
+                    'cleanup_members', 'check_previous_periods'
+                )
+            ''', monitoring_period)
+            logger.info("Períodos de monitoramento sincronizados nas tasks")
+        except Exception as e:
+            logger.error(f"Erro ao sincronizar períodos de monitoramento: {e}")
+        finally:
+            if conn:
+                await self.pool.release(conn)
+
     async def health_check(self):
         """Verifica a saúde do banco de dados e reinicia tasks se necessário"""
         # Verificação básica de conexão

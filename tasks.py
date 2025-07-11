@@ -223,6 +223,19 @@ class BatchProcessor:
                     
                     if roles_to_remove:
                         try:
+                            # Log detalhado antes de tentar remover
+                            logger.info(f"Preparando para remover cargos de {member}: {[r.name for r in roles_to_remove]}")
+                            
+                            # Verificar permissões
+                            if not member.guild.me.guild_permissions.manage_roles:
+                                raise discord.Forbidden("Bot não tem permissão para gerenciar cargos")
+                                
+                            # Verificar hierarquia de cargos
+                            top_role = member.guild.me.top_role
+                            for role in roles_to_remove:
+                                if role >= top_role:
+                                    raise discord.Forbidden(f"Não posso remover cargo {role.name} - acima da minha hierarquia")
+                            
                             # Registrar novo período antes de remover cargos
                             await self.bot.db.log_period_check(
                                 member.id, member.guild.id, 
@@ -275,8 +288,9 @@ class BatchProcessor:
                             
                             result['removed'] = 1
                             
-                        except discord.Forbidden:
-                            await self.bot.log_action("Erro ao Remover Cargo", member, "Permissões insuficientes")
+                        except discord.Forbidden as e:
+                            logger.error(f"Permissões insuficientes para remover cargos de {member}: {e}")
+                            await self.bot.log_action("Erro ao Remover Cargo", member, f"Permissões insuficientes: {e}")
                         except Exception as e:
                             logger.error(f"Erro ao remover cargos de {member}: {e}")
                 else:
@@ -527,6 +541,24 @@ async def _health_check():
         return
 
     try:
+        # Verificar última execução das tasks críticas
+        critical_tasks = ['inactivity_check', 'check_warnings', 'cleanup_members', 'check_previous_periods']
+        for task_name in critical_tasks:
+            last_exec = await bot.db.get_last_task_execution(task_name)
+            if last_exec:
+                last_exec_time = last_exec['last_execution']
+                if last_exec_time.tzinfo is None:
+                    last_exec_time = last_exec_time.replace(tzinfo=pytz.utc)
+                
+                time_since_last = datetime.now(pytz.utc) - last_exec_time
+                if time_since_last > timedelta(hours=26):  # 2 horas de tolerância
+                    logger.warning(f"Task {task_name} não executou nos últimos {time_since_last}")
+                    await bot.log_action(
+                        "Alerta de Task",
+                        None,
+                        f"Task {task_name} não executou nos últimos {time_since_last}"
+                    )
+        
         # Obter todas as tasks ativas por nome
         active_tasks = {t.get_name() for t in asyncio.all_tasks() if t.get_name()}
         
@@ -839,6 +871,10 @@ async def process_member_cleanup(member: discord.Member, guild: discord.Guild,
             joined_at = member.joined_at.replace(tzinfo=pytz.utc) if member.joined_at else None
             
             if joined_at and joined_at < cutoff_date:
+                # Verificar se o membro ainda está no servidor
+                if member not in guild.members:
+                    return
+                    
                 try:
                     # Verificar se já foi expulso antes
                     start_time = time.time()
@@ -853,11 +889,16 @@ async def process_member_cleanup(member: discord.Member, guild: discord.Guild,
                     last_activity = await bot.db.get_user_activity(member.id, guild.id)
                     perf_metrics.record_db_query(time.time() - start_time)
                     
-                    # Se o usuário teve atividade recente, não expulsar
+                    # Inicializar last_active com joined_at como fallback
+                    last_active = joined_at
+                    
+                    # Se o usuário teve atividade recente, usar essa data
                     if last_activity and last_activity.get('last_voice_join'):
                         last_active = last_activity['last_voice_join']
-                        if (datetime.now(pytz.utc) - last_active).days < kick_after_days:
-                            return
+                    
+                    # Verificar se a inatividade ultrapassa o limite
+                    if (datetime.now(pytz.utc) - last_active).days < kick_after_days:
+                        return
                     
                     # Expulsar o membro
                     start_time = time.time()
@@ -1396,8 +1437,18 @@ async def process_member_previous_periods(member: discord.Member, guild: discord
             ]
             
             if roles_to_remove:
-                logger.info(f"Removendo cargos de {member} por falha em períodos anteriores")
+                logger.info(f"Removendo cargos de {member}: {[r.name for r in roles_to_remove]}")
                 try:
+                    # Verificar permissões
+                    if not member.guild.me.guild_permissions.manage_roles:
+                        raise discord.Forbidden("Bot não tem permissão para gerenciar cargos")
+                        
+                    # Verificar hierarquia de cargos
+                    top_role = member.guild.me.top_role
+                    for role in roles_to_remove:
+                        if role >= top_role:
+                            raise discord.Forbidden(f"Não posso remover cargo {role.name} - acima da minha hierarquia")
+                    
                     # Remover cargos
                     start_time = time.time()
                     await member.remove_roles(*roles_to_remove)
@@ -1461,8 +1512,9 @@ async def process_member_previous_periods(member: discord.Member, guild: discord
                     
                     result['removed'] = 1
                     
-                except discord.Forbidden:
-                    await bot.log_action("Erro ao Remover Cargo", member, "Permissões insuficientes")
+                except discord.Forbidden as e:
+                    logger.error(f"Permissões insuficientes para remover cargos de {member}: {e}")
+                    await bot.log_action("Erro ao Remover Cargo", member, f"Permissões insuficientes: {e}")
                 except Exception as e:
                     logger.error(f"Erro ao remover cargos de {member}: {e}")
     
