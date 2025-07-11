@@ -658,10 +658,11 @@ class InactivityBot(commands.Bot):
                 logger.error(f"Erro no processador de filas: {e}")
                 await asyncio.sleep(1)
 
-    async def _process_voice_batch(self, batch):
-        processed = {}
-        
-        for event in batch:
+async def _process_voice_batch(self, batch):
+    processed = {}
+    
+    for event in batch:
+        try:
             event_type, member, before, after = event
             key = (member.id, member.guild.id)
             
@@ -671,12 +672,15 @@ class InactivityBot(commands.Bot):
                     'events': []
                 }
             processed[key]['events'].append((before, after))
-        
-        for user_data in processed.values():
-            try:
-                await self._process_user_voice_events(user_data['member'], user_data['events'])
-            except Exception as e:
-                logger.error(f"Erro ao processar eventos para {user_data['member']}: {e}")
+        except Exception as e:
+            logger.error(f"Erro ao processar evento de voz: {e}")
+            continue
+    
+    for user_data in processed.values():
+        try:
+            await self._process_user_voice_events(user_data['member'], user_data['events'])
+        except Exception as e:
+            logger.error(f"Erro ao processar eventos para {user_data['member']}: {e}")
 
     async def _process_user_voice_events(self, member, events):
         if not hasattr(self, 'config') or 'absence_channel' not in self.config:
@@ -1245,10 +1249,6 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
         # Extrair informações necessárias dos estados de voz
         before_channel_id = before.channel.id if before.channel else None
         after_channel_id = after.channel.id if after.channel else None
-        before_self_deaf = before.self_deaf
-        before_deaf = before.deaf
-        after_self_deaf = after.self_deaf
-        after_deaf = after.deaf
         
         # Salvar o evento no banco de dados com timestamp UTC
         await bot.db.save_pending_voice_event(
@@ -1257,10 +1257,10 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
             member.guild.id,
             before_channel_id,
             after_channel_id,
-            before_self_deaf,
-            before_deaf,
-            after_self_deaf,
-            after_deaf
+            before.self_deaf,
+            before.deaf,
+            after.self_deaf,
+            after.deaf
         )
         
         # Enfileirar para processamento normal

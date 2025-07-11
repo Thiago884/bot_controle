@@ -1493,26 +1493,21 @@ async def process_pending_voice_events():
         batch_size = 50
         processed_ids = []
         
-        for i in range(0, len(pending_events), batch_size):
-            batch = pending_events[i:i + batch_size]
-            
-            # Recriar objetos VoiceState aproximados
-            for event in batch:
-                try:
-                    guild = bot.get_guild(event['guild_id'])
-                    if not guild:
-                        continue
-                        
-                    member = guild.get_member(event['user_id'])
-                    if not member:
-                        continue
+        for event in pending_events:
+            try:
+                guild = bot.get_guild(event['guild_id'])
+                if not guild:
+                    processed_ids.append(event['id'])
+                    continue
                     
-                    # Recriar estados before e after aproximados
-                    before_channel = guild.get_channel(event['before_channel_id']) if event['before_channel_id'] else None
-                    after_channel = guild.get_channel(event['after_channel_id']) if event['after_channel_id'] else None
-                    
-                    # Corrigido: Criar objetos VoiceState de forma compatível
-                    before_data = {
+                member = guild.get_member(event['user_id'])
+                if not member:
+                    processed_ids.append(event['id'])
+                    continue
+                
+                # Criar objetos VoiceState aproximados
+                before = discord.VoiceState(
+                    data={
                         'channel_id': event['before_channel_id'],
                         'self_deaf': event['before_self_deaf'],
                         'deaf': event['before_deaf'],
@@ -1522,10 +1517,12 @@ async def process_pending_voice_events():
                         'self_video': False,
                         'suppress': False,
                         'requested_to_speak_at': None,
-                        'session_id': 'estimated_' + str(int(time.time()))
-                    }
-                    
-                    after_data = {
+                    },
+                    guild=guild
+                )
+                
+                after = discord.VoiceState(
+                    data={
                         'channel_id': event['after_channel_id'],
                         'self_deaf': event['after_self_deaf'],
                         'deaf': event['after_deaf'],
@@ -1535,32 +1532,33 @@ async def process_pending_voice_events():
                         'self_video': False,
                         'suppress': False,
                         'requested_to_speak_at': None,
-                        'session_id': 'estimated_' + str(int(time.time()))
-                    }
-                    
-                    # Criar objetos VoiceState
-                    before = discord.VoiceState(data=before_data, guild=guild)
-                    after = discord.VoiceState(data=after_data, guild=guild)
-                    
-                    # Enfileirar para processamento
-                    await bot.voice_event_queue.put((
-                        event['event_type'],
-                        member,
-                        before,
-                        after
-                    ))
-                    
-                    processed_ids.append(event['id'])
-                    
-                except Exception as e:
-                    logger.error(f"Erro ao processar evento pendente {event['id']}: {e}")
+                    },
+                    guild=guild
+                )
+                
+                # Enfileirar para processamento
+                await bot.voice_event_queue.put((
+                    event['event_type'],
+                    member,
+                    before,
+                    after
+                ))
+                
+                processed_ids.append(event['id'])
+                
+            except Exception as e:
+                logger.error(f"Erro ao processar evento pendente {event['id']}: {e}")
+                continue
             
             # Marcar como processados a cada lote
-            if processed_ids:
+            if len(processed_ids) >= batch_size:
                 await bot.db.mark_events_as_processed(processed_ids)
                 processed_ids = []
-            
-            await asyncio.sleep(1)  # Pequeno delay entre lotes
+                await asyncio.sleep(1)  # Pequeno delay entre lotes
+        
+        # Marcar quaisquer eventos restantes como processados
+        if processed_ids:
+            await bot.db.mark_events_as_processed(processed_ids)
         
         logger.info("Processamento de eventos pendentes concluído")
         
