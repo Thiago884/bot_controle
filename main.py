@@ -411,33 +411,33 @@ class InactivityBot(commands.Bot):
         self.config = new_config
         logger.info("Configuração atualizada com sucesso")
 
-async def save_config(self, guild_id: int = None):
-    """Salva configuração com cache (modificado)"""
-    if not hasattr(self, 'config') or not self.config:
-        return
-        
-    try:
-        # Salvar no arquivo local
-        with open(CONFIG_FILE, 'w') as f:
-            json.dump(self.config, f, indent=4)
-        
-        # Salvar no banco de dados para cada guild relevante
-        if hasattr(self, 'db') and self.db and self.db._is_initialized:
-            # Se guild_id não foi especificado, salvar para todas as guilds do bot
-            guilds_to_save = [guild_id] if guild_id is not None else [guild.id for guild in self.guilds]
+    async def save_config(self, guild_id: int = None):
+        """Salva configuração com cache (modificado)"""
+        if not hasattr(self, 'config') or not self.config:
+            return
             
-            for gid in guilds_to_save:
-                await self.db.save_config(gid, self.config)
-                logger.info(f"Configuração salva no banco para guild {gid}")
+        try:
+            # Salvar no arquivo local
+            with open(CONFIG_FILE, 'w') as f:
+                json.dump(self.config, f, indent=4)
             
-            # Sincronizar períodos de monitoramento
-            monitoring_period = self.config.get('monitoring_period')
-            if monitoring_period:
-                await self.db.sync_task_periods(monitoring_period)
-        
-        self._last_config_save = datetime.now(pytz.utc)
-    except Exception as e:
-        logger.error(f"Erro ao salvar configuração: {e}")
+            # Salvar no banco de dados para cada guild relevante
+            if hasattr(self, 'db') and self.db and self.db._is_initialized:
+                # Se guild_id não foi especificado, salvar para todas as guilds do bot
+                guilds_to_save = [guild_id] if guild_id is not None else [guild.id for guild in self.guilds]
+                
+                for gid in guilds_to_save:
+                    await self.db.save_config(gid, self.config)
+                    logger.info(f"Configuração salva no banco para guild {gid}")
+                
+                # Sincronizar períodos de monitoramento
+                monitoring_period = self.config.get('monitoring_period')
+                if monitoring_period:
+                    await self.db.sync_task_periods(monitoring_period)
+            
+            self._last_config_save = datetime.now(pytz.utc)
+        except Exception as e:
+            logger.error(f"Erro ao salvar configuração: {e}")
 
     async def setup_hook(self):
         """Configurações assíncronas antes do bot ficar pronto"""
