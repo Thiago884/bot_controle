@@ -1471,7 +1471,6 @@ async def process_member_previous_periods(member: discord.Member, guild: discord
     
     return result
 
-@log_task_metrics("process_pending_voice_events")
 async def process_pending_voice_events():
     """Processa eventos de voz pendentes que foram salvos no banco de dados"""
     await bot.wait_until_ready()
@@ -1505,43 +1504,37 @@ async def process_pending_voice_events():
                     processed_ids.append(event['id'])
                     continue
                 
-                # Criar objetos VoiceState aproximados
-                before = discord.VoiceState(
-                    data={
-                        'channel_id': event['before_channel_id'],
-                        'self_deaf': event['before_self_deaf'],
-                        'deaf': event['before_deaf'],
-                        'self_mute': False,
-                        'mute': False,
-                        'self_stream': False,
-                        'self_video': False,
-                        'suppress': False,
-                        'requested_to_speak_at': None,
-                    },
-                    guild=guild
-                )
+                # Criar objetos VoiceState aproximados sem o parâmetro guild
+                before_data = {
+                    'channel_id': event['before_channel_id'],
+                    'self_deaf': event['before_self_deaf'],
+                    'deaf': event['before_deaf'],
+                    'self_mute': False,
+                    'mute': False,
+                    'self_stream': False,
+                    'self_video': False,
+                    'suppress': False,
+                    'requested_to_speak_at': None,
+                }
                 
-                after = discord.VoiceState(
-                    data={
-                        'channel_id': event['after_channel_id'],
-                        'self_deaf': event['after_self_deaf'],
-                        'deaf': event['after_deaf'],
-                        'self_mute': False,
-                        'mute': False,
-                        'self_stream': False,
-                        'self_video': False,
-                        'suppress': False,
-                        'requested_to_speak_at': None,
-                    },
-                    guild=guild
-                )
+                after_data = {
+                    'channel_id': event['after_channel_id'],
+                    'self_deaf': event['after_self_deaf'],
+                    'deaf': event['after_deaf'],
+                    'self_mute': False,
+                    'mute': False,
+                    'self_stream': False,
+                    'self_video': False,
+                    'suppress': False,
+                    'requested_to_speak_at': None,
+                }
                 
                 # Enfileirar para processamento
                 await bot.voice_event_queue.put((
                     event['event_type'],
                     member,
-                    before,
-                    after
+                    discord.VoiceState(data=before_data, channel=guild.get_channel(event['before_channel_id']) if event['before_channel_id'] else None),
+                    discord.VoiceState(data=after_data, channel=guild.get_channel(event['after_channel_id']) if event['after_channel_id'] else None)
                 ))
                 
                 processed_ids.append(event['id'])
