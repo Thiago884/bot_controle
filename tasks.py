@@ -1511,18 +1511,36 @@ async def process_pending_voice_events():
                     before_channel = guild.get_channel(event['before_channel_id']) if event['before_channel_id'] else None
                     after_channel = guild.get_channel(event['after_channel_id']) if event['after_channel_id'] else None
                     
-                    # Criar objetos VoiceState aproximados
-                    before = discord.VoiceState(data={
-                        'channel': before_channel,
+                    # Corrigido: Criar objetos VoiceState de forma compatível
+                    before_data = {
+                        'channel_id': event['before_channel_id'],
                         'self_deaf': event['before_self_deaf'],
-                        'deaf': event['before_deaf']
-                    }, guild=guild)
+                        'deaf': event['before_deaf'],
+                        'self_mute': False,
+                        'mute': False,
+                        'self_stream': False,
+                        'self_video': False,
+                        'suppress': False,
+                        'requested_to_speak_at': None,
+                        'session_id': 'estimated_' + str(int(time.time()))
+                    }
                     
-                    after = discord.VoiceState(data={
-                        'channel': after_channel,
+                    after_data = {
+                        'channel_id': event['after_channel_id'],
                         'self_deaf': event['after_self_deaf'],
-                        'deaf': event['after_deaf']
-                    }, guild=guild)
+                        'deaf': event['after_deaf'],
+                        'self_mute': False,
+                        'mute': False,
+                        'self_stream': False,
+                        'self_video': False,
+                        'suppress': False,
+                        'requested_to_speak_at': None,
+                        'session_id': 'estimated_' + str(int(time.time()))
+                    }
+                    
+                    # Criar objetos VoiceState
+                    before = discord.VoiceState(data=before_data, guild=guild)
+                    after = discord.VoiceState(data=after_data, guild=guild)
                     
                     # Enfileirar para processamento
                     await bot.voice_event_queue.put((
