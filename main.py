@@ -469,28 +469,28 @@ class InactivityBot(commands.Bot):
             logger.critical("Falha na inicialização do banco de dados. As tarefas não serão iniciadas.")
             self.db_connection_failed = True
 
-async def send_with_fallback(self, destination, content=None, embed=None, file=None):
-    """Envia mensagens com tratamento de erros e fallback para rate limits."""
-    try:
-        if file:
-            # Se for um objeto BytesIO, criar um File discord.File
-            if isinstance(file, BytesIO):
-                file.seek(0)  # Voltar ao início do buffer
-                file = discord.File(file, filename='activity_report.png')
-            await destination.send(content=content, embed=embed, file=file)
-        elif embed:
-            await destination.send(embed=embed)
-        elif content:
-            await destination.send(content)
-    except discord.HTTPException as e:
-        if e.code == 429:  # Rate limited
-            retry_after = e.retry_after
-            logger.warning(f"Rate limit atingido. Tentando novamente em {retry_after} segundos")
-            await asyncio.sleep(retry_after)
-            await self.send_with_fallback(destination, content, embed, file)
-        else:
-            logger.error(f"Erro ao enviar mensagem para {destination}: {e}")
-            raise
+    async def send_with_fallback(self, destination, content=None, embed=None, file=None):
+        """Envia mensagens com tratamento de erros e fallback para rate limits."""
+        try:
+            if file:
+                # Se for um objeto BytesIO, criar um File discord.File
+                if isinstance(file, BytesIO):
+                    file.seek(0)  # Voltar ao início do buffer
+                    file = discord.File(file, filename='activity_report.png')
+                await destination.send(content=content, embed=embed, file=file)
+            elif embed:
+                await destination.send(embed=embed)
+            elif content:
+                await destination.send(content)
+        except discord.HTTPException as e:
+            if e.code == 429:  # Rate limited
+                retry_after = e.retry_after
+                logger.warning(f"Rate limit atingido. Tentando novamente em {retry_after} segundos")
+                await asyncio.sleep(retry_after)
+                await self.send_with_fallback(destination, content, embed, file)
+            else:
+                logger.error(f"Erro ao enviar mensagem para {destination}: {e}")
+                raise
 
     async def on_error(self, event, *args, **kwargs):
         """Tratamento de erros genéricos."""
@@ -904,15 +904,14 @@ async def send_with_fallback(self, destination, content=None, embed=None, file=N
             await self.log_action(None, None, embed=embed)
 
     async def process_voice_events(self):
+        """Processa eventos de voz da fila"""
         await self.wait_until_ready()
         while True:
             try:
                 event = await self.voice_event_queue.get()
                 await self._process_voice_batch([event])
                 self.voice_event_queue.task_done()
-                    
                 await asyncio.sleep(0.1)
-                
             except Exception as e:
                 logger.error(f"Erro no processador de eventos de voz: {e}")
                 await asyncio.sleep(1)
@@ -920,9 +919,10 @@ async def send_with_fallback(self, destination, content=None, embed=None, file=N
     async def log_action(self, action: str, member: Optional[discord.Member] = None, 
                        details: str = None, file: discord.File = None, 
                        embed: discord.Embed = None):
+        """Registra uma ação no canal de logs"""
         try:
             if not hasattr(self, 'config') or not self.config.get('log_channel'):
-                if action:  # Só loga no console se for uma ação importante
+                if action:
                     logger.info(f"Ação não logada (canal não configurado): {action}")
                 return
                 
@@ -946,27 +946,8 @@ async def send_with_fallback(self, destination, content=None, embed=None, file=N
                 return
                 
             if action:
-                if "Áudio Desativado" in str(action):
-                    color = discord.Color.orange()
-                    icon = "🔇"
-                elif "Áudio Reativado" in str(action):
-                    color = discord.Color.green()
-                    icon = "🔊"
-                elif "Erro" in str(action):
-                    color = discord.Color.red()
-                    icon = "❌"
-                elif "Aviso" in str(action):
-                    color = discord.Color.gold()
-                    icon = "⚠️"
-                elif "Sessão Estimada" in str(action):
-                    color = discord.Color.orange()
-                    icon = "🔄"
-                elif "Sessão Recuperada" in str(action):
-                    color = discord.Color.green()
-                    icon = "✅"
-                else:
-                    color = discord.Color.blue()
-                    icon = "ℹ️"
+                color = discord.Color.blue()
+                icon = "ℹ️"
                     
                 embed = discord.Embed(
                     title=f"{icon} {action}",
@@ -1031,28 +1012,28 @@ async def send_with_fallback(self, destination, content=None, embed=None, file=N
             logger.error(f"Erro ao enviar notificação: {e}")
             await self.log_action("Erro de Notificação", None, f"Falha ao enviar mensagem: {str(e)}")
 
-async def send_dm(self, member: discord.Member, message_content: str, embed: discord.Embed):
-    try:
-        await self.message_queue.put((
-            member,
-            message_content,
-            embed,
-            None
-        ), priority='low')
-    except discord.Forbidden:
-        logger.warning(f"Não foi possível enviar DM para {member.display_name}. (DMs desabilitadas)")
-        await self.log_action(
-            "Falha ao Enviar DM", 
-            member, 
-            "O usuário provavelmente desabilitou DMs de membros do servidor."
-        )
-    except discord.HTTPException as e:
-        if e.code == 50007:  # Cannot send messages to this user
+    async def send_dm(self, member: discord.Member, message_content: str, embed: discord.Embed):
+        try:
+            await self.message_queue.put((
+                member,
+                message_content,
+                embed,
+                None
+            ), priority='low')
+        except discord.Forbidden:
             logger.warning(f"Não foi possível enviar DM para {member.display_name}. (DMs desabilitadas)")
-        else:
+            await self.log_action(
+                "Falha ao Enviar DM", 
+                member, 
+                "O usuário provavelmente desabilitou DMs de membros do servidor."
+            )
+        except discord.HTTPException as e:
+            if e.code == 50007:  # Cannot send messages to this user
+                logger.warning(f"Não foi possível enviar DM para {member.display_name}. (DMs desabilitadas)")
+            else:
+                logger.error(f"Erro ao enviar DM para {member}: {e}")
+        except Exception as e:
             logger.error(f"Erro ao enviar DM para {member}: {e}")
-    except Exception as e:
-        logger.error(f"Erro ao enviar DM para {member}: {e}")
 
     async def send_warning(self, member: discord.Member, warning_type: str):
         try:
@@ -1141,17 +1122,17 @@ async def on_ready():
         logger.info(f'Bot conectado como {bot.user}')
         logger.info(f"Latência: {round(bot.latency * 1000)}ms")
         
+        # Garantir que o banco de dados está inicializado
+        if not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
+            logger.error("Banco de dados não inicializado - tentando novamente...")
+            await bot.initialize_db()
+            if not bot.db._is_initialized:
+                logger.critical("Falha na inicialização do banco de dados")
+                return
+                
         # Desative o chunking automático se estiver causando problemas
         bot._connection._chunk_guilds = False
         
-        # Inicializar o banco de dados antes de qualquer coisa
-        if not hasattr(bot, 'db') or not bot.db:
-            await bot.initialize_db()
-        
-        if not bot._is_initialized or bot.db_connection_failed:
-            logger.critical("Falha na inicialização do banco de dados. As tarefas não serão iniciadas.")
-            return
-            
         # Carregar configurações e garantir que estão corretas
         config_loaded = await bot.load_config()
         if not config_loaded:
