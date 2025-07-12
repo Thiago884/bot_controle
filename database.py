@@ -10,7 +10,7 @@ from typing import Dict, List, Optional, Tuple, Union
 import asyncpg
 from asyncpg import Pool, Connection
 from asyncpg.pool import create_pool
-import pytz  # Added import
+import pytz
 
 logger = logging.getLogger('inactivity_bot')
 
@@ -187,17 +187,20 @@ class Database:
                     
                 logger.info("Tentando conectar ao banco de dados usando DATABASE_URL")
                 
-                # Adicionar parâmetro sslmode='require' se não estiver presente na URL
-                if 'sslmode=' not in db_url:
-                    db_url += '?sslmode=require'
-                
+                # Configuração específica para Supabase
                 self.pool = await create_pool(
                     dsn=db_url,
                     min_size=5,
                     max_size=50,
                     command_timeout=60,
                     max_inactive_connection_lifetime=300,
-                    ssl='require'
+                    ssl='require',
+                    # Configurações adicionais para Supabase
+                    connect_timeout=30,
+                    server_settings={
+                        'application_name': 'inactivity_bot',
+                        'statement_timeout': '30000'  # 30 segundos
+                    }
                 )
                 
                 async with self.pool.acquire() as conn:

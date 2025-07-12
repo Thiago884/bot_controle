@@ -302,45 +302,45 @@ class InactivityBot(commands.Bot):
         }
         self.cache_ttl = 300
 
-    async def initialize_db(self):
-        """Inicializa a conexão com o banco de dados usando a classe Database."""
-        if self._is_initialized:
-            return True
+async def initialize_db(self):
+    """Inicializa a conexão com o banco de dados usando a classe Database."""
+    if self._is_initialized:
+        return True
 
+    try:
+        self.db = Database()
+        await self.db.initialize()
+            
+        logger.info("Conexão com o banco de dados (via asyncpg) estabelecida com sucesso.")
+        
+        # Inicializar o backup após o banco estar pronto
+        from database import DatabaseBackup
+        self.db_backup = DatabaseBackup(self.db)
+        logger.info("Backup do banco de dados inicializado")
+        
+        # Verificar se a conexão está realmente funcionando
         try:
-            self.db = Database()
-            await self.db.initialize()  # Isso já retorna None, não um booleano
-                
-            logger.info("Conexão com o banco de dados (via asyncpg) estabelecida com sucesso.")
-            
-            # Inicializar o backup após o banco estar pronto
-            from database import DatabaseBackup
-            self.db_backup = DatabaseBackup(self.db)
-            logger.info("Backup do banco de dados inicializado")
-            
-            # Verificar se a conexão está realmente funcionando
-            try:
-                async with self.db.pool.acquire() as conn:
-                    await asyncio.wait_for(conn.execute("SELECT 1"), timeout=10)
-            except Exception as e:
-                logger.error(f"Falha ao verificar conexão com o banco: {e}")
-                self.db_connection_failed = True
-                return False
-                
-            self._is_initialized = True
-            
-            # Carregar configuração após inicializar o banco
-            await self.load_config()
-            
-            return True
-            
+            async with self.db.pool.acquire() as conn:
+                await asyncio.wait_for(conn.execute("SELECT 1"), timeout=10)
         except Exception as e:
-            logger.critical(f"Falha crítica ao inicializar o banco de dados: {e}", exc_info=True)
+            logger.error(f"Falha ao verificar conexão com o banco: {e}")
             self.db_connection_failed = True
-            # Criar instância vazia para evitar erros de NoneType
-            self.db = Database()
-            self.db.pool = None
             return False
+            
+        self._is_initialized = True
+        
+        # Carregar configuração após inicializar o banco
+        await self.load_config()
+        
+        return True
+        
+    except Exception as e:
+        logger.critical(f"Falha crítica ao inicializar o banco de dados: {e}", exc_info=True)
+        self.db_connection_failed = True
+        # Criar instância vazia para evitar erros de NoneType
+        self.db = Database()
+        self.db.pool = None
+        return False
 
     async def load_config(self, guild_id: int = None):
         """Carrega configuração de forma assíncrona com tratamento melhorado"""
