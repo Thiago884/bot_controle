@@ -189,19 +189,18 @@ class Database:
                 
                 # Configuração específica para Supabase
                 self.pool = await create_pool(
-                    dsn=db_url,
-                    min_size=5,
-                    max_size=50,
-                    command_timeout=60,
-                    max_inactive_connection_lifetime=300,
-                    ssl='require',
-                    # Configurações adicionais para Supabase
-                    connect_timeout=30,
-                    server_settings={
-                        'application_name': 'inactivity_bot',
-                        'statement_timeout': '30000'  # 30 segundos
-                    }
-                )
+    dsn=db_url,
+    min_size=5,
+    max_size=50,
+    command_timeout=60,
+    max_inactive_connection_lifetime=300,
+    ssl='require',
+    server_settings={
+        'application_name': 'inactivity_bot',
+        'statement_timeout': '30000'
+    }
+)
+
                 
                 async with self.pool.acquire() as conn:
                     await asyncio.wait_for(conn.execute("SELECT 1"), timeout=10)
