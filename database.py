@@ -443,53 +443,58 @@ class Database:
                 if conn:
                     await self.pool.release(conn)
 
-    async def execute_query(self, query: str, params: tuple = None, timeout: int = 30):
-        """Executa uma query com tratamento de timeout e retry"""
-        if not self.pool:
-            raise RuntimeError("Pool de conexões não está disponível")
+async def execute_query(self, query: str, params: tuple = None, timeout: int = 30):
+    """Executa uma query com tratamento de timeout e retry melhorado"""
+    if not self.pool:
+        raise RuntimeError("Pool de conexões não está disponível")
+        
+    max_retries = 3
+    conn = None
+    
+    for attempt in range(max_retries):
+        try:
+            conn = await asyncio.wait_for(self.pool.acquire(), timeout=timeout)
+            result = await asyncio.wait_for(conn.execute(query, *(params or ())), timeout=timeout)
+            return conn, result
             
-        async with self.semaphore:
-            max_retries = 3
-            conn = None
-            for attempt in range(max_retries):
+        except (asyncpg.PostgresError, asyncpg.InterfaceError) as e:
+            logger.error(f"Erro de conexão (tentativa {attempt + 1}/{max_retries}): {e}")
+            if conn:
                 try:
-                    # Adquirir conexão com timeout
-                    conn = await asyncio.wait_for(self.pool.acquire(), timeout=timeout)
-                    
-                    # Executar query com timeout
-                    result = await asyncio.wait_for(conn.execute(query, *(params or ())), timeout=timeout)
-                    
-                    return conn, result
-                    
-                except (asyncpg.PostgresError, asyncpg.InterfaceError) as e:
-                    logger.error(f"Erro de conexão (tentativa {attempt + 1}/{max_retries}): {e}")
-                    if conn:
-                        await self.pool.release(conn)
-                        conn = None
-                        
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(3 * (attempt + 1))  # Backoff exponencial
-                        continue
-                        
-                    raise
-                    
-                except asyncio.TimeoutError:
-                    logger.error(f"Timeout ao executar query (tentativa {attempt + 1})")
-                    if conn:
-                        await self.pool.release(conn)
-                        conn = None
-                        
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(3 * (attempt + 1))  # Backoff exponencial
-                        continue
-                        
-                    raise TimeoutError("Timeout ao executar query no banco de dados")
-                    
-                except Exception as e:
-                    logger.error(f"Erro ao executar query: {e}")
-                    if conn:
-                        await self.pool.release(conn)
-                    raise
+                    await self.pool.release(conn)
+                except:
+                    pass
+                conn = None
+                
+            if attempt < max_retries - 1:
+                await asyncio.sleep(3 * (attempt + 1))
+                continue
+                
+            raise DatabaseError(f"Falha após {max_retries} tentativas: {e}")
+            
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout ao executar query (tentativa {attempt + 1})")
+            if conn:
+                try:
+                    await self.pool.release(conn)
+                except:
+                    pass
+                conn = None
+                
+            if attempt < max_retries - 1:
+                await asyncio.sleep(3 * (attempt + 1))
+                continue
+                
+            raise TimeoutError("Timeout ao executar query no banco de dados")
+            
+        except Exception as e:
+            logger.error(f"Erro inesperado ao executar query: {e}")
+            if conn:
+                try:
+                    await self.pool.release(conn)
+                except:
+                    pass
+            raise
 
     async def save_pending_voice_event(self, event_type: str, user_id: int, guild_id: int,
                                      before_channel_id: Optional[int], after_channel_id: Optional[int],

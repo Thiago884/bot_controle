@@ -469,24 +469,28 @@ class InactivityBot(commands.Bot):
             logger.critical("Falha na inicialização do banco de dados. As tarefas não serão iniciadas.")
             self.db_connection_failed = True
 
-    async def send_with_fallback(self, destination, content=None, embed=None, file=None):
-        """Envia mensagens com tratamento de erros e fallback para rate limits."""
-        try:
-            if file:
-                await destination.send(content=content, embed=embed, file=file)
-            elif embed:
-                await destination.send(embed=embed)
-            elif content:
-                await destination.send(content)
-        except discord.HTTPException as e:
-            if e.code == 429:  # Rate limited
-                retry_after = e.retry_after
-                logger.warning(f"Rate limit atingido. Tentando novamente em {retry_after} segundos")
-                await asyncio.sleep(retry_after)
-                await self.send_with_fallback(destination, content, embed, file)
-            else:
-                logger.error(f"Erro ao enviar mensagem para {destination}: {e}")
-                raise
+async def send_with_fallback(self, destination, content=None, embed=None, file=None):
+    """Envia mensagens com tratamento de erros e fallback para rate limits."""
+    try:
+        if file:
+            # Se for um objeto BytesIO, criar um File discord.File
+            if isinstance(file, BytesIO):
+                file.seek(0)  # Voltar ao início do buffer
+                file = discord.File(file, filename='activity_report.png')
+            await destination.send(content=content, embed=embed, file=file)
+        elif embed:
+            await destination.send(embed=embed)
+        elif content:
+            await destination.send(content)
+    except discord.HTTPException as e:
+        if e.code == 429:  # Rate limited
+            retry_after = e.retry_after
+            logger.warning(f"Rate limit atingido. Tentando novamente em {retry_after} segundos")
+            await asyncio.sleep(retry_after)
+            await self.send_with_fallback(destination, content, embed, file)
+        else:
+            logger.error(f"Erro ao enviar mensagem para {destination}: {e}")
+            raise
 
     async def on_error(self, event, *args, **kwargs):
         """Tratamento de erros genéricos."""
@@ -1027,23 +1031,28 @@ class InactivityBot(commands.Bot):
             logger.error(f"Erro ao enviar notificação: {e}")
             await self.log_action("Erro de Notificação", None, f"Falha ao enviar mensagem: {str(e)}")
 
-    async def send_dm(self, member: discord.Member, message_content: str, embed: discord.Embed):
-        try:
-            await self.message_queue.put((
-                member,
-                None,
-                embed,
-                None
-            ), priority='low')
-        except discord.Forbidden:
+async def send_dm(self, member: discord.Member, message_content: str, embed: discord.Embed):
+    try:
+        await self.message_queue.put((
+            member,
+            message_content,
+            embed,
+            None
+        ), priority='low')
+    except discord.Forbidden:
+        logger.warning(f"Não foi possível enviar DM para {member.display_name}. (DMs desabilitadas)")
+        await self.log_action(
+            "Falha ao Enviar DM", 
+            member, 
+            "O usuário provavelmente desabilitou DMs de membros do servidor."
+        )
+    except discord.HTTPException as e:
+        if e.code == 50007:  # Cannot send messages to this user
             logger.warning(f"Não foi possível enviar DM para {member.display_name}. (DMs desabilitadas)")
-            await self.log_action(
-                "Falha ao Enviar DM", 
-                member, 
-                "O usuário provavelmente desabilitou DMs de membros do servidor."
-            )
-        except Exception as e:
+        else:
             logger.error(f"Erro ao enviar DM para {member}: {e}")
+    except Exception as e:
+        logger.error(f"Erro ao enviar DM para {member}: {e}")
 
     async def send_warning(self, member: discord.Member, warning_type: str):
         try:
