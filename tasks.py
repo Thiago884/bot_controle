@@ -1250,7 +1250,12 @@ async def check_missed_periods():
 
     for guild in bot.guilds:
         # Obter todos os membros com cargos monitorados de forma mais eficiente
-        members_with_roles = await bot.db.get_members_with_tracked_roles(guild.id, tracked_roles)
+        if hasattr(bot.db, 'get_members_with_tracked_roles'):
+            members_with_roles = await bot.db.get_members_with_tracked_roles(guild.id, tracked_roles)
+        else:
+            # Fallback: verificar manualmente
+            members_with_roles = [m.id for m in guild.members if any(r.id in tracked_roles for r in m.roles)]
+            
         if not members_with_roles:
             continue
             
