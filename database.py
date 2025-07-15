@@ -895,32 +895,32 @@ class Database:
         finally:
             if conn:
                 await self.pool.release(conn)
-                
-async def get_last_role_removal(self, user_id: int, guild_id: int) -> Optional[Dict]:
-    """Obtém a última remoção de cargo para um usuário"""
-    conn = None
-    try:
-        conn = await self.pool.acquire()
-        result = await conn.fetchrow('''
-            SELECT removal_date 
-            FROM removed_roles
-            WHERE user_id = $1 AND guild_id = $2
-            ORDER BY removal_date DESC
-            LIMIT 1
-        ''', user_id, guild_id)
-        
-        if result:
-            removal_date = result['removal_date']
-            if removal_date and removal_date.tzinfo is None:
-                removal_date = removal_date.replace(tzinfo=pytz.utc)
-            return {'removal_date': removal_date}
-        return None
-    except Exception as e:
-        logger.error(f"Erro ao obter última remoção de cargo: {e}")
-        return None
-    finally:
-        if conn:
-            await self.pool.release(conn)         
+
+    async def get_last_role_removal(self, user_id: int, guild_id: int) -> Optional[Dict]:
+        """Obtém a última remoção de cargo para um usuário"""
+        conn = None
+        try:
+            conn = await self.pool.acquire()
+            result = await conn.fetchrow('''
+                SELECT removal_date 
+                FROM removed_roles
+                WHERE user_id = $1 AND guild_id = $2
+                ORDER BY removal_date DESC
+                LIMIT 1
+            ''', user_id, guild_id)
+            
+            if result:
+                removal_date = result['removal_date']
+                if removal_date and removal_date.tzinfo is None:
+                    removal_date = removal_date.replace(tzinfo=pytz.utc)
+                return {'removal_date': removal_date}
+            return None
+        except Exception as e:
+            logger.error(f"Erro ao obter última remoção de cargo: {e}")
+            return None
+        finally:
+            if conn:
+                await self.pool.release(conn)         
 
     async def log_kicked_member(self, user_id: int, guild_id: int, reason: str):
         """Registra membro expulso por inatividade"""
