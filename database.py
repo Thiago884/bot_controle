@@ -190,8 +190,8 @@ class Database:
                 # Configuração específica para Supabase
                 self.pool = await create_pool(
                     dsn=db_url,
-                    min_size=5,
-                    max_size=50,
+                    min_size=10,  # Aumentado de 5
+                    max_size=100, # Aumentado de 50
                     command_timeout=60,
                     max_inactive_connection_lifetime=300,
                     ssl='require',
@@ -237,6 +237,25 @@ class Database:
             sleep_time = initial_delay * (2 ** attempt)
             logger.info(f"Tentando novamente em {sleep_time} segundos...")
             await asyncio.sleep(sleep_time)
+
+    async def restart_pool(self):
+        """Reinicia o pool de conexões quando necessário"""
+        if self.pool:
+            await self.pool.close()
+        
+        db_url = os.getenv('DATABASE_URL')
+        self.pool = await create_pool(
+            dsn=db_url,
+            min_size=10,
+            max_size=100,
+            command_timeout=60,
+            max_inactive_connection_lifetime=300,
+            ssl='require',
+            server_settings={
+                'application_name': 'inactivity_bot',
+                'statement_timeout': '30000'
+            }
+        )
 
     async def _db_heartbeat(self, interval: int = 300):
         """Envia um ping periódico para manter conexões ativas"""
@@ -1225,37 +1244,27 @@ class Database:
             if conn:
                 await self.pool.release(conn)
 
-async def get_role_assigned_time(self, user_id: int, guild_id: int, role_id: int) -> Optional[datetime]:
-    """Obtém quando um cargo foi atribuído a um usuário com tratamento de timeout"""
-    max_retries = 3
-    retry_delay = 1
-    
-    for attempt in range(max_retries):
+    async def get_role_assigned_time(self, user_id: int, guild_id: int, role_id: int) -> Optional[datetime]:
+        """Obtém quando um cargo foi atribuído a um usuário"""
         conn = None
         try:
-            conn = await asyncio.wait_for(self.pool.acquire(), timeout=10)
-            result = await asyncio.wait_for(conn.fetchrow('''
+            conn = await self.pool.acquire()
+            result = await conn.fetchrow('''
                 SELECT assigned_at 
                 FROM role_assignments
                 WHERE user_id = $1 AND guild_id = $2 AND role_id = $3
-            ''', user_id, guild_id, role_id), timeout=10)
+                ORDER BY assigned_at DESC
+                LIMIT 1
+            ''', user_id, guild_id, role_id)
             
-            if result and result['assigned_at']:
+            if result:
                 assigned_at = result['assigned_at']
-                # Garantir que o datetime retornado está com timezone UTC
-                if assigned_at.tzinfo is None:
-                    assigned_at = assigned_at.replace(tzinfo=pytz.UTC)
+                if assigned_at and assigned_at.tzinfo is None:
+                    assigned_at = assigned_at.replace(tzinfo=pytz.utc)
                 return assigned_at
             return None
-            
-        except (asyncio.TimeoutError, asyncpg.exceptions.TooManyConnectionsError):
-            logger.warning(f"Timeout ao obter data de atribuição (tentativa {attempt + 1}/{max_retries})")
-            if attempt < max_retries - 1:
-                await asyncio.sleep(retry_delay * (attempt + 1))
-                continue
-            return None
         except Exception as e:
-            logger.error(f"Erro ao obter data de atribuição de cargo para user {user_id}, guild {guild_id}, role {role_id}: {e}", exc_info=True)
+            logger.error(f"Erro ao obter data de atribuição de cargo: {e}")
             return None
         finally:
             if conn:
