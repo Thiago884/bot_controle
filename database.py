@@ -484,7 +484,7 @@ class Database:
                     await asyncio.sleep(3 * (attempt + 1))
                     continue
                     
-                raise DatabaseError(f"Falha após {max_retries} tentativas: {e}")
+                raise ConnectionError(f"Falha após {max_retries} tentativas: {e}")
                 
             except asyncio.TimeoutError:
                 logger.error(f"Timeout ao executar query (tentativa {attempt + 1})")
@@ -1205,47 +1205,47 @@ class Database:
             logger.error(f"Erro na verificação de saúde do banco de dados: {e}")
             return False
 
-async def log_role_assignment(self, user_id: int, guild_id: int, role_id: int):
-    """Registra quando um cargo foi atribuído a um usuário"""
-    conn = None
-    try:
-        conn = await self.pool.acquire()
-        assigned_at = datetime.now(pytz.UTC)  # Garantir UTC
-        await conn.execute('''
-            INSERT INTO role_assignments 
-            (user_id, guild_id, role_id, assigned_at) 
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (user_id, guild_id, role_id) DO UPDATE 
-            SET assigned_at = EXCLUDED.assigned_at
-        ''', user_id, guild_id, role_id, assigned_at)
-    except Exception as e:
-        logger.error(f"Erro ao registrar atribuição de cargo para user {user_id}, guild {guild_id}, role {role_id}: {e}", exc_info=True)
-        raise
-    finally:
-        if conn:
-            await self.pool.release(conn)
+    async def log_role_assignment(self, user_id: int, guild_id: int, role_id: int):
+        """Registra quando um cargo foi atribuído a um usuário"""
+        conn = None
+        try:
+            conn = await self.pool.acquire()
+            assigned_at = datetime.now(pytz.UTC)  # Garantir UTC
+            await conn.execute('''
+                INSERT INTO role_assignments 
+                (user_id, guild_id, role_id, assigned_at) 
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (user_id, guild_id, role_id) DO UPDATE 
+                SET assigned_at = EXCLUDED.assigned_at
+            ''', user_id, guild_id, role_id, assigned_at)
+        except Exception as e:
+            logger.error(f"Erro ao registrar atribuição de cargo para user {user_id}, guild {guild_id}, role {role_id}: {e}", exc_info=True)
+            raise
+        finally:
+            if conn:
+                await self.pool.release(conn)
 
-async def get_role_assigned_time(self, user_id: int, guild_id: int, role_id: int) -> Optional[datetime]:
-    """Obtém quando um cargo foi atribuído a um usuário"""
-    conn = None
-    try:
-        conn = await self.pool.acquire()
-        result = await conn.fetchrow('''
-            SELECT assigned_at 
-            FROM role_assignments
-            WHERE user_id = $1 AND guild_id = $2 AND role_id = $3
-        ''', user_id, guild_id, role_id)
-        
-        if result and result['assigned_at']:
-            assigned_at = result['assigned_at']
-            # Garantir que o datetime retornado está com timezone UTC
-            if assigned_at.tzinfo is None:
-                assigned_at = assigned_at.replace(tzinfo=pytz.UTC)
-            return assigned_at
-        return None
-    except Exception as e:
-        logger.error(f"Erro ao obter data de atribuição de cargo para user {user_id}, guild {guild_id}, role {role_id}: {e}", exc_info=True)
-        return None
-    finally:
-        if conn:
-            await self.pool.release(conn)
+    async def get_role_assigned_time(self, user_id: int, guild_id: int, role_id: int) -> Optional[datetime]:
+        """Obtém quando um cargo foi atribuído a um usuário"""
+        conn = None
+        try:
+            conn = await self.pool.acquire()
+            result = await conn.fetchrow('''
+                SELECT assigned_at 
+                FROM role_assignments
+                WHERE user_id = $1 AND guild_id = $2 AND role_id = $3
+            ''', user_id, guild_id, role_id)
+            
+            if result and result['assigned_at']:
+                assigned_at = result['assigned_at']
+                # Garantir que o datetime retornado está com timezone UTC
+                if assigned_at.tzinfo is None:
+                    assigned_at = assigned_at.replace(tzinfo=pytz.UTC)
+                return assigned_at
+            return None
+        except Exception as e:
+            logger.error(f"Erro ao obter data de atribuição de cargo para user {user_id}, guild {guild_id}, role {role_id}: {e}", exc_info=True)
+            return None
+        finally:
+            if conn:
+                await self.pool.release(conn)
