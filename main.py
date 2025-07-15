@@ -1162,14 +1162,18 @@ async def on_ready():
                 database_backup, cleanup_old_data, monitor_rate_limits,
                 report_metrics, health_check, check_missed_periods,
                 check_previous_periods, process_pending_voice_events,
-                check_current_voice_members, detect_missing_voice_leaves
+                check_current_voice_members, detect_missing_voice_leaves,
+                register_role_assignments  # Nova task adicionada
             )
             
             # Primeiro verificar períodos perdidos
             await check_missed_periods()
             
+            # Registrar datas de atribuição de cargos para membros existentes
+            bot.loop.create_task(register_role_assignments(), name='register_role_assignments')
+            
             # Alteração 3: Forçar verificação imediata de membros
-            bot.loop.create_task(cleanup_members(), name='initial_cleanup_members')
+            bot.loop.create_task(cleanup_members(force_check=True), name='initial_cleanup_members')
             
             # Criar tasks com nomes identificáveis
             bot.loop.create_task(inactivity_check(), name='inactivity_check_wrapper')

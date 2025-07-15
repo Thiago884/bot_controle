@@ -189,17 +189,17 @@ class Database:
                 
                 # Configuração específica para Supabase
                 self.pool = await create_pool(
-    dsn=db_url,
-    min_size=5,
-    max_size=50,
-    command_timeout=60,
-    max_inactive_connection_lifetime=300,
-    ssl='require',
-    server_settings={
-        'application_name': 'inactivity_bot',
-        'statement_timeout': '30000'
-    }
-)
+                    dsn=db_url,
+                    min_size=5,
+                    max_size=50,
+                    command_timeout=60,
+                    max_inactive_connection_lifetime=300,
+                    ssl='require',
+                    server_settings={
+                        'application_name': 'inactivity_bot',
+                        'statement_timeout': '30000'
+                    }
+                )
 
                 
                 async with self.pool.acquire() as conn:
@@ -418,7 +418,7 @@ class Database:
                 
                 await conn.execute('CREATE INDEX IF NOT EXISTS idx_last_execution ON task_executions (last_execution)')
                 
-                # Tabela de eventos de voz pendentes (nova tabela adicionada)
+                # Tabela de eventos de voz pendentes
                 await conn.execute('''
                 CREATE TABLE IF NOT EXISTS pending_voice_events (
                     id SERIAL PRIMARY KEY,
@@ -436,6 +436,18 @@ class Database:
                 )''')
                 
                 await conn.execute('CREATE INDEX IF NOT EXISTS idx_pending_events ON pending_voice_events (user_id, guild_id, processed)')
+                
+                # Nova tabela para registro de atribuição de cargos
+                await conn.execute('''
+                CREATE TABLE IF NOT EXISTS role_assignments (
+                    user_id BIGINT,
+                    guild_id BIGINT,
+                    role_id BIGINT,
+                    assigned_at TIMESTAMPTZ,
+                    PRIMARY KEY (user_id, guild_id, role_id)
+                )''')
+                
+                await conn.execute('CREATE INDEX IF NOT EXISTS idx_role_assignment ON role_assignments (user_id, guild_id, role_id, assigned_at)')
                 
                 logger.info("Tabelas criadas/verificadas com sucesso")
             except Exception as e:
@@ -883,6 +895,32 @@ class Database:
         finally:
             if conn:
                 await self.pool.release(conn)
+                
+async def get_last_role_removal(self, user_id: int, guild_id: int) -> Optional[Dict]:
+    """Obtém a última remoção de cargo para um usuário"""
+    conn = None
+    try:
+        conn = await self.pool.acquire()
+        result = await conn.fetchrow('''
+            SELECT removal_date 
+            FROM removed_roles
+            WHERE user_id = $1 AND guild_id = $2
+            ORDER BY removal_date DESC
+            LIMIT 1
+        ''', user_id, guild_id)
+        
+        if result:
+            removal_date = result['removal_date']
+            if removal_date and removal_date.tzinfo is None:
+                removal_date = removal_date.replace(tzinfo=pytz.utc)
+            return {'removal_date': removal_date}
+        return None
+    except Exception as e:
+        logger.error(f"Erro ao obter última remoção de cargo: {e}")
+        return None
+    finally:
+        if conn:
+            await self.pool.release(conn)         
 
     async def log_kicked_member(self, user_id: int, guild_id: int, reason: str):
         """Registra membro expulso por inatividade"""
@@ -1004,8 +1042,11 @@ class Database:
                 # Limpar logs de rate limit antigos
                 rate_limits_deleted = await conn.execute("DELETE FROM rate_limit_logs WHERE log_date < NOW() - $1 * INTERVAL '1 day'", days)
                 
-                # Limpar eventos de voz pendentes antigos (nova funcionalidade)
+                # Limpar eventos de voz pendentes antigos
                 pending_events_deleted = await conn.execute("DELETE FROM pending_voice_events WHERE event_time < NOW() - $1 * INTERVAL '1 day'", days)
+                
+                # Limpar atribuições de cargos antigas
+                role_assignments_deleted = await conn.execute("DELETE FROM role_assignments WHERE assigned_at < NOW() - $1 * INTERVAL '1 day'", days)
                 
                 log_message = (
                     f"Limpeza de dados antigos concluída: "
@@ -1014,7 +1055,8 @@ class Database:
                     f"Cargos removidos: {roles_deleted.split()[1]}, "
                     f"Expulsões: {kicks_deleted.split()[1]}, "
                     f"Rate limits: {rate_limits_deleted.split()[1]}, "
-                    f"Eventos pendentes: {pending_events_deleted.split()[1]}"
+                    f"Eventos pendentes: {pending_events_deleted.split()[1]}, "
+                    f"Atribuições de cargos: {role_assignments_deleted.split()[1]}"
                 )
                 logger.info(log_message)
                 return log_message
@@ -1162,3 +1204,46 @@ class Database:
         except Exception as e:
             logger.error(f"Erro na verificação de saúde do banco de dados: {e}")
             return False
+
+    async def log_role_assignment(self, user_id: int, guild_id: int, role_id: int):
+        """Registra quando um cargo foi atribuído a um usuário"""
+        conn = None
+        try:
+            conn = await self.pool.acquire()
+            await conn.execute('''
+                INSERT INTO role_assignments 
+                (user_id, guild_id, role_id, assigned_at) 
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (user_id, guild_id, role_id) DO UPDATE 
+                SET assigned_at = EXCLUDED.assigned_at
+            ''', user_id, guild_id, role_id, datetime.now(pytz.utc))
+        except Exception as e:
+            logger.error(f"Erro ao registrar atribuição de cargo: {e}")
+            raise
+        finally:
+            if conn:
+                await self.pool.release(conn)
+
+    async def get_role_assigned_time(self, user_id: int, guild_id: int, role_id: int) -> Optional[datetime]:
+        """Obtém quando um cargo foi atribuído a um usuário"""
+        conn = None
+        try:
+            conn = await self.pool.acquire()
+            result = await conn.fetchrow('''
+                SELECT assigned_at 
+                FROM role_assignments
+                WHERE user_id = $1 AND guild_id = $2 AND role_id = $3
+            ''', user_id, guild_id, role_id)
+            
+            if result:
+                assigned_at = result['assigned_at']
+                if assigned_at and assigned_at.tzinfo is None:
+                    assigned_at = assigned_at.replace(tzinfo=pytz.utc)
+                return assigned_at
+            return None
+        except Exception as e:
+            logger.error(f"Erro ao obter data de atribuição de cargo: {e}")
+            return None
+        finally:
+            if conn:
+                await self.pool.release(conn)

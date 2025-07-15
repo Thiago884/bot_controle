@@ -297,6 +297,15 @@ async def manage_tracked_roles(
                 bot.config['tracked_roles'].append(role.id)
                 await bot.save_config()
                 
+                # Registrar atribuição do cargo para todos os membros que o possuem
+                members_with_role = [member for member in interaction.guild.members if role in member.roles]
+                for member in members_with_role:
+                    try:
+                        await bot.db.log_role_assignment(member.id, interaction.guild.id, role.id)
+                        logger.debug(f"Registrada atribuição do cargo {role.name} para {member.display_name}")
+                    except Exception as e:
+                        logger.error(f"Erro ao registrar atribuição de cargo para {member.display_name}: {e}")
+                
                 embed = discord.Embed(
                     title="✅ Cargo Monitorado Adicionado",
                     description=f"O cargo {role.mention} foi adicionado à lista de monitorados.",
@@ -358,6 +367,62 @@ async def manage_tracked_roles(
             color=discord.Color.red()
         )
         await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="force_role_assignment_log", description="Força o registro de atribuição de cargos para todos os membros com um cargo específico")
+@app_commands.describe(
+    role="Cargo para registrar a atribuição"
+)
+@allowed_roles_only()
+@commands.has_permissions(administrator=True)
+async def force_role_assignment_log(interaction: discord.Interaction, role: discord.Role):
+    """Força o registro de atribuição de cargos para todos os membros com um cargo específico"""
+    try:
+        await interaction.response.defer(thinking=True)
+        
+        members_with_role = [member for member in interaction.guild.members if role in member.roles]
+        total_members = len(members_with_role)
+        
+        if total_members == 0:
+            await interaction.followup.send(
+                f"ℹ️ Nenhum membro encontrado com o cargo {role.mention}.",
+                ephemeral=True
+            )
+            return
+            
+        processed = 0
+        errors = 0
+        
+        for member in members_with_role:
+            try:
+                await bot.db.log_role_assignment(member.id, interaction.guild.id, role.id)
+                processed += 1
+            except Exception as e:
+                logger.error(f"Erro ao registrar atribuição de cargo para {member.display_name}: {e}")
+                errors += 1
+                
+        embed = discord.Embed(
+            title="✅ Registro de Atribuição de Cargos Concluído",
+            description=(
+                f"Processado: {processed} membros com o cargo {role.mention}\n"
+                f"Erros: {errors}"
+            ),
+            color=discord.Color.green()
+        )
+        
+        await interaction.followup.send(embed=embed)
+        
+        await bot.log_action(
+            "Registro Forçado de Atribuição de Cargos",
+            interaction.user,
+            f"Cargo: {role.name} (ID: {role.id})\nMembros processados: {processed}\nErros: {errors}"
+        )
+        
+    except Exception as e:
+        logger.error(f"Erro no comando force_role_assignment_log: {e}")
+        await interaction.followup.send(
+            "❌ Ocorreu um erro ao processar o registro de atribuição de cargos.",
+            ephemeral=True
+        )
 
 @bot.tree.command(name="set_notification_channel", description="Define o canal para notificações de cargos")
 @allowed_roles_only()
@@ -844,6 +909,22 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
                     inline=True
                 )
             
+            # Seção de data de atribuição dos cargos
+            if tracked_roles:
+                assignment_info = []
+                for role in tracked_roles:
+                    assigned_at = await bot.db.get_role_assigned_time(member.id, member.guild.id, role.id)
+                    if assigned_at:
+                        assignment_info.append(f"• {role.mention}: {assigned_at.strftime('%d/%m/%Y')}")
+                    else:
+                        assignment_info.append(f"• {role.mention}: Data desconhecida")
+                
+                embed.add_field(
+                    name="📅 Data de Atribuição dos Cargos",
+                    value="\n".join(assignment_info),
+                    inline=True
+                )
+            
             # Enviar resposta com tratamento de rate limit
             try:
                 if voice_sessions:
@@ -1280,4 +1361,4 @@ async def set_log_channel(interaction: discord.Interaction, channel: discord.Tex
             description="Ocorreu um erro ao definir o canal de logs. Por favor, tente novamente.",
             color=discord.Color.red()
         )
-        await interaction.response.send_message(embed=embed)    
+        await interaction.response.send_message(embed=embed)
