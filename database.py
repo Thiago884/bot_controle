@@ -1225,16 +1225,20 @@ class Database:
             if conn:
                 await self.pool.release(conn)
 
-    async def get_role_assigned_time(self, user_id: int, guild_id: int, role_id: int) -> Optional[datetime]:
-        """Obtém quando um cargo foi atribuído a um usuário"""
+async def get_role_assigned_time(self, user_id: int, guild_id: int, role_id: int) -> Optional[datetime]:
+    """Obtém quando um cargo foi atribuído a um usuário com tratamento de timeout"""
+    max_retries = 3
+    retry_delay = 1
+    
+    for attempt in range(max_retries):
         conn = None
         try:
-            conn = await self.pool.acquire()
-            result = await conn.fetchrow('''
+            conn = await asyncio.wait_for(self.pool.acquire(), timeout=10)
+            result = await asyncio.wait_for(conn.fetchrow('''
                 SELECT assigned_at 
                 FROM role_assignments
                 WHERE user_id = $1 AND guild_id = $2 AND role_id = $3
-            ''', user_id, guild_id, role_id)
+            ''', user_id, guild_id, role_id), timeout=10)
             
             if result and result['assigned_at']:
                 assigned_at = result['assigned_at']
@@ -1242,6 +1246,13 @@ class Database:
                 if assigned_at.tzinfo is None:
                     assigned_at = assigned_at.replace(tzinfo=pytz.UTC)
                 return assigned_at
+            return None
+            
+        except (asyncio.TimeoutError, asyncpg.exceptions.TooManyConnectionsError):
+            logger.warning(f"Timeout ao obter data de atribuição (tentativa {attempt + 1}/{max_retries})")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(retry_delay * (attempt + 1))
+                continue
             return None
         except Exception as e:
             logger.error(f"Erro ao obter data de atribuição de cargo para user {user_id}, guild {guild_id}, role {role_id}: {e}", exc_info=True)

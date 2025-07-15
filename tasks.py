@@ -1791,37 +1791,54 @@ async def register_role_assignments():
         return
     
     # Verificar se há cargos monitorados configurados
-    if 'tracked_roles' not in bot.config or not bot.config['tracked_roles']:
+    if not bot.config.get('tracked_roles'):
         logger.info("Nenhum cargo monitorado definido - pulando registro de atribuições")
         return
     
-    tracked_roles = bot.config['tracked_roles']
-    batch_size = 50  # Processar membros em lotes para evitar sobrecarga
-    
-    for guild in bot.guilds:
-        try:
+    try:
+        for guild in bot.guilds:
             logger.info(f"Registrando atribuições de cargos para guild {guild.name} (ID: {guild.id})")
             
-            # Obter todos os membros com cargos monitorados
-            members_with_roles = []
-            for member in guild.members:
-                if any(role.id in tracked_roles for role in member.roles):
-                    members_with_roles.append(member)
+            # Processar em lotes menores para evitar sobrecarga
+            batch_size = 20
+            members = list(guild.members)
             
-            logger.debug(f"Encontrados {len(members_with_roles)} membros com cargos monitorados")
-            
-            # Processar em lotes
-            for i in range(0, len(members_with_roles), batch_size):
-                batch = members_with_roles[i:i + batch_size]
-                await asyncio.gather(*[
-                    process_member_role_assignments(member, tracked_roles)
-                    for member in batch
-                ])
-                await asyncio.sleep(1)  # Pequeno delay entre lotes
+            for i in range(0, len(members), batch_size):
+                batch = members[i:i + batch_size]
                 
-        except Exception as e:
-            logger.error(f"Erro ao registrar atribuições de cargos para guild {guild.name}: {e}")
-            continue
+                for member in batch:
+                    try:
+                        # Verificar se tem cargos monitorados
+                        tracked_roles = bot.config['tracked_roles']
+                        member_roles = [role for role in member.roles if role.id in tracked_roles]
+                        
+                        if not member_roles:
+                            continue
+                            
+                        # Registrar data de atribuição para cada cargo
+                        for role in member_roles:
+                            try:
+                                # Verificar se já existe registro
+                                assigned_time = await bot.db.get_role_assigned_time(member.id, guild.id, role.id)
+                                
+                                if not assigned_time:
+                                    # Registrar com a data atual
+                                    await bot.db.log_role_assignment(member.id, guild.id, role.id)
+                                    logger.debug(f"Registrado cargo {role.name} para {member.display_name}")
+                                    
+                            except Exception as e:
+                                logger.error(f"Erro ao registrar cargo {role.id} para {member}: {e}")
+                                continue
+                                
+                    except Exception as e:
+                        logger.error(f"Erro ao processar membro {member}: {e}")
+                        continue
+                
+                # Pequeno delay entre lotes para evitar rate limits
+                await asyncio.sleep(1)
+                
+    except Exception as e:
+        logger.error(f"Erro na task register_role_assignments: {e}")
 
 async def process_member_role_assignments(member: discord.Member, tracked_roles: List[int]):
     """Processa e registra as atribuições de cargos para um único membro"""

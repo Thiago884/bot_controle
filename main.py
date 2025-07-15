@@ -566,27 +566,33 @@ class InactivityBot(commands.Bot):
                 logger.error(f"Erro ao verificar estados de áudio: {e}")
                 await asyncio.sleep(60)
 
-    async def monitor_db_pool(self):
-        await self.wait_until_ready()
-        while True:
-            try:
-                if hasattr(self, 'db') and self.db:
-                    try:
-                        pool_status = await self.db.check_pool_status()
-                        if pool_status:
-                            logger.debug(f"Status do pool de conexões: {pool_status}")
-                    except Exception as e:
-                        logger.error(f"Health check falhou para o banco de dados: {e}")
-                        await self.log_action(
-                            "Erro de Saúde",
-                            None,
-                            f"Falha na conexão com o banco de dados: {str(e)}"
-                        )
-                
-                await asyncio.sleep(300)
-            except Exception as e:
-                log_with_context(f"Erro no monitoramento do pool: {e}", logging.ERROR)
-                await asyncio.sleep(60)
+async def monitor_db_pool(self):
+    await self.wait_until_ready()
+    while True:
+        try:
+            if hasattr(self, 'db') and self.db:
+                try:
+                    pool_status = await self.db.check_pool_status()
+                    if pool_status:
+                        logger.debug(f"Status do pool de conexões: {pool_status}")
+                        
+                        # Se o pool estiver sobrecarregado, aumentar o tamanho
+                        if pool_status['freesize'] == 0 and pool_status['used'] >= pool_status['maxsize'] - 2:
+                            logger.warning("Pool de conexões sobrecarregado - aumentando tamanho")
+                            await self.db.pool.set_max_size(min(100, pool_status['maxsize'] + 10))
+                            
+                except Exception as e:
+                    logger.error(f"Health check falhou para o banco de dados: {e}")
+                    await self.log_action(
+                        "Erro de Saúde",
+                        None,
+                        f"Falha na conexão com o banco de dados: {str(e)}"
+                    )
+            
+            await asyncio.sleep(300)
+        except Exception as e:
+            log_with_context(f"Erro no monitoramento do pool: {e}", logging.ERROR)
+            await asyncio.sleep(60)
 
     async def periodic_health_check(self):
         await self.wait_until_ready()
