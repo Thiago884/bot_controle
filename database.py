@@ -871,28 +871,31 @@ class Database:
             if conn:
                 await self.pool.release(conn)
 
-    async def get_last_warning(self, user_id: int, guild_id: int) -> Optional[Tuple[str, datetime]]:
-        """Obtém último aviso enviado ao usuário"""
-        conn = None
-        try:
-            conn = await self.pool.acquire()
-            result = await conn.fetchrow('''
-                SELECT warning_type, warning_date 
-                FROM user_warnings 
-                WHERE user_id = $1 AND guild_id = $2
-                ORDER BY warning_date DESC
-                LIMIT 1
-            ''', user_id, guild_id)
-            
-            if result:
-                return result['warning_type'], result['warning_date']
-            return None
-        except Exception as e:
-            logger.error(f"Erro ao obter último aviso: {e}")
-            return None
-        finally:
-            if conn:
-                await self.pool.release(conn)
+async def get_last_warning(self, user_id: int, guild_id: int) -> Optional[Tuple[str, datetime]]:
+    """Obtém último aviso enviado ao usuário"""
+    conn = None
+    try:
+        conn = await self.pool.acquire()
+        result = await conn.fetchrow('''
+            SELECT warning_type, warning_date 
+            FROM user_warnings 
+            WHERE user_id = $1 AND guild_id = $2
+            ORDER BY warning_date DESC
+            LIMIT 1
+        ''', user_id, guild_id)
+        
+        if result:
+            warning_date = result['warning_date']
+            if warning_date and warning_date.tzinfo is None:
+                warning_date = warning_date.replace(tzinfo=pytz.utc)
+            return result['warning_type'], warning_date
+        return None
+    except Exception as e:
+        logger.error(f"Erro ao obter último aviso: {e}")
+        return None
+    finally:
+        if conn:
+            await self.pool.release(conn)
 
     async def log_removed_roles(self, user_id: int, guild_id: int, role_ids: List[int]):
         """Registra cargos removidos por inatividade (COM transação)."""

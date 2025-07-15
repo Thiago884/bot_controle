@@ -821,10 +821,10 @@ async def process_member_warnings(member: discord.Member, guild: discord.Guild,
         if not last_check:
             # Se não tem verificação anterior, criar um novo período
             monitoring_period = bot.config['monitoring_period']
-            period_end = datetime.now(pytz.UTC) + timedelta(days=monitoring_period)  # CORRIGIDO
+            period_end = datetime.now(pytz.UTC) + timedelta(days=monitoring_period)
             await bot.db.log_period_check(
                 member.id, guild.id, 
-                datetime.now(pytz.UTC),  # CORRIGIDO
+                datetime.now(pytz.UTC),
                 period_end, 
                 False
             )
@@ -832,7 +832,9 @@ async def process_member_warnings(member: discord.Member, guild: discord.Guild,
         
         # Calcular dias restantes
         period_end = last_check['period_end']
-        days_remaining = (period_end - datetime.now(pytz.UTC)).days  # CORRIGIDO
+        if period_end.tzinfo is None:  # Garantir timezone
+            period_end = period_end.replace(tzinfo=pytz.UTC)
+        days_remaining = (period_end - datetime.now(pytz.UTC)).days
             
         # Obter último aviso
         start_time = time.time()
@@ -841,12 +843,12 @@ async def process_member_warnings(member: discord.Member, guild: discord.Guild,
         
         # Verificar necessidade de avisos
         if days_remaining <= first_warning_days and (
-            not last_warning or (datetime.now(pytz.UTC) - last_warning[1]).days >= 1):  # CORRIGIDO
+            not last_warning or (datetime.now(pytz.UTC) - last_warning[1]).days >= 1):
             await bot.send_warning(member, 'first')
             warnings_sent['first'] += 1
         
         elif days_remaining <= second_warning_days and (
-            not last_warning or (datetime.now(pytz.UTC) - last_warning[1]).days >= 1):  # CORRIGIDO
+            not last_warning or (datetime.now(pytz.UTC) - last_warning[1]).days >= 1):
             await bot.send_warning(member, 'second')
             warnings_sent['second'] += 1
             
@@ -1191,7 +1193,7 @@ async def _execute_force_check(member: discord.Member):
         monitoring_period = bot.config['monitoring_period']
         
         # Definir período de verificação em UTC
-        period_end = datetime.now(pytz.UTC)  # CORRIGIDO
+        period_end = datetime.now(pytz.UTC)
         period_start = period_end - timedelta(days=monitoring_period)
         
         # Obter sessões de voz no período
@@ -1210,9 +1212,6 @@ async def _execute_force_check(member: discord.Member):
                     valid_days.add(day)
             
             meets_requirements = len(valid_days) >= required_days
-        else:
-            # Usuário não tem nenhuma sessão registrada - automaticamente não cumpriu
-            meets_requirements = False
         
         # Registrar verificação
         start_time = time.time()
