@@ -156,165 +156,173 @@ class BatchProcessor:
             
         return results
 
-async def _process_member_optimized(self, member, last_check):
-    """Versão otimizada do process_member_inactivity."""
-    result = {'processed': 0, 'removed': 0}
-    
-    try:
-        # Verificar whitelist
-        if member.id in self.bot.config['whitelist']['users'] or \
-           any(role.id in self.bot.config['whitelist']['roles'] for role in member.roles):
-            return result
-                
-        # Verificar se tem cargos monitorados
-        tracked_roles = self.bot.config['tracked_roles']
-        if not any(role.id in tracked_roles for role in member.roles):
-            return result
+    async def _process_member_optimized(self, member, last_check):
+        """Versão otimizada do process_member_inactivity."""
+        result = {'processed': 0, 'removed': 0}
         
-        result['processed'] = 1
-        
-        now = datetime.now(pytz.utc)
-        
-        # Obter a data em que o usuário recebeu o cargo monitorado mais recente
-        role_assignment_times = []
-        for role in member.roles:
-            if role.id in tracked_roles:
-                assigned_time = await self.bot.db.get_role_assigned_time(member.id, member.guild.id, role.id)
-                if assigned_time:
-                    role_assignment_times.append(assigned_time)
-        
-        if not role_assignment_times:
-            # Se não encontrou data de atribuição, assumir que foi agora (caso de migração)
-            role_assignment_time = now
-            # Registrar a atribuição para o futuro
+        try:
+            # Verificar whitelist
+            if member.id in self.bot.config['whitelist']['users'] or \
+               any(role.id in self.bot.config['whitelist']['roles'] for role in member.roles):
+                return result
+                    
+            # Verificar se tem cargos monitorados
+            tracked_roles = self.bot.config['tracked_roles']
+            if not any(role.id in tracked_roles for role in member.roles):
+                return result
+            
+            result['processed'] = 1
+            
+            now = datetime.now(pytz.UTC)
+            
+            # Obter a data em que o usuário recebeu o cargo monitorado mais recente
+            role_assignment_times = []
             for role in member.roles:
                 if role.id in tracked_roles:
-                    await self.bot.db.log_role_assignment(member.id, member.guild.id, role.id)
-        else:
-            role_assignment_time = min(role_assignment_times)  # Usar a atribuição mais antiga
-        
-        monitoring_period = self.bot.config['monitoring_period']
-        period_end = role_assignment_time + timedelta(days=monitoring_period)
-        
-        # Se o período ainda não terminou, não fazer nada
-        if now < period_end:
-            return result
+                    try:
+                        assigned_time = await self.bot.db.get_role_assigned_time(member.id, member.guild.id, role.id)
+                        if assigned_time:
+                            role_assignment_times.append(assigned_time)
+                    except Exception as e:
+                        logger.error(f"Erro ao obter data de atribuição para cargo {role.id}: {e}")
+                        continue
             
-        # Se o período acabou, verificar atividade
-        period_start = period_end - timedelta(days=monitoring_period)
-        
-        # Obter sessões de voz no período
-        start_time = time.time()
-        sessions = await self.bot.db.get_voice_sessions(
-            member.id, member.guild.id,
-            period_start,
-            period_end
-        )
-        perf_metrics.record_db_query(time.time() - start_time)
-        
-        # Verificar requisitos do período
-        required_minutes = self.bot.config['required_minutes']
-        required_days = self.bot.config['required_days']
-        
-        meets_requirements = False
-        valid_days = set()
-        
-        if sessions:
-            for session in sessions:
-                if session['duration'] >= required_minutes * 60:
-                    day = session['join_time'].date()
-                    valid_days.add(day)
+            if not role_assignment_times:
+                # Se não encontrou data de atribuição, registrar agora e usar a data atual
+                for role in member.roles:
+                    if role.id in tracked_roles:
+                        try:
+                            await self.bot.db.log_role_assignment(member.id, member.guild.id, role.id)
+                        except Exception as e:
+                            logger.error(f"Erro ao registrar atribuição de cargo {role.id}: {e}")
+                            continue
+                
+                role_assignment_time = now
+            else:
+                role_assignment_time = min(role_assignment_times)  # Usar a atribuição mais antiga
             
-            meets_requirements = len(valid_days) >= required_days
-        
-        # Ações para quem não cumpriu os requisitos
-        if not meets_requirements:
-            roles_to_remove = [role for role in member.roles if role.id in tracked_roles]
+            monitoring_period = self.bot.config['monitoring_period']
+            period_end = role_assignment_time + timedelta(days=monitoring_period)
             
-            if roles_to_remove:
-                try:
-                    # Verificar permissões
-                    if not member.guild.me.guild_permissions.manage_roles:
-                        raise discord.Forbidden("Bot não tem permissão para gerenciar cargos")
+            # Se o período ainda não terminou, não fazer nada
+            if now < period_end:
+                return result
+                
+            # Se o período acabou, verificar atividade
+            period_start = period_end - timedelta(days=monitoring_period)
+            
+            # Obter sessões de voz no período
+            start_time = time.time()
+            sessions = await self.bot.db.get_voice_sessions(
+                member.id, member.guild.id,
+                period_start,
+                period_end
+            )
+            perf_metrics.record_db_query(time.time() - start_time)
+            
+            # Verificar requisitos do período
+            required_minutes = self.bot.config['required_minutes']
+            required_days = self.bot.config['required_days']
+            
+            meets_requirements = False
+            valid_days = set()
+            
+            if sessions:
+                for session in sessions:
+                    if session['duration'] >= required_minutes * 60:
+                        day = session['join_time'].date()
+                        valid_days.add(day)
+                
+                meets_requirements = len(valid_days) >= required_days
+            
+            # Ações para quem não cumpriu os requisitos
+            if not meets_requirements:
+                roles_to_remove = [role for role in member.roles if role.id in tracked_roles]
+                
+                if roles_to_remove:
+                    try:
+                        # Verificar permissões
+                        if not member.guild.me.guild_permissions.manage_roles:
+                            raise discord.Forbidden("Bot não tem permissão para gerenciar cargos")
+                            
+                        # Verificar hierarquia de cargos
+                        top_role = member.guild.me.top_role
+                        for role in roles_to_remove:
+                            if role >= top_role:
+                                raise discord.Forbidden(f"Não posso remover cargo {role.name} - acima da minha hierarquia")
                         
-                    # Verificar hierarquia de cargos
-                    top_role = member.guild.me.top_role
-                    for role in roles_to_remove:
-                        if role >= top_role:
-                            raise discord.Forbidden(f"Não posso remover cargo {role.name} - acima da minha hierarquia")
-                    
-                    # Registrar novo período antes de remover cargos
-                    await self.bot.db.log_period_check(
-                        member.id, member.guild.id, 
-                        period_start, period_end, 
-                        meets_requirements
-                    )
-                    
-                    # Remover cargos
-                    start_time = time.time()
-                    await member.remove_roles(*roles_to_remove)
-                    perf_metrics.record_api_call(time.time() - start_time)
-                    
-                    # Enviar mensagem de aviso final via DM
-                    await self.bot.send_warning(member, 'final')
-                    
-                    # Registrar cargos removidos
-                    start_time = time.time()
-                    await self.bot.db.log_removed_roles(
-                        member.id, member.guild.id, 
-                        [r.id for r in roles_to_remove]
-                    )
-                    perf_metrics.record_db_query(time.time() - start_time)
-                    
-                    log_message = (
-                        f"Cargos removidos: {', '.join([r.name for r in roles_to_remove])}\n"
-                        f"Sessões no período: {len(sessions)}\n"
-                        f"Dias válidos: {len(valid_days)}/{required_days}\n"
-                        f"Período: {period_start.strftime('%d/%m/%Y')} a {period_end.strftime('%d/%m/%Y')}"
-                    )
-                    
-                    await self.bot.log_action(
-                        "Cargo Removido",
-                        member,
-                        log_message
-                    )
-                    
-                    await self.bot.notify_roles(
-                        f"🚨 Cargos removidos de {member.mention} por inatividade: " +
-                        ", ".join([f"`{r.name}`" for r in roles_to_remove]))
-                    
-                    result['removed'] = 1
-                    
-                except discord.Forbidden as e:
-                    logger.error(f"Permissões insuficientes para remover cargos de {member}: {e}")
-                    await self.bot.log_action("Erro ao Remover Cargo", member, f"Permissões insuficientes: {e}")
-                except Exception as e:
-                    logger.error(f"Erro ao remover cargos de {member}: {e}")
-        else:
-            # Registrar que cumpriu os requisitos
-            await self.bot.db.log_period_check(
-                member.id, member.guild.id, 
-                period_start, period_end, 
-                meets_requirements
-            )
-        
-        # SOLUÇÃO IMPLEMENTADA: Só registrar novo período se o atual terminou
-        if now >= period_end:
-            # Definir novo período de verificação (futuro)
-            new_period_end = now + timedelta(days=monitoring_period)
-            new_period_start = now
+                        # Registrar novo período antes de remover cargos
+                        await self.bot.db.log_period_check(
+                            member.id, member.guild.id, 
+                            period_start, period_end, 
+                            meets_requirements
+                        )
+                        
+                        # Remover cargos
+                        start_time = time.time()
+                        await member.remove_roles(*roles_to_remove)
+                        perf_metrics.record_api_call(time.time() - start_time)
+                        
+                        # Enviar mensagem de aviso final via DM
+                        await self.bot.send_warning(member, 'final')
+                        
+                        # Registrar cargos removidos
+                        start_time = time.time()
+                        await self.bot.db.log_removed_roles(
+                            member.id, member.guild.id, 
+                            [r.id for r in roles_to_remove]
+                        )
+                        perf_metrics.record_db_query(time.time() - start_time)
+                        
+                        log_message = (
+                            f"Cargos removidos: {', '.join([r.name for r in roles_to_remove])}\n"
+                            f"Sessões no período: {len(sessions)}\n"
+                            f"Dias válidos: {len(valid_days)}/{required_days}\n"
+                            f"Período: {period_start.strftime('%d/%m/%Y')} a {period_end.strftime('%d/%m/%Y')}"
+                        )
+                        
+                        await self.bot.log_action(
+                            "Cargo Removido",
+                            member,
+                            log_message
+                        )
+                        
+                        await self.bot.notify_roles(
+                            f"🚨 Cargos removidos de {member.mention} por inatividade: " +
+                            ", ".join([f"`{r.name}`" for r in roles_to_remove]))
+                        
+                        result['removed'] = 1
+                        
+                    except discord.Forbidden as e:
+                        logger.error(f"Permissões insuficientes para remover cargos de {member}: {e}")
+                        await self.bot.log_action("Erro ao Remover Cargo", member, f"Permissões insuficientes: {e}")
+                    except Exception as e:
+                        logger.error(f"Erro ao remover cargos de {member}: {e}")
+            else:
+                # Registrar que cumpriu os requisitos
+                await self.bot.db.log_period_check(
+                    member.id, member.guild.id, 
+                    period_start, period_end, 
+                    meets_requirements
+                )
             
-            # Registrar novo período de verificação
-            await self.bot.db.log_period_check(
-                member.id, member.guild.id, 
-                new_period_start, new_period_end, 
-                False  # Assume que começa não cumprindo
-            )
-    
-    except Exception as e:
-        logger.error(f"Erro ao verificar inatividade para {member}: {e}")
-    
-    return result
+            # SOLUÇÃO IMPLEMENTADA: Só registrar novo período se o atual terminou
+            if now >= period_end:
+                # Definir novo período de verificação (futuro)
+                new_period_end = now + timedelta(days=monitoring_period)
+                new_period_start = now
+                
+                # Registrar novo período de verificação
+                await self.bot.db.log_period_check(
+                    member.id, member.guild.id, 
+                    new_period_start, new_period_end, 
+                    False  # Assume que começa não cumprindo
+                )
+        
+        except Exception as e:
+            logger.error(f"Erro ao verificar inatividade para {member}: {e}")
+        
+        return result
     
 class DynamicBatcher:
     def __init__(self):
@@ -362,11 +370,11 @@ async def get_time_without_roles(member: discord.Member) -> Optional[timedelta]:
         last_role_removal = await bot.db.get_last_role_removal(member.id, member.guild.id)
         
         if last_role_removal:
-            return datetime.now(pytz.utc) - last_role_removal['removal_date']
+            return datetime.now(pytz.UTC) - last_role_removal['removal_date']
             
         # Se não há registro de remoção de cargos, usar a data de entrada no servidor
         if member.joined_at:
-            return datetime.now(pytz.utc) - member.joined_at.replace(tzinfo=pytz.utc)
+            return datetime.now(pytz.UTC) - member.joined_at.replace(tzinfo=pytz.UTC)
             
         return None
     except Exception as e:
@@ -392,7 +400,7 @@ async def execute_task_with_persistent_interval(task_name: str, monitoring_perio
                 except AttributeError:
                     logger.warning(f"Método get_last_task_execution não disponível no banco de dados")
             
-            now = datetime.now(pytz.utc)  # Usar UTC
+            now = datetime.now(pytz.UTC)  # Usar UTC
             
             # Calcular se deve executar agora
             should_execute = False
@@ -404,7 +412,7 @@ async def execute_task_with_persistent_interval(task_name: str, monitoring_perio
                 # Garantir que last_exec_time está com timezone (aware)
                 last_exec_time = last_exec['last_execution']
                 if last_exec_time.tzinfo is None:
-                    last_exec_time = last_exec_time.replace(tzinfo=pytz.utc)
+                    last_exec_time = last_exec_time.replace(tzinfo=pytz.UTC)
                 
                 time_since_last = now - last_exec_time
                 if time_since_last >= timedelta(hours=24) or force_check:
@@ -582,9 +590,9 @@ async def _health_check():
             if last_exec:
                 last_exec_time = last_exec['last_execution']
                 if last_exec_time.tzinfo is None:
-                    last_exec_time = last_exec_time.replace(tzinfo=pytz.utc)
+                    last_exec_time = last_exec_time.replace(tzinfo=pytz.UTC)
                 
-                time_since_last = datetime.now(pytz.utc) - last_exec_time
+                time_since_last = datetime.now(pytz.UTC) - last_exec_time
                 if time_since_last > timedelta(hours=26):  # 2 horas de tolerância
                     logger.warning(f"Task {task_name} não executou nos últimos {time_since_last}")
                     await bot.log_action(
@@ -813,10 +821,10 @@ async def process_member_warnings(member: discord.Member, guild: discord.Guild,
         if not last_check:
             # Se não tem verificação anterior, criar um novo período
             monitoring_period = bot.config['monitoring_period']
-            period_end = datetime.now(pytz.utc) + timedelta(days=monitoring_period)  # CORRIGIDO
+            period_end = datetime.now(pytz.UTC) + timedelta(days=monitoring_period)  # CORRIGIDO
             await bot.db.log_period_check(
                 member.id, guild.id, 
-                datetime.now(pytz.utc),  # CORRIGIDO
+                datetime.now(pytz.UTC),  # CORRIGIDO
                 period_end, 
                 False
             )
@@ -824,7 +832,7 @@ async def process_member_warnings(member: discord.Member, guild: discord.Guild,
         
         # Calcular dias restantes
         period_end = last_check['period_end']
-        days_remaining = (period_end - datetime.now(pytz.utc)).days  # CORRIGIDO
+        days_remaining = (period_end - datetime.now(pytz.UTC)).days  # CORRIGIDO
             
         # Obter último aviso
         start_time = time.time()
@@ -833,12 +841,12 @@ async def process_member_warnings(member: discord.Member, guild: discord.Guild,
         
         # Verificar necessidade de avisos
         if days_remaining <= first_warning_days and (
-            not last_warning or (datetime.now(pytz.utc) - last_warning[1]).days >= 1):  # CORRIGIDO
+            not last_warning or (datetime.now(pytz.UTC) - last_warning[1]).days >= 1):  # CORRIGIDO
             await bot.send_warning(member, 'first')
             warnings_sent['first'] += 1
         
         elif days_remaining <= second_warning_days and (
-            not last_warning or (datetime.now(pytz.utc) - last_warning[1]).days >= 1):  # CORRIGIDO
+            not last_warning or (datetime.now(pytz.UTC) - last_warning[1]).days >= 1):  # CORRIGIDO
             await bot.send_warning(member, 'second')
             warnings_sent['second'] += 1
             
@@ -866,9 +874,9 @@ async def _cleanup_members(force_check: bool = False):
     
     # Se for uma verificação forçada (como no on_ready), usar um cutoff_date mais antigo
     if force_check:
-        cutoff_date = datetime.now(pytz.utc) - timedelta(days=kick_after_days * 2)  # Verificar membros que estão sem cargos há mais tempo
+        cutoff_date = datetime.now(pytz.UTC) - timedelta(days=kick_after_days * 2)  # Verificar membros que estão sem cargos há mais tempo
     else:
-        cutoff_date = datetime.now(pytz.utc) - timedelta(days=kick_after_days)
+        cutoff_date = datetime.now(pytz.UTC) - timedelta(days=kick_after_days)
         
     members_kicked = 0
     batch_size = bot._batch_processing_size
@@ -926,7 +934,7 @@ async def process_member_cleanup(member: discord.Member, guild: discord.Guild,
                 last_kick = await bot.db.get_last_kick(member.id, guild.id)
                 perf_metrics.record_db_query(time.time() - start_time)
                 
-                if last_kick and (datetime.now(pytz.utc) - last_kick['kick_date']).days < kick_after_days:
+                if last_kick and (datetime.now(pytz.UTC) - last_kick['kick_date']).days < kick_after_days:
                     return
                     
                 # Verificar atividade recente antes de expulsar
@@ -935,14 +943,14 @@ async def process_member_cleanup(member: discord.Member, guild: discord.Guild,
                 perf_metrics.record_db_query(time.time() - start_time)
                 
                 # Inicializar last_active com joined_at como fallback
-                last_active = member.joined_at.replace(tzinfo=pytz.utc) if member.joined_at else None
+                last_active = member.joined_at.replace(tzinfo=pytz.UTC) if member.joined_at else None
                 
                 # Se o usuário teve atividade recente, usar essa data
                 if last_activity and last_activity.get('last_voice_join'):
                     last_active = last_activity['last_voice_join']
                 
                 # Verificar se a inatividade ultrapassa o limite
-                if last_active and (datetime.now(pytz.utc) - last_active).days < kick_after_days:
+                if last_active and (datetime.now(pytz.UTC) - last_active).days < kick_after_days:
                     return
                 
                 # Expulsar o membro
@@ -1029,7 +1037,7 @@ async def _cleanup_old_data():
     
     try:
         # Usar UTC para o cutoff_date
-        cutoff_date = datetime.now(pytz.utc) - timedelta(days=60)
+        cutoff_date = datetime.now(pytz.UTC) - timedelta(days=60)
         
         start_time = time.time()
         log_message = await bot.db.cleanup_old_data(days=60)
@@ -1183,7 +1191,7 @@ async def _execute_force_check(member: discord.Member):
         monitoring_period = bot.config['monitoring_period']
         
         # Definir período de verificação em UTC
-        period_end = datetime.now(pytz.utc)  # CORRIGIDO
+        period_end = datetime.now(pytz.UTC)  # CORRIGIDO
         period_start = period_end - timedelta(days=monitoring_period)
         
         # Obter sessões de voz no período
@@ -1273,7 +1281,7 @@ async def process_member_missed_periods(member_id: int, guild: discord.Guild,
             return
             
         # Obter todos os períodos não verificados
-        now = datetime.now(pytz.utc)  # CORRIGIDO
+        now = datetime.now(pytz.UTC)  # CORRIGIDO
         last_check = await bot.db.get_last_period_check(member.id, guild.id)
         
         if not last_check:
@@ -1447,7 +1455,7 @@ async def process_member_previous_periods(member: discord.Member, guild: discord
         
         result['processed'] = 1
         
-        now = datetime.now(pytz.utc)  # CORRIGIDO
+        now = datetime.now(pytz.UTC)  # CORRIGIDO
         
         # Obter todos os períodos verificados onde não cumpriu os requisitos
         start_time = time.time()
@@ -1679,8 +1687,8 @@ async def check_current_voice_members():
                     if audio_key not in bot.active_sessions:
                         # Criar uma sessão estimada
                         bot.active_sessions[audio_key] = {
-                            'start_time': datetime.now(pytz.utc) - timedelta(minutes=5),  # CORRIGIDO: Usando UTC
-                            'last_audio_time': datetime.now(pytz.utc), # CORRIGIDO: Usando UTC
+                            'start_time': datetime.now(pytz.UTC) - timedelta(minutes=5),  # CORRIGIDO: Usando UTC
+                            'last_audio_time': datetime.now(pytz.UTC), # CORRIGIDO: Usando UTC
                             'audio_disabled': member.voice.self_deaf or member.voice.deaf,
                             'total_audio_off_time': 0,
                             'estimated': True  # Flag para indicar que é uma estimativa
@@ -1731,7 +1739,7 @@ async def detect_missing_voice_leaves():
             # Verificar se o membro não está mais em um canal de voz
             if not member.voice or not member.voice.channel:
                 # Calcular duração estimada
-                duration = (datetime.now(pytz.utc) - session['last_voice_join']).total_seconds()
+                duration = (datetime.now(pytz.UTC) - session['last_voice_join']).total_seconds()
                 
                 # Registrar saída no banco de dados
                 try:
@@ -1820,13 +1828,19 @@ async def process_member_role_assignments(member: discord.Member, tracked_roles:
     try:
         for role in member.roles:
             if role.id in tracked_roles:
-                # Verificar se já existe registro no banco de dados
-                assigned_time = await bot.db.get_role_assigned_time(member.id, member.guild.id, role.id)
-                
-                if not assigned_time:
-                    # Registrar a atribuição com a data atual (assumindo que o cargo foi atribuído agora)
-                    await bot.db.log_role_assignment(member.id, member.guild.id, role.id)
-                    logger.debug(f"Registrada atribuição de cargo {role.name} para {member.display_name}")
+                try:
+                    # Verificar se já existe registro no banco de dados
+                    assigned_time = await bot.db.get_role_assigned_time(member.id, member.guild.id, role.id)
+                    
+                    if not assigned_time:
+                        # Registrar a atribuição com a data atual
+                        try:
+                            await bot.db.log_role_assignment(member.id, member.guild.id, role.id)
+                            logger.debug(f"Registrada atribuição de cargo {role.name} para {member.display_name}")
+                        except Exception as e:
+                            logger.error(f"Erro ao registrar atribuição de cargo {role.id} para {member.id}: {e}")
+                except Exception as e:
+                    logger.error(f"Erro ao verificar atribuição de cargo {role.id} para {member.id}: {e}")
     except Exception as e:
         logger.error(f"Erro ao processar atribuições de cargos para {member.display_name}: {e}")
 
