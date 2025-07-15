@@ -983,33 +983,33 @@ async def get_last_warning(self, user_id: int, guild_id: int) -> Optional[Tuple[
             if conn:
                 await self.pool.release(conn)
 
-    async def get_members_with_tracked_roles(self, guild_id: int, role_ids: List[int]) -> List[int]:
-        """Obtém todos os membros que possuem pelo menos um dos cargos monitorados"""
-        if not role_ids:
-            return []
+async def get_members_with_tracked_roles(self, guild_id: int, role_ids: List[int]) -> List[int]:
+    """Obtém todos os membros que possuem pelo menos um dos cargos monitorados"""
+    if not role_ids:
+        return []
 
-        conn = None
-        try:
-            conn = await self.pool.acquire()
-            results = await conn.fetch('''
-                SELECT DISTINCT user_id 
-                FROM user_activity
-                WHERE guild_id = $1
-                AND EXISTS (
-                    SELECT 1 FROM removed_roles 
-                    WHERE removed_roles.user_id = user_activity.user_id 
-                    AND removed_roles.guild_id = user_activity.guild_id
-                    AND removed_roles.role_id = ANY($2)
-                )
-            ''', guild_id, role_ids)
-            
-            return [r['user_id'] for r in results] if results else []
-        except Exception as e:
-            logger.error(f"Erro ao buscar membros com cargos monitorados: {e}")
-            return []
-        finally:
-            if conn:
-                await self.pool.release(conn)
+    conn = None
+    try:
+        conn = await self.pool.acquire()
+        results = await conn.fetch('''
+            SELECT DISTINCT user_id 
+            FROM user_activity
+            WHERE guild_id = $1
+            AND EXISTS (
+                SELECT 1 FROM role_assignments 
+                WHERE role_assignments.user_id = user_activity.user_id 
+                AND role_assignments.guild_id = user_activity.guild_id
+                AND role_assignments.role_id = ANY($2)
+            )
+        ''', guild_id, role_ids)
+        
+        return [r['user_id'] for r in results] if results else []
+    except Exception as e:
+        logger.error(f"Erro ao buscar membros com cargos monitorados: {e}")
+        return []
+    finally:
+        if conn:
+            await self.pool.release(conn)
 
     async def get_last_periods_batch(self, user_ids: List[int], guild_id: int) -> Dict[int, Dict]:
         """Obtém os últimos períodos verificados para um lote de usuários"""
@@ -1175,25 +1175,25 @@ async def get_last_warning(self, user_id: int, guild_id: int) -> Optional[Tuple[
             if conn:
                 await self.pool.release(conn)
 
-    async def sync_task_periods(self, monitoring_period: int):
-        """Sincroniza os períodos de monitoramento em todas as tasks"""
-        conn = None
-        try:
-            conn = await self.pool.acquire()
-            await conn.execute('''
-                UPDATE task_executions 
-                SET monitoring_period = $1
-                WHERE task_name IN (
-                    'inactivity_check', 'check_warnings', 
-                    'cleanup_members', 'check_previous_periods'
-                )
-            ''', monitoring_period)
-            logger.info("Períodos de monitoramento sincronizados nas tasks")
-        except Exception as e:
-            logger.error(f"Erro ao sincronizar períodos de monitoramento: {e}")
-        finally:
-            if conn:
-                await self.pool.release(conn)
+async def sync_task_periods(self, monitoring_period: int):
+    """Sincroniza os períodos de monitoramento em todas as tasks"""
+    conn = None
+    try:
+        conn = await self.pool.acquire()
+        await conn.execute('''
+            UPDATE task_executions 
+            SET monitoring_period = $1
+            WHERE task_name IN (
+                'inactivity_check', 'check_warnings', 
+                'cleanup_members', 'check_previous_periods'
+            )
+        ''', monitoring_period)
+        logger.info("Períodos de monitoramento sincronizados nas tasks")
+    except Exception as e:
+        logger.error(f"Erro ao sincronizar períodos de monitoramento: {e}")
+    finally:
+        if conn:
+            await self.pool.release(conn)
 
     async def health_check(self):
         """Verifica a saúde do banco de dados e reinicia tasks se necessário"""

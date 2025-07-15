@@ -435,10 +435,11 @@ class InactivityBot(commands.Bot):
                     await self.db.save_config(gid, self.config)
                     logger.info(f"Configuração salva no banco para guild {gid}")
                 
-                # Sincronizar períodos de monitoramento
-                monitoring_period = self.config.get('monitoring_period')
-                if monitoring_period:
-                    await self.db.sync_task_periods(monitoring_period)
+                # Verificar se o método sync_task_periods existe antes de chamá-lo
+                if hasattr(self.db, 'sync_task_periods'):
+                    monitoring_period = self.config.get('monitoring_period')
+                    if monitoring_period:
+                        await self.db.sync_task_periods(monitoring_period)
             
             self._last_config_save = datetime.now(pytz.utc)
         except Exception as e:
@@ -1154,6 +1155,12 @@ async def on_ready():
         
         # Garantir que as configurações estão salvas no banco
         await bot.save_config()
+
+        # Verificar se o método sync_task_periods existe antes de chamá-lo
+        if hasattr(bot.db, 'sync_task_periods'):
+            monitoring_period = bot.config.get('monitoring_period')
+            if monitoring_period:
+                await bot.db.sync_task_periods(monitoring_period)
         
         if hasattr(bot, '_ready_set') and bot._ready_set:
             return
