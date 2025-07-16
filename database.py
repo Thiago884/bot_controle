@@ -477,7 +477,7 @@ class Database:
                     await self.pool.release(conn)
 
     async def execute_query(self, query: str, params: tuple = None, timeout: int = 30):
-        """Executa uma query com tratamento de timeout e retry melhorado"""
+        """Executa uma query com tratamento de timeout và retry melhorado"""
         if not self.pool:
             raise RuntimeError("Pool de conexões não está disponível")
             
@@ -1227,38 +1227,37 @@ class Database:
             logger.error(f"Erro na verificação de saúde do banco de dados: {e}")
             return False
 
-# No método log_role_assignment, adicione um timeout e retry
-async def log_role_assignment(self, user_id: int, guild_id: int, role_id: int):
-    """Registra quando um cargo foi atribuído a um usuário"""
-    max_retries = 3
-    retry_delay = 1
-    
-    for attempt in range(max_retries):
-        conn = None
-        try:
-            conn = await asyncio.wait_for(self.pool.acquire(), timeout=10)
-            assigned_at = datetime.now(pytz.UTC)
-            await asyncio.wait_for(conn.execute('''
-                INSERT INTO role_assignments 
-                (user_id, guild_id, role_id, assigned_at) 
-                VALUES ($1, $2, $3, $4)
-                ON CONFLICT (user_id, guild_id, role_id) DO UPDATE 
-                SET assigned_at = EXCLUDED.assigned_at
-            ''', user_id, guild_id, role_id, assigned_at), timeout=10)
-            return
-        except (asyncio.TimeoutError, asyncpg.PostgresConnectionError) as e:
-            if attempt == max_retries - 1:
-                logger.error(f"Falha após {max_retries} tentativas ao registrar atribuição de cargo: {e}")
+    async def log_role_assignment(self, user_id: int, guild_id: int, role_id: int):
+        """Registra quando um cargo foi atribuído a um usuário"""
+        max_retries = 3
+        retry_delay = 1
+        
+        for attempt in range(max_retries):
+            conn = None
+            try:
+                conn = await asyncio.wait_for(self.pool.acquire(), timeout=10)
+                assigned_at = datetime.now(pytz.UTC)
+                await asyncio.wait_for(conn.execute('''
+                    INSERT INTO role_assignments 
+                    (user_id, guild_id, role_id, assigned_at) 
+                    VALUES ($1, $2, $3, $4)
+                    ON CONFLICT (user_id, guild_id, role_id) DO UPDATE 
+                    SET assigned_at = EXCLUDED.assigned_at
+                ''', user_id, guild_id, role_id, assigned_at), timeout=10)
+                return
+            except (asyncio.TimeoutError, asyncpg.PostgresConnectionError) as e:
+                if attempt == max_retries - 1:
+                    logger.error(f"Falha após {max_retries} tentativas ao registrar atribuição de cargo: {e}")
+                    raise
+                logger.warning(f"Tentativa {attempt + 1} falhou, tentando novamente em {retry_delay} segundos...")
+                await asyncio.sleep(retry_delay)
+                retry_delay *= 2
+            except Exception as e:
+                logger.error(f"Erro ao registrar atribuição de cargo: {e}")
                 raise
-            logger.warning(f"Tentativa {attempt + 1} falhou, tentando novamente em {retry_delay} segundos...")
-            await asyncio.sleep(retry_delay)
-            retry_delay *= 2
-        except Exception as e:
-            logger.error(f"Erro ao registrar atribuição de cargo: {e}")
-            raise
-        finally:
-            if conn:
-                await self.pool.release(conn)
+            finally:
+                if conn:
+                    await self.pool.release(conn)
 
     async def get_role_assigned_time(self, user_id: int, guild_id: int, role_id: int) -> Optional[datetime]:
         """Obtém quando um cargo foi atribuído a um usuário"""
