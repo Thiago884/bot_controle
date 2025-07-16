@@ -1851,17 +1851,26 @@ async def process_member_role_assignments(member: discord.Member, tracked_roles:
             if role.id in tracked_roles:
                 try:
                     # Verificar se já existe registro no banco de dados
-                    assigned_time = await bot.db.get_role_assigned_time(member.id, member.guild.id, role.id)
+                    assigned_time = None
+                    try:
+                        assigned_time = await bot.db.get_role_assigned_time(
+                            member.id, member.guild.id, role.id)
+                    except Exception as e:
+                        logger.error(f"Erro ao verificar atribuição de cargo {role.id} para {member.id}: {e}")
+                        continue
                     
                     if not assigned_time:
-                        # Registrar a atribuição com a data atual
+                        # Registrar com a data atual
                         try:
-                            await bot.db.log_role_assignment(member.id, member.guild.id, role.id)
-                            logger.debug(f"Registrada atribuição de cargo {role.name} para {member.display_name}")
+                            await bot.db.log_role_assignment(
+                                member.id, member.guild.id, role.id)
+                            logger.debug(f"Registrado cargo {role.name} para {member.display_name}")
                         except Exception as e:
                             logger.error(f"Erro ao registrar atribuição de cargo {role.id} para {member.id}: {e}")
+                            continue
                 except Exception as e:
-                    logger.error(f"Erro ao verificar atribuição de cargo {role.id} para {member.id}: {e}")
+                    logger.error(f"Erro ao processar cargo {role.id} para {member.display_name}: {e}")
+                    continue
     except Exception as e:
         logger.error(f"Erro ao processar atribuições de cargos para {member.display_name}: {e}")
 

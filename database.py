@@ -1227,21 +1227,34 @@ class Database:
             logger.error(f"Erro na verificação de saúde do banco de dados: {e}")
             return False
 
-    async def log_role_assignment(self, user_id: int, guild_id: int, role_id: int):
-        """Registra quando um cargo foi atribuído a um usuário"""
+# No método log_role_assignment, adicione um timeout e retry
+async def log_role_assignment(self, user_id: int, guild_id: int, role_id: int):
+    """Registra quando um cargo foi atribuído a um usuário"""
+    max_retries = 3
+    retry_delay = 1
+    
+    for attempt in range(max_retries):
         conn = None
         try:
-            conn = await self.pool.acquire()
-            assigned_at = datetime.now(pytz.UTC)  # Garantir UTC
-            await conn.execute('''
+            conn = await asyncio.wait_for(self.pool.acquire(), timeout=10)
+            assigned_at = datetime.now(pytz.UTC)
+            await asyncio.wait_for(conn.execute('''
                 INSERT INTO role_assignments 
                 (user_id, guild_id, role_id, assigned_at) 
                 VALUES ($1, $2, $3, $4)
                 ON CONFLICT (user_id, guild_id, role_id) DO UPDATE 
                 SET assigned_at = EXCLUDED.assigned_at
-            ''', user_id, guild_id, role_id, assigned_at)
+            ''', user_id, guild_id, role_id, assigned_at), timeout=10)
+            return
+        except (asyncio.TimeoutError, asyncpg.PostgresConnectionError) as e:
+            if attempt == max_retries - 1:
+                logger.error(f"Falha após {max_retries} tentativas ao registrar atribuição de cargo: {e}")
+                raise
+            logger.warning(f"Tentativa {attempt + 1} falhou, tentando novamente em {retry_delay} segundos...")
+            await asyncio.sleep(retry_delay)
+            retry_delay *= 2
         except Exception as e:
-            logger.error(f"Erro ao registrar atribuição de cargo para user {user_id}, guild {guild_id}, role {role_id}: {e}", exc_info=True)
+            logger.error(f"Erro ao registrar atribuição de cargo: {e}")
             raise
         finally:
             if conn:
