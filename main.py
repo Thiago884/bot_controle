@@ -787,6 +787,13 @@ class InactivityBot(commands.Bot):
         session_data = self.active_sessions.get((member.id, member.guild.id))
         if session_data:
             try:
+                # Verificar se é uma sessão estimada e expirou
+                if session_data.get('estimated') and 'max_estimated_time' in session_data:
+                    if datetime.now(pytz.utc) > session_data['max_estimated_time']:
+                        # Sessão estimada expirou - não registrar
+                        self.active_sessions.pop((member.id, member.guild.id), None)
+                        return
+                
                 # Verificar se o canal existe antes de acessar o nome
                 channel_name = before.channel.name if before.channel else "Canal desconhecido"
                 
@@ -1176,7 +1183,7 @@ async def on_ready():
                 report_metrics, health_check, check_missed_periods,
                 check_previous_periods, process_pending_voice_events,
                 check_current_voice_members, detect_missing_voice_leaves,
-                register_role_assignments  # Nova task adicionada
+                register_role_assignments, cleanup_ghost_sessions  # Nova task adicionada
             )
             
             # Primeiro verificar períodos perdidos
@@ -1201,6 +1208,7 @@ async def on_ready():
             bot.loop.create_task(process_pending_voice_events(), name='process_pending_voice_events')
             bot.loop.create_task(check_current_voice_members(), name='check_current_voice_members')
             bot.loop.create_task(detect_missing_voice_leaves(), name='detect_missing_voice_leaves')
+            bot.loop.create_task(cleanup_ghost_sessions(), name='cleanup_ghost_sessions')  # Nova task
             
             bot.voice_event_processor_task = bot.loop.create_task(bot.process_voice_events(), name='voice_event_processor')
             bot.queue_processor_task = bot.loop.create_task(bot.process_queues(), name='queue_processor')

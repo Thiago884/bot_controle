@@ -623,7 +623,8 @@ async def _health_check():
             'check_current_voice_members',
             'detect_missing_voice_leaves',
             'cleanup_processed_events',
-            'register_role_assignments_wrapper'  # Adicionado para a nova task
+            'cleanup_ghost_sessions_wrapper',  # Adicionado para a nova task
+            'register_role_assignments_wrapper'
         }
 
         for task_name in expected_tasks:
@@ -665,6 +666,8 @@ async def _health_check():
                     asyncio.create_task(detect_missing_voice_leaves(), name='detect_missing_voice_leaves')
                 elif task_name == 'cleanup_processed_events':
                     asyncio.create_task(cleanup_processed_events(), name='cleanup_processed_events')
+                elif task_name == 'cleanup_ghost_sessions_wrapper':
+                    asyncio.create_task(cleanup_ghost_sessions(), name='cleanup_ghost_sessions_wrapper')
                 elif task_name == 'register_role_assignments_wrapper':
                     asyncio.create_task(register_role_assignments(), name='register_role_assignments_wrapper')
 
@@ -1109,7 +1112,7 @@ async def _report_metrics():
         metrics_report = []
         for task_name in ['inactivity_check', 'check_warnings', 'cleanup_members', 
                          'database_backup', 'cleanup_old_data', 'monitor_rate_limits',
-                         'register_role_assignments']:  # Adicionada a nova task
+                         'cleanup_ghost_sessions', 'register_role_assignments']:
             metrics = task_metrics.get_metrics(task_name)
             metrics_report.append(
                 f"**{task_name}**:\n"
@@ -1658,16 +1661,30 @@ async def check_current_voice_members():
                     if member.bot:
                         continue
                         
-                    # Verificar se já temos uma sessão ativa para este membro
                     audio_key = (member.id, guild.id)
+                    
+                    # Verificar se já temos uma sessão ativa para este membro
                     if audio_key not in bot.active_sessions:
-                        # Criar uma sessão estimada
+                        # Verificar no banco de dados se há uma sessão não encerrada
+                        last_activity = await bot.db.get_user_activity(member.id, guild.id)
+                        
+                        if last_activity and last_activity.get('last_voice_join') and \
+                           (not last_activity.get('last_voice_leave') or 
+                            last_activity['last_voice_join'] > last_activity['last_voice_leave']):
+                            # Já existe uma sessão não encerrada no banco - não criar nova
+                            continue
+                            
+                        # Criar uma sessão estimada com tempo máximo de 1 hora
+                        max_estimated_duration = timedelta(hours=1)
+                        estimated_start = datetime.now(pytz.UTC) - timedelta(minutes=5)
+                        
                         bot.active_sessions[audio_key] = {
-                            'start_time': datetime.now(pytz.UTC) - timedelta(minutes=5),  # CORRIGIDO: Usando UTC
-                            'last_audio_time': datetime.now(pytz.UTC), # CORRIGIDO: Usando UTC
+                            'start_time': estimated_start,
+                            'last_audio_time': datetime.now(pytz.UTC),
                             'audio_disabled': member.voice.self_deaf or member.voice.deaf,
                             'total_audio_off_time': 0,
-                            'estimated': True  # Flag para indicar que é uma estimativa
+                            'estimated': True,
+                            'max_estimated_time': estimated_start + max_estimated_duration
                         }
                         
                         logger.info(f"Sessão estimada criada para {member.display_name} no canal {voice_channel.name}")
@@ -1755,6 +1772,61 @@ async def cleanup_processed_events():
         except Exception as e:
             logger.error(f"Erro na limpeza de eventos processados: {e}")
             await asyncio.sleep(3600)  # Tentar novamente em 1 hora se falhar
+
+@log_task_metrics("cleanup_ghost_sessions")
+async def cleanup_ghost_sessions():
+    """Limpa sessões fantasmas no banco de dados"""
+    await bot.wait_until_ready()
+    
+    if not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
+        logger.error("Banco de dados não inicializado - pulando limpeza de sessões fantasmas")
+        return
+    
+    try:
+        logger.info("Iniciando limpeza de sessões fantasmas...")
+        
+        # Encontrar sessões onde last_voice_join > last_voice_leave há mais de 24 horas
+        async with bot.db.pool.acquire() as conn:
+            ghost_sessions = await conn.fetch('''
+                UPDATE user_activity 
+                SET last_voice_leave = last_voice_join + INTERVAL '1 hour',
+                    total_voice_time = total_voice_time + 3600
+                WHERE (last_voice_leave IS NULL OR last_voice_join > last_voice_leave)
+                AND last_voice_join < NOW() - INTERVAL '24 hours'
+                RETURNING user_id, guild_id
+            ''')
+            
+            if ghost_sessions:
+                logger.info(f"Limpeza concluída: {len(ghost_sessions)} sessões fantasmas corrigidas")
+                
+                # Registrar sessões de voz para os membros afetados
+                for session in ghost_sessions:
+                    try:
+                        await conn.execute('''
+                            INSERT INTO voice_sessions
+                            (user_id, guild_id, join_time, leave_time, duration)
+                            VALUES ($1, $2, $3, $4, $5)
+                        ''', 
+                        session['user_id'], 
+                        session['guild_id'],
+                        session['last_voice_join'],
+                        session['last_voice_join'] + timedelta(hours=1),
+                        3600)
+                    except Exception as e:
+                        logger.error(f"Erro ao registrar sessão fantasma: {e}")
+                        continue
+    except Exception as e:
+        logger.error(f"Erro na limpeza de sessões fantasmas: {e}")
+
+async def cleanup_ghost_sessions_wrapper():
+    """Wrapper para a task de limpeza de sessões fantasmas"""
+    monitoring_period = 1  # Executar diariamente
+    task = bot.loop.create_task(execute_task_with_persistent_interval(
+        "cleanup_ghost_sessions",
+        monitoring_period,
+        cleanup_ghost_sessions
+    ), name='cleanup_ghost_sessions_wrapper')
+    return task
 
 @log_task_metrics("register_role_assignments")
 async def register_role_assignments():
