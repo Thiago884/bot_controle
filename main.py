@@ -787,6 +787,12 @@ class InactivityBot(commands.Bot):
         session_data = self.active_sessions.get((member.id, member.guild.id))
         if session_data:
             try:
+                # Verificar se a sessão está pausada (usuário estava na sala de ausência)
+                if session_data.get('paused'):
+                    # Não registrar saída, apenas limpar a sessão pausada
+                    self.active_sessions.pop((member.id, member.guild.id), None)
+                    return
+                    
                 # Verificar se é uma sessão estimada e expirou
                 if session_data.get('estimated') and 'max_estimated_time' in session_data:
                     if datetime.now(pytz.utc) > session_data['max_estimated_time']:
@@ -845,12 +851,61 @@ class InactivityBot(commands.Bot):
         audio_key = (member.id, member.guild.id)
         
         if after.channel.id == absence_channel_id and before.channel.id != absence_channel_id:
-            await self._handle_voice_leave(member, before)
+            # Movendo para a sala de ausência - pausar a sessão em vez de encerrar
+            if audio_key in self.active_sessions:
+                # Calcular tempo até agora
+                current_duration = (datetime.now(pytz.utc) - self.active_sessions[audio_key]['start_time']).total_seconds()
+                
+                # Pausar a sessão mantendo os dados atuais
+                self.active_sessions[audio_key]['paused'] = True
+                self.active_sessions[audio_key]['paused_time'] = datetime.now(pytz.utc)
+                self.active_sessions[audio_key]['pre_pause_duration'] = current_duration
+                
+                embed = discord.Embed(
+                    title="⏸ Sessão Pausada (Ausência)",
+                    color=discord.Color.light_grey(),
+                    timestamp=datetime.now(self.timezone))
+                embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
+                embed.add_field(name="Usuário", value=member.mention, inline=True)
+                embed.add_field(name="De", value=before.channel.name, inline=True)
+                embed.add_field(name="Para", value=after.channel.name, inline=True)
+                embed.add_field(name="Tempo Ativo", 
+                              value=f"{int(current_duration//60)} minutos {int(current_duration%60)} segundos", 
+                              inline=False)
+                embed.set_footer(text=f"ID: {member.id}")
+                
+                await self.log_action(None, None, embed=embed)
         
         elif before.channel.id == absence_channel_id and after.channel.id != absence_channel_id:
-            await self._handle_voice_join(member, after)
+            # Voltando da sala de ausência - retomar a sessão
+            if audio_key in self.active_sessions and self.active_sessions[audio_key].get('paused'):
+                # Calcular tempo pausado
+                pause_duration = (datetime.now(pytz.utc) - self.active_sessions[audio_key]['paused_time']).total_seconds()
+                
+                # Retomar a sessão
+                self.active_sessions[audio_key]['start_time'] = datetime.now(pytz.utc) - timedelta(
+                    seconds=self.active_sessions[audio_key]['pre_pause_duration'])
+                del self.active_sessions[audio_key]['paused']
+                del self.active_sessions[audio_key]['paused_time']
+                del self.active_sessions[audio_key]['pre_pause_duration']
+                
+                embed = discord.Embed(
+                    title="▶️ Sessão Retomada (Voltou)",
+                    color=discord.Color.green(),
+                    timestamp=datetime.now(self.timezone))
+                embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
+                embed.add_field(name="Usuário", value=member.mention, inline=True)
+                embed.add_field(name="De", value=before.channel.name, inline=True)
+                embed.add_field(name="Para", value=after.channel.name, inline=True)
+                embed.add_field(name="Tempo Pausado", 
+                              value=f"{int(pause_duration//60)} minutos {int(pause_duration%60)} segundos", 
+                              inline=False)
+                embed.set_footer(text=f"ID: {member.id}")
+                
+                await self.log_action(None, None, embed=embed)
         
         else:
+            # Movimento entre outros canais - apenas registrar
             if audio_key in self.active_sessions:
                 embed = discord.Embed(
                     title="🔄 Movido entre Canais",
