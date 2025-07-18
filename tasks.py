@@ -910,82 +910,54 @@ async def process_member_cleanup(member: discord.Member, guild: discord.Guild,
                                members_kicked: int):
     """Process cleanup for a single member"""
     try:
-        # Verificar whitelist apenas para usuários, não para roles
+        # Verificar whitelist (usuários isentos)
         if member.id in bot.config['whitelist']['users']:
             return
             
-        # Verificar se tem apenas o cargo @everyone (len=1) ou nenhum cargo (len=0)
-        if len(member.roles) <= 1:  # Considera @everyone como um cargo
+        # Verificar se tem apenas @everyone (len=1) ou nenhum cargo (len=0)
+        if len(member.roles) <= 1:  
             # Obter há quanto tempo está sem cargos
             time_without_roles = await get_time_without_roles(member)
             
             if not time_without_roles:
                 return
                 
-            # Verificar se o tempo sem cargos ultrapassa o limite
-            if time_without_roles < timedelta(days=kick_after_days):
-                return
-                
             # Verificar se o membro ainda está no servidor
             if member not in guild.members:
                 return
                 
-            try:
-                # Verificar se já foi expulso antes
-                start_time = time.time()
-                last_kick = await bot.db.get_last_kick(member.id, guild.id)
-                perf_metrics.record_db_query(time.time() - start_time)
+            # Verificar se já foi expulso recentemente
+            last_kick = await bot.db.get_last_kick(member.id, guild.id)
+            if last_kick and (datetime.now(pytz.UTC) - last_kick['kick_date']).days < kick_after_days:
+                return
                 
-                if last_kick and (datetime.now(pytz.UTC) - last_kick['kick_date']).days < kick_after_days:
-                    return
+            # 🔴 **LÓGICA PRINCIPAL**: Expulsar se passou mais tempo que kick_after_days sem cargos
+            if time_without_roles >= timedelta(days=kick_after_days):
+                try:
+                    await member.kick(reason=f"Sem cargos há mais de {kick_after_days} dias")
                     
-                # Verificar atividade recente antes de expulsar
-                start_time = time.time()
-                last_activity = await bot.db.get_user_activity(member.id, guild.id)
-                perf_metrics.record_db_query(time.time() - start_time)
-                
-                # Inicializar last_active com joined_at como fallback
-                last_active = member.joined_at.replace(tzinfo=pytz.UTC) if member.joined_at else None
-                
-                # Se o usuário teve atividade recente, usar essa data
-                if last_activity and last_activity.get('last_voice_join'):
-                    last_active = last_activity['last_voice_join']
-                
-                # Verificar se a inatividade ultrapassa o limite
-                if last_active and (datetime.now(pytz.UTC) - last_active).days < kick_after_days:
-                    return
-                
-                # Expulsar o membro
-                start_time = time.time()
-                await member.kick(reason=f"Sem cargos há mais de {kick_after_days} dias")
-                perf_metrics.record_api_call(time.time() - start_time)
-                
-                # Registrar no banco de dados
-                start_time = time.time()
-                await bot.db.log_kicked_member(
-                    member.id, guild.id, 
-                    f"Sem cargos há mais de {kick_after_days} dias"
-                )
-                perf_metrics.record_db_query(time.time() - start_time)
-                
-                # Logar a ação
-                await bot.log_action(
-                    "Membro Expulso",
-                    member,
-                    f"Motivo: Sem cargos há mais de {kick_after_days} dias\n"
-                    f"Tempo sem cargos: {time_without_roles.days} dias\n"
-                    f"Entrou no servidor em: {member.joined_at.strftime('%d/%m/%Y') if member.joined_at else 'N/A'}\n"
-                    f"Última atividade em voz: {last_active.strftime('%d/%m/%Y') if last_active else 'Nunca'}"
-                )
-                await bot.notify_roles(
-                    f"👢 {member.mention} foi expulso por estar sem cargos há mais de {kick_after_days} dias")
-                
-                members_kicked += 1
-                
-            except discord.Forbidden:
-                await bot.log_action("Erro ao Expulsar", member, "Permissões insuficientes")
-            except Exception as e:
-                logger.error(f"Erro ao expulsar membro {member}: {e}")
+                    # Registrar no banco de dados
+                    await bot.db.log_kicked_member(
+                        member.id, guild.id, 
+                        f"Sem cargos há mais de {kick_after_days} dias"
+                    )
+                    
+                    # Logar a ação
+                    await bot.log_action(
+                        "Membro Expulso",
+                        member,
+                        f"Motivo: Sem cargos há mais de {kick_after_days} dias\n"
+                        f"Tempo sem cargos: {time_without_roles.days} dias"
+                    )
+                    await bot.notify_roles(
+                        f"👢 {member.mention} foi expulso por estar sem cargos há mais de {kick_after_days} dias")
+                    
+                    members_kicked += 1
+                    
+                except discord.Forbidden:
+                    await bot.log_action("Erro ao Expulsar", member, "Permissões insuficientes")
+                except Exception as e:
+                    logger.error(f"Erro ao expulsar membro {member}: {e}")
     except Exception as e:
         logger.error(f"Erro ao verificar membro para expulsão {member}: {e}")
 
