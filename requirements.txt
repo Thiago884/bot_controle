@@ -12,7 +12,5 @@ flask-cors>=3.0.10
 psutil>=5.9.0
 gunicorn>=23.0.0
 nest-asyncio>=1.5.8
-gevent>=22.10.2
 pycares>=3.0.0
 idna>=2.10
-psycopg2-binary>=2.9.9

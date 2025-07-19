@@ -308,25 +308,42 @@ class InactivityBot(commands.Bot):
         self._connection_delay = 10  # segundos
 
     async def start(self, token: str, *, reconnect: bool = True) -> None:
-        """Override do método start para lidar com rate limits"""
+        """Override do método start para lidar com rate limits de forma robusta."""
         while self._connection_attempts < self._max_connection_attempts:
             try:
                 await super().start(token, reconnect=reconnect)
-                break
+                break  # Sai do loop se a conexão for bem-sucedida
             except discord.HTTPException as e:
                 self._connection_attempts += 1
                 if e.status == 429:  # Rate limited
-                    retry_after = e.retry_after if hasattr(e, 'retry_after') else self._connection_delay
-                    logger.warning(f"Rate limit atingido. Tentando novamente em {retry_after} segundos (tentativa {self._connection_attempts}/{self._max_connection_attempts})")
+                    retry_after = e.retry_after
+                    logger.warning(
+                        f"Rate limit ao conectar. O Discord pediu para esperar {retry_after:.2f} segundos. "
+                        f"Tentativa {self._connection_attempts}/{self._max_connection_attempts}"
+                    )
                     await asyncio.sleep(retry_after)
                 else:
-                    raise
+                    wait_time = self._connection_delay * (2 ** self._connection_attempts)
+                    logger.error(
+                        f"Erro HTTP {e.status} ao conectar. Tentando novamente em {wait_time}s. "
+                        f"Tentativa {self._connection_attempts}/{self._max_connection_attempts}",
+                        exc_info=True
+                    )
+                    if self._connection_attempts >= self._max_connection_attempts:
+                        raise
+                    await asyncio.sleep(wait_time)
             except Exception as e:
                 self._connection_attempts += 1
                 if self._connection_attempts >= self._max_connection_attempts:
+                    logger.critical("Máximo de tentativas de conexão atingido. Desistindo.", exc_info=True)
                     raise
-                logger.warning(f"Erro de conexão. Tentando novamente em {self._connection_delay} segundos (tentativa {self._connection_attempts}/{self._max_connection_attempts})")
-                await asyncio.sleep(self._connection_delay)
+                wait_time = self._connection_delay * (2 ** self._connection_attempts)
+                logger.error(
+                    f"Erro inesperado ao conectar. Tentando novamente em {wait_time} segundos. "
+                    f"Tentativa {self._connection_attempts}/{self._max_connection_attempts}",
+                    exc_info=True
+                )
+                await asyncio.sleep(wait_time)
 
     async def initialize_db(self):
         """Inicializa a conexão com o banco de dados usando a classe Database."""
