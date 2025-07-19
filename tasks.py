@@ -890,8 +890,12 @@ async def _cleanup_members(force_check: bool = False):
         members = prioritize_members(list(guild.members))  # Priorizar membros mais antigos/sem cargos
         for i in range(0, len(members), batch_size):
             batch = members[i:i + batch_size]
-            await asyncio.gather(*[process_member_cleanup(member, guild, cutoff_date, 
-                kick_after_days, members_kicked) for member in batch])
+            results = await asyncio.gather(*[
+                process_member_cleanup(member, guild, cutoff_date, kick_after_days) 
+                for member in batch
+            ])
+            
+            members_kicked += sum(results)  # Soma os resultados booleanos (True = 1, False = 0)
             
             await asyncio.sleep(bot.rate_limit_delay)
     
@@ -909,13 +913,12 @@ async def cleanup_members(force_check: bool = False):
     return task
 
 async def process_member_cleanup(member: discord.Member, guild: discord.Guild, 
-                               cutoff_date: datetime, kick_after_days: int, 
-                               members_kicked: int):
-    """Process cleanup for a single member"""
+                               cutoff_date: datetime, kick_after_days: int):
+    """Process cleanup for a single member and returns whether member was kicked"""
     try:
         # Verificar whitelist (usuários isentos)
         if member.id in bot.config['whitelist']['users']:
-            return
+            return False
             
         # Verificar se tem apenas @everyone (len=1) ou nenhum cargo (len=0)
         if len(member.roles) <= 1:  
@@ -923,16 +926,16 @@ async def process_member_cleanup(member: discord.Member, guild: discord.Guild,
             time_without_roles = await get_time_without_roles(member)
             
             if not time_without_roles:
-                return
+                return False
                 
             # Verificar se o membro ainda está no servidor
             if member not in guild.members:
-                return
+                return False
                 
             # Verificar se já foi expulso recentemente
             last_kick = await bot.db.get_last_kick(member.id, guild.id)
             if last_kick and (datetime.now(pytz.UTC) - last_kick['kick_date']).days < kick_after_days:
-                return
+                return False
                 
             # 🔴 **LÓGICA PRINCIPAL**: Expulsar se passou mais tempo que kick_after_days sem cargos
             if time_without_roles >= timedelta(days=kick_after_days):
@@ -955,14 +958,16 @@ async def process_member_cleanup(member: discord.Member, guild: discord.Guild,
                     await bot.notify_roles(
                         f"👢 {member.mention} foi expulso por estar sem cargos há mais de {kick_after_days} dias")
                     
-                    members_kicked += 1
+                    return True
                     
                 except discord.Forbidden:
                     await bot.log_action("Erro ao Expulsar", member, "Permissões insuficientes")
                 except Exception as e:
                     logger.error(f"Erro ao expulsar membro {member}: {e}")
+        return False
     except Exception as e:
         logger.error(f"Erro ao verificar membro para expulsão {member}: {e}")
+        return False
 
 @log_task_metrics("database_backup")
 async def _database_backup():
