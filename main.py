@@ -301,6 +301,32 @@ class InactivityBot(commands.Bot):
             'responses': defaultdict(dict)
         }
         self.cache_ttl = 300
+        
+        # Novos atributos para tratamento de conexão
+        self._connection_attempts = 0
+        self._max_connection_attempts = 5
+        self._connection_delay = 10  # segundos
+
+    async def start(self, token: str, *, reconnect: bool = True) -> None:
+        """Override do método start para lidar com rate limits"""
+        while self._connection_attempts < self._max_connection_attempts:
+            try:
+                await super().start(token, reconnect=reconnect)
+                break
+            except discord.HTTPException as e:
+                self._connection_attempts += 1
+                if e.status == 429:  # Rate limited
+                    retry_after = e.retry_after if hasattr(e, 'retry_after') else self._connection_delay
+                    logger.warning(f"Rate limit atingido. Tentando novamente em {retry_after} segundos (tentativa {self._connection_attempts}/{self._max_connection_attempts})")
+                    await asyncio.sleep(retry_after)
+                else:
+                    raise
+            except Exception as e:
+                self._connection_attempts += 1
+                if self._connection_attempts >= self._max_connection_attempts:
+                    raise
+                logger.warning(f"Erro de conexão. Tentando novamente em {self._connection_delay} segundos (tentativa {self._connection_attempts}/{self._max_connection_attempts})")
+                await asyncio.sleep(self._connection_delay)
 
     async def initialize_db(self):
         """Inicializa a conexão com o banco de dados usando a classe Database."""
@@ -1349,6 +1375,9 @@ from bot_commands import *
 async def main():
     load_dotenv()
     DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
+    
+    # Adicionar delay antes de conectar
+    await asyncio.sleep(5)  # Espera 5 segundos antes de tentar conectar
     
     # Tentar inicializar o banco de dados antes de iniciar o bot
     try:
