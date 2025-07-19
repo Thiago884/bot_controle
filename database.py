@@ -1,1286 +1,1403 @@
-import os
-import time
-import asyncio
-import logging
-import glob
-import zipfile
-import json
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple, Union
-import asyncpg
-from asyncpg import Pool, Connection
-from asyncpg.pool import create_pool
+import discord
+from discord.ext import commands
 import pytz
+import json
+import os
+import logging
+from logging.handlers import RotatingFileHandler
+from dotenv import load_dotenv
+import asyncio
+import time
+from datetime import datetime, timedelta
+from typing import Optional
+from discord.ext import tasks
+import random
+from collections import defaultdict
+from collections import deque
+from flask import Flask
+import sys
+import traceback
 
-logger = logging.getLogger('inactivity_bot')
+# Importe sua classe Database
+from database import Database
 
-# Configuração padrão para fallback
+# Configuração do logger
+def setup_logger():
+    logger = logging.getLogger('inactivity_bot')
+    if logger.handlers:  # Se já tem handlers, não adicione novos
+        return logger
+        
+    logger.setLevel(logging.INFO)
+    
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - '
+        'Guild:%(guild_id)s - User:%(user_id)s - %(message)s'
+    )
+    
+    file_handler = RotatingFileHandler(
+        'bot.log', 
+        maxBytes=5*1024*1024,
+        backupCount=3
+    )
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+    
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+    
+    return logger
+
+class ContextFilter(logging.Filter):
+    def filter(self, record):
+        record.guild_id = getattr(record, 'guild_id', 'N/A')
+        record.user_id = getattr(record, 'user_id', 'N/A')
+        return True
+
+logger = setup_logger()
+logger.addFilter(ContextFilter())
+
+def log_with_context(message, level=logging.INFO, guild_id=None, user_id=None):
+    extra = {'guild_id': guild_id or 'N/A', 'user_id': user_id or 'N/A'}
+    logger.log(level, message, extra=extra)
+
+class RateLimitMonitor:
+    def __init__(self):
+        self.buckets = {}
+        self.global_limits = {
+            'limit': 50,
+            'remaining': 50,
+            'reset_at': 0
+        }
+        self.last_updated = 0
+        self.history = deque(maxlen=100)  # Mantém histórico dos últimos 100 eventos
+        self.adaptive_delay = 1.0
+        self.max_delay = 10.0
+        self.cooldown_until = 0
+    
+    def update_from_headers(self, headers):
+        now = time.time()
+        bucket = headers.get('X-RateLimit-Bucket', 'global')
+        limit = int(headers.get('X-RateLimit-Limit', 50))
+        remaining = int(headers.get('X-RateLimit-Remaining', limit))
+        reset_at = float(headers.get('X-RateLimit-Reset', now + 60))
+        
+        if bucket == 'global':
+            self.global_limits = {
+                'limit': limit,
+                'remaining': remaining,
+                'reset_at': reset_at
+            }
+        else:
+            self.buckets[bucket] = {
+                'limit': limit,
+                'remaining': remaining,
+                'reset_at': reset_at,
+                'last_updated': now
+            }
+        
+        self.last_updated = now
+        self.history.append({
+            'time': now,
+            'bucket': bucket,
+            'remaining': remaining,
+            'endpoint': str(headers.get('endpoint', 'unknown'))
+        })
+    
+    def get_remaining(self, bucket='global'):
+        if bucket == 'global':
+            return self.global_limits['remaining']
+        return self.buckets.get(bucket, {}).get('remaining', 50)
+    
+    def should_delay(self):
+        now = time.time()
+        if now < self.cooldown_until:
+            return True
+        
+        # Verificar rate limit global
+        if self.global_limits['remaining'] < 5 and now < self.global_limits['reset_at']:
+            self.adaptive_delay = min(self.max_delay, self.adaptive_delay * 1.5)
+            self.cooldown_until = now + self.adaptive_delay
+            return True
+        
+        # Verificar outros buckets importantes
+        for bucket, data in self.buckets.items():
+            if data['remaining'] < 2 and now < data['reset_at']:
+                self.adaptive_delay = min(self.max_delay, self.adaptive_delay * 1.2)
+                self.cooldown_until = now + self.adaptive_delay
+                return True
+        
+        # Reduzir gradualmente o delay quando não há rate limits
+        if self.adaptive_delay > 1.0:
+            self.adaptive_delay = max(1.0, self.adaptive_delay * 0.9)
+        
+        return False
+    
+    def get_status_report(self):
+        now = time.time()
+        report = {
+            'global': {
+                **self.global_limits,
+                'seconds_until_reset': max(0, self.global_limits['reset_at'] - now)
+            },
+            'adaptive_delay': self.adaptive_delay,
+            'cooldown_until': max(0, self.cooldown_until - now),
+            'buckets': {}
+        }
+        
+        for bucket, data in self.buckets.items():
+            report['buckets'][bucket] = {
+                'limit': data['limit'],
+                'remaining': data['remaining'],
+                'seconds_until_reset': max(0, data['reset_at'] - now)
+            }
+        
+        return report
+
+# Configurações iniciais
+CONFIG_FILE = 'config.json'
 DEFAULT_CONFIG = {
-    # Adicione configurações padrão para guilds específicas se necessário
+    "required_minutes": 15,
+    "required_days": 2,
+    "monitoring_period": 14,
+    "kick_after_days": 30,
+    "tracked_roles": [],
+    "log_channel": None,
+    "notification_channel": None,
+    "timezone": "America/Sao_Paulo",
+    "absence_channel": None,
+    "allowed_roles": [],
+    "whitelist": {
+        "users": [],
+        "roles": []
+    },
+    "warnings": {
+        "first_warning": 3,
+        "second_warning": 1,
+        "messages": {
+            "first": "⚠️ **Aviso de Inatividade** ⚠️\nVocê está prestes a perder seus cargos por inatividade. Entre em um canal de voz por pelo menos {required_minutes} minutos em {required_days} dias diferentes nos próximos {days} dias para evitar isso.",
+            "second": "🔴 **Último Aviso** 🔴\nVocê perderá seus cargos AMANHÃ por inatividade se não cumprir os requisitos de atividade em voz ({required_minutes} minutos em {required_days} dias diferentes).",
+            "final": "❌ **Cargos Removidos** ❌\nVocê perdeu seus cargos no servidor {guild} por inatividade. Você não cumpriu os requisitos de atividade de voz ({required_minutes} minutos em {required_days} dias diferentes dentro de {monitoring_period} dias)."
+        }
+    }
 }
 
-class DatabaseBackup:
-    def __init__(self, db):
-        self.db = db
-        self.backup_dir = 'backups'
-        try:
-            os.makedirs(self.backup_dir, exist_ok=True)
-            # Testar se o diretório é gravável
-            test_file = os.path.join(self.backup_dir, 'test.txt')
-            with open(test_file, 'w') as f:
-                f.write('test')
-            os.remove(test_file)
-            self.backup_enabled = True
-        except Exception as e:
-            logger.warning(f"Backups locais desabilitados - não foi possível acessar o diretório de backups: {e}")
-            self.backup_enabled = False
-
-    async def create_backup(self):
-        """Cria backup do banco de dados usando método manual"""
-        if not self.backup_enabled:
-            logger.info("Backups locais estão desabilitados - pulando criação de backup")
-            return False
-            
-        try:
-            return await self._create_backup_manual()
-        except Exception as e:
-            logger.error(f"Erro ao criar backup: {e}", exc_info=True)
-            return False
-
-    async def _create_backup_manual(self):
-        """Método manual de backup"""
-        try:
-            timestamp = datetime.now(pytz.utc).strftime('%Y%m%d_%H%M%S')
-            backup_file = os.path.join(self.backup_dir, f'backup_{timestamp}.sql')
-            zip_file = f'{backup_file}.zip'
-            
-            # Garantir que o diretório existe
-            os.makedirs(self.backup_dir, exist_ok=True)
-            
-            async with self.db.pool.acquire() as conn:
-                tables = await conn.fetch("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'")
-                
-                with open(backup_file, 'w', encoding='utf-8') as f:
-                    for table in tables:
-                        table_name = table['table_name']
-                        try:
-                            # Usar apenas a query alternativa, removendo a tentativa com pg_get_tabledef
-                            create_table = await conn.fetchval('''
-                                SELECT 'CREATE TABLE ' || quote_ident(table_name) || ' (' || 
-                                       string_agg(column_definition, ', ') || ');'
-                                FROM (
-                                    SELECT 
-                                        table_name,
-                                        quote_ident(column_name) || ' ' || 
-                                        data_type || 
-                                        CASE WHEN is_nullable = 'NO' THEN ' NOT NULL' ELSE '' END || 
-                                        CASE WHEN column_default IS NOT NULL THEN ' DEFAULT ' || column_default ELSE '' END AS column_definition
-                                    FROM information_schema.columns
-                                    WHERE table_name = $1 AND table_schema = 'public'
-                                    ORDER by ordinal_position
-                                ) AS cols
-                                GROUP BY table_name;
-                            ''', table_name)
-                            
-                            if create_table:
-                                f.write(f"{create_table};\n\n")
-                            else:
-                                logger.warning(f"Não foi possível obter definição da tabela {table_name}")
-                                continue
-                                
-                        except Exception as e:
-                            logger.warning(f"Erro ao obter definição da tabela {table_name}: {e}")
-                            continue
-                        
-                        # Escrever dados da tabela
-                        rows = await conn.fetch(f"SELECT * FROM {table_name}")
-                        if rows:
-                            columns = list(rows[0].keys())
-                            f.write(f"INSERT INTO {table_name} ({','.join(columns)}) VALUES\n")
-                            
-                            for i, row in enumerate(rows):
-                                values = []
-                                for value in row.values():
-                                    if value is None:
-                                        values.append("NULL")
-                                    elif isinstance(value, (int, float)):
-                                        values.append(str(value))
-                                    elif isinstance(value, datetime):
-                                        values.append(f"'{value.isoformat()}'")
-                                    elif isinstance(value, str):
-                                        values.append("'" + value.replace("'", "''") + "'")
-                                    else:
-                                        values.append("'" + str(value).replace("'", "''") + "'")
-                                
-                                f.write(f"({','.join(values)})")
-                                if i < len(rows) - 1:
-                                    f.write(",\n")
-                                else:
-                                    f.write(";\n\n")
-            
-            # Criar arquivo ZIP antes de remover o SQL
-            with zipfile.ZipFile(zip_file, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                zipf.write(backup_file, os.path.basename(backup_file))
-            
-            # Verificar se o ZIP foi criado antes de remover o SQL
-            if os.path.exists(zip_file):
-                try:
-                    os.remove(backup_file)
-                except Exception as e:
-                    logger.warning(f"Erro ao remover arquivo SQL temporário: {e}")
-            
-            # Limpar backups antigos
-            self._cleanup_old_backups(keep=5)
-            
-            logger.info(f"Backup criado com sucesso: {zip_file}")
-            return True
-        except Exception as e:
-            logger.error(f"Erro no método manual de backup: {e}")
-            # Remover arquivos temporários em caso de erro
-            if 'backup_file' in locals() and os.path.exists(backup_file):
-                try:
-                    os.remove(backup_file)
-                except:
-                    pass
-            if 'zip_file' in locals() and os.path.exists(zip_file):
-                try:
-                    os.remove(zip_file)
-                except:
-                    pass
-            return False
-
-    def _cleanup_old_backups(self, keep=5):
-        """Remove backups antigos, mantendo apenas os 'keep' mais recentes"""
-        try:
-            backups = sorted(glob.glob(os.path.join(self.backup_dir, '*.zip')))
-            for old_backup in backups[:-keep]:
-                try:
-                    os.remove(old_backup)
-                    logger.info(f"Backup antigo removido: {old_backup}")
-                except Exception as e:
-                    logger.warning(f"Erro ao remover backup antigo {old_backup}: {e}")
-        except Exception as e:
-            logger.warning(f"Erro ao limpar backups antigos: {e}")
-            
-class Database:
+class SmartPriorityQueue:
     def __init__(self):
-        self.pool = None
-        self.semaphore = asyncio.Semaphore(25)
-        self._is_initialized = False
-        self.heartbeat_task = None
-        self._config_cache = {}
-        self._last_config_update = None
-        self._active_tasks = set()
+        self.queues = {
+            'critical': asyncio.Queue(maxsize=20),   # Alertas e notificações urgentes
+            'high': asyncio.Queue(maxsize=100),      # Comandos de administração
+            'normal': asyncio.Queue(maxsize=500),    # Mensagens regulares
+            'low': asyncio.Queue(maxsize=1000)       # Logs e estatísticas
+        }
+        self.bucket_limits = {
+            'critical': 5,   # Máximo de 5 mensagens por segundo
+            'high': 2,       # Máximo de 2 mensagens por segundo
+            'normal': 1,     # Máximo de 1 mensagem por segundo
+            'low': 0.5       # Máximo de 1 mensagem a cada 2 segundos
+        }
+        self.last_sent = {priority: 0 for priority in self.queues}
+    
+    async def get_next_message(self):
+        # Verificar rate limits por prioridade
+        now = time.time()
+        for priority in ['critical', 'high', 'normal', 'low']:
+            if not self.queues[priority].empty():
+                if now - self.last_sent[priority] >= 1/self.bucket_limits[priority]:
+                    self.last_sent[priority] = now
+                    return await self.queues[priority].get(), priority
+        return None, None
+    
+    async def put(self, item, priority='normal'):
+        await self.queues[priority].put(item)
+    
+    def task_done(self, priority):
+        self.queues[priority].task_done()
+    
+    def qsize(self):
+        return {priority: q.qsize() for priority, q in self.queues.items()}
 
-    async def initialize(self):
-        if self._is_initialized:
-            return
-                
-        max_retries = 5
-        initial_delay = 2
-        for attempt in range(max_retries):
-            try:
-                db_url = os.getenv('DATABASE_URL')
-                
-                if not db_url:
-                    raise ValueError("Variável de ambiente DATABASE_URL não definida")
-                    
-                logger.info("Tentando conectar ao banco de dados usando DATABASE_URL")
-                
-                # Configuração específica para Supabase
-                self.pool = await create_pool(
-                    dsn=db_url,
-                    min_size=10,  # Aumentado de 5
-                    max_size=100, # Aumentado de 50
-                    command_timeout=60,
-                    max_inactive_connection_lifetime=300,
-                    ssl='require',
-                    server_settings={
-                        'application_name': 'inactivity_bot',
-                        'statement_timeout': '30000'
-                    }
-                )
-
-                
-                async with self.pool.acquire() as conn:
-                    await asyncio.wait_for(conn.execute("SELECT 1"), timeout=10)
-                
-                await self.create_tables()
-                self._is_initialized = True
-                logger.info("Banco de dados inicializado com sucesso")
-                    
-                self.heartbeat_task = asyncio.create_task(self._db_heartbeat(interval=300))
-                self.heartbeat_task._name = 'database_heartbeat'
-                self._active_tasks.add(self.heartbeat_task)
-                logger.info("Task de heartbeat do banco de dados iniciada")
-                
-                return  # Retorna None em caso de sucesso
-                
-            except OSError as e:
-                if e.errno == 101: # Network is unreachable
-                    logger.error(
-                        f"Tentativa {attempt + 1} de conexão falhou: Rede inacessível (Network Unreachable). "
-                        f"Isso geralmente é um problema de firewall. Verifique se o IP da sua aplicação na Render "
-                        f"está na lista de permissões (Network Restrictions) do seu banco de dados Neon."
-                    )
-                else:
-                    logger.error(f"Tentativa {attempt + 1} de conexão ao banco de dados falhou com erro de OS: {e}")
-
-            except Exception as e:
-                logger.error(f"Tentativa {attempt + 1} de conexão ao banco de dados falhou: {e}")
-            
-            if attempt == max_retries - 1:
-                logger.critical("Falha ao conectar ao banco de dados após várias tentativas.")
-                self.pool = None
-                raise  # Lança a exceção para ser tratada pelo chamador
-            
-            sleep_time = initial_delay * (2 ** attempt)
-            logger.info(f"Tentando novamente em {sleep_time} segundos...")
-            await asyncio.sleep(sleep_time)
-
-    async def restart_pool(self):
-        """Reinicia o pool de conexões quando necessário"""
-        if self.pool:
-            await self.pool.close()
+class InactivityBot(commands.Bot):
+    def __init__(self, *args, **kwargs):
+        # Configuração do cache de membros
+        member_cache_flags = discord.MemberCacheFlags.all()
         
-        db_url = os.getenv('DATABASE_URL')
-        self.pool = await create_pool(
-            dsn=db_url,
-            min_size=10,
-            max_size=100,
-            command_timeout=60,
-            max_inactive_connection_lifetime=300,
-            ssl='require',
-            server_settings={
-                'application_name': 'inactivity_bot',
-                'statement_timeout': '30000'
+        kwargs.update({
+            'max_messages': 100,
+            'chunk_guilds_at_startup': True,
+            'member_cache_flags': member_cache_flags,
+            'enable_debug_events': False,
+            'heartbeat_timeout': 120.0,
+            'guild_ready_timeout': 30.0,
+            'connect_timeout': 60.0,
+            'reconnect': True,
+            'shard_count': 1,
+            'shard_ids': None,
+            'activity': None,
+            'status': discord.Status.online,
+        })
+        super().__init__(*args, **kwargs)
+        
+        # Configurações iniciais
+        self.config = DEFAULT_CONFIG  # Inicializa com configuração padrão
+        self.timezone = pytz.timezone('America/Sao_Paulo')
+        
+        # Adicione esta linha para inicializar o atributo _ready
+        self._ready = asyncio.Event()
+        
+        # Configurações do bot
+        self.db = None
+        self.db_connection_failed = False
+        self.active_sessions = {}
+        self.voice_event_queue = asyncio.Queue(maxsize=500)
+        self.message_queue = SmartPriorityQueue()
+        self.voice_event_processor_task = None
+        self.queue_processor_task = None
+        self.command_processor_task = None
+        self.rate_limited = False
+        self.last_rate_limit = None
+        self.rate_limit_delay = 2.0
+        self.max_rate_limit_delay = 30.0
+        self.rate_limit_retry_after = 1.0
+        self.last_rate_limit_time = None
+        self.rate_limit_count = 0
+        self.max_rate_limit_retries = 3
+        self.db_backup = None
+        self.pool_monitor_task = None
+        self._setup_complete = False
+        self._last_db_check = None
+        self._health_check_interval = 300
+        self._last_config_save = None
+        self._config_save_interval = 1800
+        self._batch_processing_size = 5
+        self._api_request_delay = 2.0
+        self.audio_check_task = None
+        self.health_check_task = None
+        self._tasks_started = False
+        self._is_initialized = False  # Nova flag para controle de inicialização
+        
+        # Monitor de rate limits
+        self.rate_limit_monitor = RateLimitMonitor()
+        self.last_rate_limit_report = 0
+        self.rate_limit_report_interval = 300
+        
+        # Rate limit improvements
+        self.rate_limit_buckets = {
+            'global': {
+                'limit': 50,
+                'remaining': 50,
+                'reset_at': 0,
+                'last_update': 0
+            },
+            'messages': {
+                'limit': 10,
+                'remaining': 10,
+                'reset_at': 0,
+                'last_update': 0
             }
-        )
+        }
+        self.message_cache = {
+            'embeds': defaultdict(dict),
+            'responses': defaultdict(dict)
+        }
+        self.cache_ttl = 300
+        
+        # Novos atributos para tratamento de conexão
+        self._connection_attempts = 0
+        self._max_connection_attempts = 5
+        self._connection_delay = 10  # segundos
 
-    async def _db_heartbeat(self, interval: int = 300):
-        """Envia um ping periódico para manter conexões ativas"""
-        while True:
+    async def start(self, token: str, *, reconnect: bool = True) -> None:
+        """Override do método start para lidar com rate limits"""
+        while self._connection_attempts < self._max_connection_attempts:
             try:
-                if self.pool:
-                    async with self.pool.acquire() as conn:
-                        await asyncio.wait_for(conn.execute("SELECT 1"), timeout=10)
-                    logger.debug("Heartbeat do banco de dados executado com sucesso")
-                await asyncio.sleep(interval)
-            except asyncio.CancelledError:
-                logger.info("Heartbeat do banco de dados cancelado.")
+                await super().start(token, reconnect=reconnect)
                 break
+            except discord.HTTPException as e:
+                self._connection_attempts += 1
+                if e.status == 429:  # Rate limited
+                    retry_after = e.retry_after if hasattr(e, 'retry_after') else self._connection_delay
+                    logger.warning(f"Rate limit atingido. Tentando novamente em {retry_after} segundos (tentativa {self._connection_attempts}/{self._max_connection_attempts})")
+                    await asyncio.sleep(retry_after)
+                else:
+                    raise
             except Exception as e:
-                logger.error(f"Erro no heartbeat do banco de dados: {e}")
-                await asyncio.sleep(60)
+                self._connection_attempts += 1
+                if self._connection_attempts >= self._max_connection_attempts:
+                    raise
+                logger.warning(f"Erro de conexão. Tentando novamente em {self._connection_delay} segundos (tentativa {self._connection_attempts}/{self._max_connection_attempts})")
+                await asyncio.sleep(self._connection_delay)
 
-    async def close(self):
-        """Fecha o pool de conexões de forma segura"""
-        if self.heartbeat_task:
-            self.heartbeat_task.cancel()
-            try:
-                await self.heartbeat_task
-            except asyncio.CancelledError:
-                pass
-            logger.info("Task de heartbeat do banco de dados encerrada")
-        
-        if self.pool:
-            await self.pool.close()
-            logger.info("Pool de conexões fechado")
+    async def initialize_db(self):
+        """Inicializa a conexão com o banco de dados usando a classe Database."""
+        if self._is_initialized:
+            return True
 
-    async def check_pool_status(self):
-        """Retorna estatísticas do pool de conexões"""
-        if self.pool:
-            return {
-                'size': self.pool.get_size(),
-                'freesize': self.pool.get_idle_size(),
-                'used': self.pool.get_size() - self.pool.get_idle_size(),
-                'maxsize': self.pool.get_max_size()
-            }
-        return None
-
-    async def create_tables(self):
-        """Cria tabelas necessárias com índices otimizados e TIMESTAMPTZ"""
-        async with self.semaphore:
-            conn = None
-            try:
-                conn = await self.pool.acquire()
-                
-                # Tabela de atividade do usuário
-                await conn.execute('''
-                CREATE TABLE IF NOT EXISTS user_activity (
-                    user_id BIGINT,
-                    guild_id BIGINT,
-                    last_voice_join TIMESTAMPTZ,
-                    last_voice_leave TIMESTAMPTZ,
-                    voice_sessions INT DEFAULT 0,
-                    total_voice_time INT DEFAULT 0,
-                    PRIMARY KEY (user_id, guild_id)
-                )''')
-                
-                await conn.execute('CREATE INDEX IF NOT EXISTS idx_guild_user ON user_activity (guild_id, user_id)')
-                await conn.execute('CREATE INDEX IF NOT EXISTS idx_last_join ON user_activity (last_voice_join)')
-                await conn.execute('CREATE INDEX IF NOT EXISTS idx_last_leave ON user_activity (last_voice_leave)')
-                await conn.execute('CREATE INDEX IF NOT EXISTS idx_activity_composite ON user_activity (guild_id, user_id, last_voice_join, last_voice_leave)')
-                await conn.execute('CREATE INDEX IF NOT EXISTS idx_voice_time_composite ON user_activity (guild_id, user_id, total_voice_time)')
-                
-                # Tabela de sessões de voz
-                await conn.execute('''
-                CREATE TABLE IF NOT EXISTS voice_sessions (
-                    id SERIAL PRIMARY KEY,
-                    user_id BIGINT,
-                    guild_id BIGINT,
-                    join_time TIMESTAMPTZ,
-                    leave_time TIMESTAMPTZ,
-                    duration INT
-                )''')
-                
-                await conn.execute('CREATE INDEX IF NOT EXISTS idx_user_guild ON voice_sessions (user_id, guild_id)')
-                await conn.execute('CREATE INDEX IF NOT EXISTS idx_join_time ON voice_sessions (join_time)')
-                await conn.execute('CREATE INDEX IF NOT EXISTS idx_leave_time ON voice_sessions (leave_time)')
-                await conn.execute('CREATE INDEX IF NOT EXISTS idx_user_guild_time ON voice_sessions (user_id, guild_id, join_time, leave_time)')
-                await conn.execute('CREATE INDEX IF NOT EXISTS idx_duration ON voice_sessions (duration)')
-                await conn.execute('CREATE INDEX IF NOT EXISTS idx_session_composite ON voice_sessions (user_id, guild_id, join_time, leave_time, duration)')
-                await conn.execute('CREATE INDEX IF NOT EXISTS idx_user_guild_duration ON voice_sessions (user_id, guild_id, duration)')
-                
-                # Tabela de avisos
-                await conn.execute('''
-                CREATE TABLE IF NOT EXISTS user_warnings (
-                    user_id BIGINT,
-                    guild_id BIGINT,
-                    warning_type VARCHAR(20),
-                    warning_date TIMESTAMPTZ,
-                    PRIMARY KEY (user_id, guild_id, warning_type)
-                )''')
-                
-                await conn.execute('CREATE INDEX IF NOT EXISTS idx_warning_date ON user_warnings (warning_date)')
-                await conn.execute('CREATE INDEX IF NOT EXISTS idx_user_guild_warning ON user_warnings (user_id, guild_id, warning_type, warning_date)')
-                
-                # Tabela de cargos removidos
-                await conn.execute('''
-                CREATE TABLE IF NOT EXISTS removed_roles (
-                    user_id BIGINT,
-                    guild_id BIGINT,
-                    role_id BIGINT,
-                    removal_date TIMESTAMPTZ,
-                    PRIMARY KEY (user_id, guild_id, role_id)
-                )''')
-                
-                await conn.execute('CREATE INDEX IF NOT EXISTS idx_removal_date ON removed_roles (removal_date)')
-                await conn.execute('CREATE INDEX IF NOT EXISTS idx_removal_composite ON removed_roles (user_id, guild_id, role_id, removal_date)')
-                
-                # Tabela de membros expulsos
-                await conn.execute('''
-                CREATE TABLE IF NOT EXISTS kicked_members (
-                    id SERIAL PRIMARY KEY,
-                    user_id BIGINT,
-                    guild_id BIGINT,
-                    kick_date TIMESTAMPTZ,
-                    reason TEXT
-                )''')
-                
-                await conn.execute('CREATE INDEX IF NOT EXISTS idx_user_guild ON kicked_members (user_id, guild_id)')
-                await conn.execute('CREATE INDEX IF NOT EXISTS idx_kick_date ON kicked_members (kick_date)')
-                
-                # Tabela de períodos verificados
-                await conn.execute('''
-                CREATE TABLE IF NOT EXISTS checked_periods (
-                    user_id BIGINT,
-                    guild_id BIGINT,
-                    period_start TIMESTAMPTZ,
-                    period_end TIMESTAMPTZ,
-                    meets_requirements BOOLEAN,
-                    PRIMARY KEY (user_id, guild_id, period_start)
-                )''')
-                
-                await conn.execute('CREATE INDEX IF NOT EXISTS idx_period_end ON checked_periods (period_end)')
-                await conn.execute('CREATE INDEX IF NOT EXISTS idx_requirements ON checked_periods (meets_requirements)')
-                await conn.execute('CREATE INDEX IF NOT EXISTS idx_user_guild_period ON checked_periods (user_id, guild_id, period_start, period_end)')
-                
-                # Tabela de configuração do bot
-                await conn.execute('''
-                CREATE TABLE IF NOT EXISTS bot_config (
-                    guild_id BIGINT PRIMARY KEY,
-                    config_json TEXT,
-                    last_updated TIMESTAMPTZ
-                )''')
-                
-                await conn.execute('CREATE INDEX IF NOT EXISTS idx_last_updated ON bot_config (last_updated)')
-                
-                # Tabela de logs de rate limit
-                await conn.execute('''
-                CREATE TABLE IF NOT EXISTS rate_limit_logs (
-                    id SERIAL PRIMARY KEY,
-                    guild_id BIGINT,
-                    bucket VARCHAR(100),
-                    limit_count INT,
-                    remaining INT,
-                    reset_at TIMESTAMPTZ,
-                    scope VARCHAR(50),
-                    endpoint VARCHAR(255),
-                    retry_after FLOAT,
-                    log_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-                )''')
-                
-                await conn.execute('CREATE INDEX IF NOT EXISTS idx_guild ON rate_limit_logs (guild_id)')
-                await conn.execute('CREATE INDEX IF NOT EXISTS idx_bucket ON rate_limit_logs (bucket)')
-                await conn.execute('CREATE INDEX IF NOT EXISTS idx_reset ON rate_limit_logs (reset_at)')
-                await conn.execute('CREATE INDEX IF NOT EXISTS idx_endpoint ON rate_limit_logs (endpoint)')
-                await conn.execute('CREATE INDEX IF NOT EXISTS idx_date ON rate_limit_logs (log_date)')
-                
-                # Tabela de execuções de tasks
-                await conn.execute('''
-                CREATE TABLE IF NOT EXISTS task_executions (
-                    task_name VARCHAR(50) PRIMARY KEY,
-                    last_execution TIMESTAMPTZ,
-                    monitoring_period INT
-                )''')
-                
-                await conn.execute('CREATE INDEX IF NOT EXISTS idx_last_execution ON task_executions (last_execution)')
-                
-                # Tabela de eventos de voz pendentes
-                await conn.execute('''
-                CREATE TABLE IF NOT EXISTS pending_voice_events (
-                    id SERIAL PRIMARY KEY,
-                    event_type VARCHAR(20),
-                    user_id BIGINT,
-                    guild_id BIGINT,
-                    before_channel_id BIGINT,
-                    after_channel_id BIGINT,
-                    before_self_deaf BOOLEAN,
-                    before_deaf BOOLEAN,
-                    after_self_deaf BOOLEAN,
-                    after_deaf BOOLEAN,
-                    event_time TIMESTAMPTZ,
-                    processed BOOLEAN DEFAULT FALSE
-                )''')
-                
-                await conn.execute('CREATE INDEX IF NOT EXISTS idx_pending_events ON pending_voice_events (user_id, guild_id, processed)')
-                
-                # Nova tabela para registro de atribuição de cargos
-                await conn.execute('''
-                CREATE TABLE IF NOT EXISTS role_assignments (
-                    user_id BIGINT,
-                    guild_id BIGINT,
-                    role_id BIGINT,
-                    assigned_at TIMESTAMPTZ,
-                    PRIMARY KEY (user_id, guild_id, role_id)
-                )''')
-                
-                await conn.execute('CREATE INDEX IF NOT EXISTS idx_role_assignment ON role_assignments (user_id, guild_id, role_id, assigned_at)')
-                
-                logger.info("Tabelas criadas/verificadas com sucesso")
-            except Exception as e:
-                logger.error(f"Erro ao criar tabelas: {e}")
-                raise
-            finally:
-                if conn:
-                    await self.pool.release(conn)
-
-    async def execute_query(self, query: str, params: tuple = None, timeout: int = 30):
-        """Executa uma query com tratamento de timeout và retry melhorado"""
-        if not self.pool:
-            raise RuntimeError("Pool de conexões não está disponível")
-            
-        max_retries = 3
-        conn = None
-        
-        for attempt in range(max_retries):
-            try:
-                conn = await asyncio.wait_for(self.pool.acquire(), timeout=timeout)
-                result = await asyncio.wait_for(conn.execute(query, *(params or ())), timeout=timeout)
-                return conn, result
-                
-            except (asyncpg.PostgresError, asyncpg.InterfaceError) as e:
-                logger.error(f"Erro de conexão (tentativa {attempt + 1}/{max_retries}): {e}")
-                if conn:
-                    try:
-                        await self.pool.release(conn)
-                    except:
-                        pass
-                    conn = None
-                    
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(3 * (attempt + 1))
-                    continue
-                    
-                raise ConnectionError(f"Falha após {max_retries} tentativas: {e}")
-                
-            except asyncio.TimeoutError:
-                logger.error(f"Timeout ao executar query (tentativa {attempt + 1})")
-                if conn:
-                    try:
-                        await self.pool.release(conn)
-                    except:
-                        pass
-                    conn = None
-                    
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(3 * (attempt + 1))
-                    continue
-                    
-                raise TimeoutError("Timeout ao executar query no banco de dados")
-                
-            except Exception as e:
-                logger.error(f"Erro inesperado ao executar query: {e}")
-                if conn:
-                    try:
-                        await self.pool.release(conn)
-                    except:
-                        pass
-                raise
-
-    async def save_pending_voice_event(self, event_type: str, user_id: int, guild_id: int,
-                                     before_channel_id: Optional[int], after_channel_id: Optional[int],
-                                     before_self_deaf: Optional[bool], before_deaf: Optional[bool],
-                                     after_self_deaf: Optional[bool], after_deaf: Optional[bool]):
-        """Salva um evento de voz pendente no banco de dados"""
-        conn = None
         try:
-            conn = await self.pool.acquire()
-            event_time = datetime.now(pytz.utc)  # Garantir UTC timezone
-            await conn.execute('''
-                INSERT INTO pending_voice_events 
-                (event_type, user_id, guild_id, before_channel_id, after_channel_id,
-                 before_self_deaf, before_deaf, after_self_deaf, after_deaf, event_time)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-            ''', 
-            event_type,
-            user_id,
-            guild_id,
-            before_channel_id,
-            after_channel_id,
-            before_self_deaf,
-            before_deaf,
-            after_self_deaf,
-            after_deaf,
-            event_time)
-        except Exception as e:
-            logger.error(f"Erro ao salvar evento pendente: {e}")
-            raise
-        finally:
-            if conn:
-                await self.pool.release(conn)
-
-    async def get_pending_voice_events(self, limit: int = 100) -> List[Dict]:
-        """Obtém eventos de voz pendentes para processamento"""
-        conn = None
-        try:
-            conn = await self.pool.acquire()
-            results = await conn.fetch('''
-                SELECT * FROM pending_voice_events
-                WHERE processed = FALSE
-                ORDER BY event_time ASC
-                LIMIT $1
-            ''', limit)
-            
-            # Converter os resultados para dicionários
-            events = []
-            for row in results:
-                event = dict(row)
-                # Converter valores para os tipos corretos
-                event['before_channel_id'] = event.get('before_channel_id')
-                event['after_channel_id'] = event.get('after_channel_id')
-                event['before_self_deaf'] = bool(event.get('before_self_deaf', False))
-                event['before_deaf'] = bool(event.get('before_deaf', False))
-                event['after_self_deaf'] = bool(event.get('after_self_deaf', False))
-                event['after_deaf'] = bool(event.get('after_deaf', False))
-                events.append(event)
+            self.db = Database()
+            await self.db.initialize()
                 
-            return events
+            logger.info("Conexão com o banco de dados (via asyncpg) estabelecida com sucesso.")
+            
+            # Inicializar o backup após o banco estar pronto
+            from database import DatabaseBackup
+            self.db_backup = DatabaseBackup(self.db)
+            logger.info("Backup do banco de dados inicializado")
+            
+            # Verificar se a conexão está realmente funcionando
+            try:
+                async with self.db.pool.acquire() as conn:
+                    await asyncio.wait_for(conn.execute("SELECT 1"), timeout=10)
+            except Exception as e:
+                logger.error(f"Falha ao verificar conexão com o banco: {e}")
+                self.db_connection_failed = True
+                return False
+                
+            self._is_initialized = True
+            
+            # Carregar configuração após inicializar o banco
+            await self.load_config()
+            
+            return True
+            
         except Exception as e:
-            logger.error(f"Erro ao obter eventos pendentes: {e}")
-            return []
-        finally:
-            if conn:
-                await self.pool.release(conn)
+            logger.critical(f"Falha crítica ao inicializar o banco de dados: {e}", exc_info=True)
+            self.db_connection_failed = True
+            # Criar instância vazia para evitar erros de NoneType
+            self.db = Database()
+            self.db.pool = None
+            return False
 
-    async def mark_events_as_processed(self, event_ids: List[int]):
-        """Marca eventos como processados"""
-        if not event_ids:
+    async def load_config(self, guild_id: int = None):
+        """Carrega configuração de forma assíncrona com tratamento melhorado"""
+        try:
+            # Primeiro tentar carregar do arquivo local
+            if os.path.exists(CONFIG_FILE):
+                try:
+                    with open(CONFIG_FILE, 'r') as f:
+                        file_config = json.load(f)
+                        self._update_config(file_config)
+                        logger.info("Configuração carregada do arquivo local")
+                        logger.debug(f"Configuração carregada: {self.config}")
+                except json.JSONDecodeError:
+                    logger.error("Arquivo de configuração corrompido, usando padrão")
+                    self._update_config(DEFAULT_CONFIG)
+                except Exception as e:
+                    logger.error(f"Erro ao carregar configuração do arquivo: {e}")
+                    self._update_config(DEFAULT_CONFIG)
+                
+            # Depois tentar carregar do banco de dados se estiver disponível
+            if hasattr(self, 'db') and self.db and hasattr(self.db, 'load_config'):
+                try:
+                    # Se guild_id foi especificado, carregar apenas essa
+                    if guild_id is not None:
+                        try:
+                            db_config = await self.db.load_config(guild_id)
+                            if db_config:
+                                self._update_config(db_config)
+                                logger.info(f"Configuração carregada do banco para guild {guild_id}")
+                                return True
+                        except Exception as e:
+                            logger.warning(f"Erro ao carregar configuração para guild {guild_id}: {e}")
+                    
+                    # Se não, carregar para todas as guilds
+                    for guild in self.guilds:
+                        try:
+                            db_config = await self.db.load_config(guild.id)
+                            if db_config:
+                                self._update_config(db_config)
+                                logger.info(f"Configuração carregada do banco para guild {guild.id}")
+                                return True
+                        except Exception as e:
+                            logger.warning(f"Erro ao carregar configuração para guild {guild.id}: {e}")
+                            continue
+                except Exception as db_error:
+                    logger.error(f"Erro ao carregar do banco: {db_error}")
+            
+            # Fallback para padrão se nenhuma configuração for encontrada
+            if not hasattr(self, 'config') or not self.config:
+                self._update_config(DEFAULT_CONFIG)
+                with open(CONFIG_FILE, 'w') as f:
+                    json.dump(DEFAULT_CONFIG, f, indent=4)
+                logger.info("Configuração padrão criada")
+                
+            return True
+            
+        except Exception as e:
+            logger.error(f"Erro crítico ao carregar configurações: {e}")
+            self._update_config(DEFAULT_CONFIG)
+            return False
+
+    def _update_config(self, new_config: dict):
+        """Atualiza a configuração garantindo que todas as chaves necessárias existam"""
+        # Garantir que todas as chaves padrão existam
+        for key, value in DEFAULT_CONFIG.items():
+            if key not in new_config:
+                new_config[key] = value
+        
+        # Atualizar timezone
+        self.timezone = pytz.timezone(new_config.get('timezone', 'America/Sao_Paulo'))
+        
+        # Atualizar configuração
+        self.config = new_config
+        logger.info("Configuração atualizada com sucesso")
+
+    async def save_config(self, guild_id: int = None):
+        """Salva configuração com cache (modificado)"""
+        if not hasattr(self, 'config') or not self.config:
             return
             
-        conn = None
         try:
-            conn = await self.pool.acquire()
-            await conn.execute('''
-                UPDATE pending_voice_events
-                SET processed = TRUE
-                WHERE id = ANY($1)
-            ''', event_ids)
-        except Exception as e:
-            logger.error(f"Erro ao marcar eventos como processados: {e}")
-        finally:
-            if conn:
-                await self.pool.release(conn)
-
-    async def save_config(self, guild_id: int, config: dict):
-        """Salva configuração com cache"""
-        conn = None
-        try:
-            # Atualizar cache
-            self._config_cache[guild_id] = config
-            self._last_config_update = datetime.now(pytz.utc)
+            # Salvar no arquivo local
+            with open(CONFIG_FILE, 'w') as f:
+                json.dump(self.config, f, indent=4)
             
-            # Serializar para JSON
-            config_json = json.dumps(config)
+            # Salvar no banco de dados para cada guild relevante
+            if hasattr(self, 'db') and self.db and self.db._is_initialized:
+                # Se guild_id não foi especificado, salvar para todas as guilds do bot
+                guilds_to_save = [guild_id] if guild_id is not None else [guild.id for guild in self.guilds]
+                
+                for gid in guilds_to_save:
+                    await self.db.save_config(gid, self.config)
+                    logger.info(f"Configuração salva no banco para guild {gid}")
+                
+                # Verificar se o método sync_task_periods existe antes de chamá-lo
+                if hasattr(self.db, 'sync_task_periods'):
+                    monitoring_period = self.config.get('monitoring_period')
+                    if monitoring_period:
+                        await self.db.sync_task_periods(monitoring_period)
             
-            conn = await self.pool.acquire()
-            await conn.execute('''
-                INSERT INTO bot_config (guild_id, config_json, last_updated)
-                VALUES ($1, $2, NOW())
-                ON CONFLICT (guild_id) DO UPDATE
-                SET config_json = EXCLUDED.config_json,
-                    last_updated = EXCLUDED.last_updated
-            ''', guild_id, config_json)
-            
-            logger.info(f"Configuração salva no banco de dados para a guild {guild_id}")
-            return True
+            self._last_config_save = datetime.now(pytz.UTC)
         except Exception as e:
             logger.error(f"Erro ao salvar configuração: {e}")
-            # Remover do cache em caso de erro
-            if guild_id in self._config_cache:
-                del self._config_cache[guild_id]
-            return False
-        finally:
-            if conn:
-                await self.pool.release(conn)
 
-    async def load_config(self, guild_id: int) -> Optional[dict]:
-        """Carrega configuração com cache"""
-        # Se o banco não estiver disponível, retorne a configuração padrão
-        if not self.pool:
-            logger.warning("Pool de conexões não disponível - retornando configuração padrão")
-            return DEFAULT_CONFIG.get(guild_id, None)
+    async def setup_hook(self):
+        """Configurações assíncronas antes do bot ficar pronto"""
+        if self._setup_complete:
+            return
         
-        # Forçar atualização do cache a cada hora
-        if self._last_config_update and (datetime.now(pytz.utc) - self._last_config_update).total_seconds() > 3600:
-            if guild_id in self._config_cache:
-                del self._config_cache[guild_id]
+        # Carregar configurações de forma assíncrona
+        await self.load_config()
         
-        # Verificar cache primeiro
-        if guild_id in self._config_cache:
-            logger.debug(f"Retornando configuração do cache para guild {guild_id}")
-            return self._config_cache[guild_id]
+        # Inicializar banco de dados
+        await self.initialize_db()
         
-        conn = None
+        # Prossiga apenas se a conexão com o DB for bem-sucedida
+        if self.db and not self.db_connection_failed:
+            try:
+                synced = await self.tree.sync()
+                logger.info(f"Comandos slash sincronizados: {len(synced)} comandos.")
+            except Exception as e:
+                logger.error(f"Erro ao sincronizar comandos slash: {e}")
+
+            self._setup_complete = True
+            logger.info("Setup hook concluído.")
+        else:
+            logger.critical("Falha na inicialização do banco de dados. As tarefas não serão iniciadas.")
+            self.db_connection_failed = True
+
+    async def send_with_fallback(self, destination, content=None, embed=None, file=None):
+        """Envia mensagens com tratamento de erros e fallback para rate limits."""
         try:
-            conn = await self.pool.acquire()
-            result = await conn.fetchrow('''
-                SELECT config_json FROM bot_config
-                WHERE guild_id = $1
-            ''', guild_id)
+            if file:
+                # Se for um objeto BytesIO, criar um File discord.File
+                if isinstance(file, BytesIO):
+                    file.seek(0)  # Voltar ao início do buffer
+                    file = discord.File(file, filename='activity_report.png')
+                await destination.send(content=content, embed=embed, file=file)
+            elif embed:
+                await destination.send(embed=embed)
+            elif content:
+                await destination.send(content)
+        except discord.HTTPException as e:
+            if e.code == 429:  # Rate limited
+                retry_after = e.retry_after
+                logger.warning(f"Rate limit atingido. Tentando novamente em {retry_after} segundos")
+                await asyncio.sleep(retry_after)
+                await self.send_with_fallback(destination, content, embed, file)
+            else:
+                logger.error(f"Erro ao enviar mensagem para {destination}: {e}")
+                raise
+
+    async def on_error(self, event, *args, **kwargs):
+        """Tratamento de erros genéricos."""
+        exc_type, exc_value, exc_traceback = sys.exc_info()
+        tb_details = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+        
+        logger.error(f"Exceção não tratada no evento '{event}'", exc_info=(exc_type, exc_value, exc_traceback))
+        
+        log_message = (
+            f"**Exceção Não Tratada no Evento: `{event}`**\n"
+            f"**Args:** `{args}`\n"
+            f"**Kwargs:** `{kwargs}`\n"
+            f"```python\n{tb_details[:1800]}\n```"
+        )
+        await self.log_action("Erro Crítico de Evento", details=log_message)
+
+    async def check_audio_states(self):
+        await self.wait_until_ready()
+        while True:
+            try:
+                for guild in self.guilds:
+                    for voice_channel in guild.voice_channels:
+                        for member in voice_channel.members:
+                            if member.bot:
+                                continue
+                                
+                            audio_key = (member.id, guild.id)
+                            current_audio_state = member.voice.self_deaf or member.voice.deaf
+                            
+                            # Se não há sessão ativa, criar uma
+                            if audio_key not in self.active_sessions:
+                                self.active_sessions[audio_key] = {
+                                    'start_time': datetime.now(pytz.UTC),
+                                    'last_audio_time': datetime.now(pytz.UTC),
+                                    'audio_disabled': current_audio_state,
+                                    'total_audio_off_time': 0,
+                                    'estimated': False
+                                }
+                                continue
+                                
+                            # Verificar mudanças no estado de áudio
+                            if current_audio_state and not self.active_sessions[audio_key]['audio_disabled']:
+                                # Áudio foi desligado
+                                self.active_sessions[audio_key]['audio_disabled'] = True
+                                self.active_sessions[audio_key]['audio_off_time'] = datetime.now(pytz.UTC)
+                                
+                            elif not current_audio_state and self.active_sessions[audio_key]['audio_disabled']:
+                                # Áudio foi ligado
+                                self.active_sessions[audio_key]['audio_disabled'] = False
+                                if 'audio_off_time' in self.active_sessions[audio_key]:
+                                    audio_off_duration = (datetime.now(pytz.UTC) - self.active_sessions[audio_key]['audio_off_time']).total_seconds()
+                                    self.active_sessions[audio_key]['total_audio_off_time'] += audio_off_duration
+                                    del self.active_sessions[audio_key]['audio_off_time']
             
-            if result:
-                config = json.loads(result['config_json'])
-                # Atualizar cache
-                self._config_cache[guild_id] = config
-                self._last_config_update = datetime.now(pytz.utc)
+                await asyncio.sleep(30)
+            except Exception as e:
+                logger.error(f"Erro ao verificar estados de áudio: {e}")
+                await asyncio.sleep(60)
+
+    async def monitor_db_pool(self):
+        await self.wait_until_ready()
+        while True:
+            try:
+                if hasattr(self, 'db') and self.db:
+                    try:
+                        pool_status = await self.db.check_pool_status()
+                        if pool_status:
+                            logger.debug(f"Status do pool de conexões: {pool_status}")
+                            
+                            # Se o pool estiver sobrecarregado, aumentar o tamanho
+                            if pool_status['freesize'] == 0 and pool_status['used'] >= pool_status['maxsize'] - 2:
+                                logger.warning("Pool de conexões sobrecarregado - aumentando tamanho")
+                                await self.db.pool.set_max_size(min(100, pool_status['maxsize'] + 10))
+                                
+                    except Exception as e:
+                        logger.error(f"Health check falhou para o banco de dados: {e}")
+                        await self.log_action(
+                            "Erro de Saúde",
+                            None,
+                            f"Falha na conexão com o banco de dados: {str(e)}"
+                        )
                 
-                logger.info(f"Configuração carregada do banco de dados para a guild {guild_id}")
-                return config
-            return None
-        except Exception as e:
-            logger.error(f"Erro ao carregar configuração: {e}")
-            return None
-        finally:
-            if conn:
-                await self.pool.release(conn)
+                await asyncio.sleep(300)
+            except Exception as e:
+                log_with_context(f"Erro no monitoramento do pool: {e}", logging.ERROR)
+                await asyncio.sleep(60)
 
-    async def load_configs(self, guild_ids: List[int]) -> Dict[int, dict]:
-        """Carrega configurações para múltiplas guilds de uma vez"""
-        if not guild_ids:
-            return {}
+    async def periodic_health_check(self):
+        await self.wait_until_ready()
+        while True:
+            try:
+                queue_status = self.message_queue.qsize()
+                queue_status['voice_events'] = self.voice_event_queue.qsize()
+                
+                logger.info(f"Status das filas: {queue_status}")
+                
+                if queue_status['voice_events'] > 300:
+                    logger.warning(f"Fila de eventos de voz grande: {queue_status['voice_events']}")
+                if queue_status['normal'] > 100:
+                    logger.warning(f"Fila de comandos grande: {queue_status['normal']}")
+                
+                if hasattr(self, 'db') and self.db:
+                    try:
+                        pool_status = await self.db.check_pool_status()
+                        if pool_status:
+                            logger.debug(f"Status do pool de conexões: {pool_status}")
+                    except Exception as e:
+                        logger.error(f"Health check falhou para o banco de dados: {e}")
+                        await self.log_action(
+                            "Erro de Saúde",
+                            None,
+                            f"Falha na conexão com o banco de dados: {str(e)}"
+                        )
+                
+                if (self._last_config_save is None or 
+                    (datetime.now(pytz.UTC) - self._last_config_save).total_seconds() > self._config_save_interval):
+                    await self.save_config()
+                
+                await asyncio.sleep(self._health_check_interval)
+            except Exception as e:
+                logger.error(f"Erro no health check: {e}")
+                await asyncio.sleep(60)
 
-        conn = None
-        try:
-            conn = await self.pool.acquire()
-            results = await conn.fetch('''
-                SELECT guild_id, config_json FROM bot_config
-                WHERE guild_id = ANY($1)
-            ''', guild_ids)
-            
-            configs = {}
-            for row in results:
+    async def process_queues(self):
+        await self.wait_until_ready()
+        while True:
+            try:
+                if not self.voice_event_queue.empty():
+                    batch = []
+                    for _ in range(min(self._batch_processing_size, self.voice_event_queue.qsize())):
+                        batch.append(await self.voice_event_queue.get())
+                    
+                    await self._process_voice_batch(batch)
+                    
+                    for _ in batch:
+                        self.voice_event_queue.task_done()
+                
+                item, priority = await self.message_queue.get_next_message()
+                if item is None:
+                    await asyncio.sleep(0.1)
+                    continue
+                    
                 try:
-                    configs[row['guild_id']] = json.loads(row['config_json'])
-                    # Atualizar cache
-                    self._config_cache[row['guild_id']] = configs[row['guild_id']]
-                except json.JSONDecodeError as e:
-                    logger.error(f"Erro ao decodificar JSON para guild {row['guild_id']}: {e}")
-            
-            self._last_config_update = datetime.now(pytz.utc)
-            return configs
-        except Exception as e:
-            logger.error(f"Erro ao carregar configurações múltiplas: {e}")
-            return {}
-        finally:
-            if conn:
-                await self.pool.release(conn)
+                    if isinstance(item, tuple):
+                        if len(item) == 4:
+                            destination, content, embed, file = item
+                            if isinstance(destination, (discord.TextChannel, discord.User, discord.Member)):
+                                await self.send_with_fallback(destination, content, embed, file)
+                            else:
+                                logger.warning(f"Destino inválido para mensagem: {type(destination)}")
+                        elif len(item) == 2:
+                            destination, embed = item
+                            if isinstance(destination, (discord.TextChannel, discord.User, discord.Member)):
+                                await self.send_with_fallback(destination, embed=embed)
+                            else:
+                                logger.warning(f"Destino inválido para mensagem: {type(destination)}")
+                        else:
+                            logger.warning(f"Item da fila em formato desconhecido: {item}")
+                    elif isinstance(item, (discord.TextChannel, discord.User, discord.Member)):
+                        logger.warning(f"Item da fila é um destino direto, mas não há conteúdo: {item}")
+                    else:
+                        logger.warning(f"Item da fila não é um destino válido: {type(item)}")
+                except Exception as e:
+                    logger.error(f"Erro ao processar item da fila: {e}")
+                    
+                self.message_queue.task_done(priority)
+                    
+            except Exception as e:
+                logger.error(f"Erro no processador de filas: {e}")
+                await asyncio.sleep(1)
 
-    async def log_voice_join(self, user_id: int, guild_id: int):
-        """Registra entrada em canal de voz"""
-        now = datetime.now(pytz.utc)
-        conn = None
+    async def _process_voice_batch(self, batch):
+        processed = {}
+        
+        for event in batch:
+            try:
+                event_type, member, before, after = event
+                key = (member.id, member.guild.id)
+                
+                if key not in processed:
+                    processed[key] = {
+                        'member': member,
+                        'events': []
+                    }
+                processed[key]['events'].append((before, after))
+            except Exception as e:
+                logger.error(f"Erro ao processar evento de voz: {e}")
+                continue
+        
+        for user_data in processed.values():
+            try:
+                await self._process_user_voice_events(user_data['member'], user_data['events'])
+            except Exception as e:
+                logger.error(f"Erro ao processar eventos para {user_data['member']}: {e}")
+
+    async def _process_user_voice_events(self, member, events):
+        if not hasattr(self, 'config') or 'absence_channel' not in self.config:
+            logger.error("Configuração do canal de ausência não encontrada")
+            return
+
+        absence_channel_id = self.config['absence_channel']
+        audio_key = (member.id, member.guild.id)
+        
+        for before, after in events:
+            try:
+                # Ignorar bots
+                if member.bot:
+                    continue
+
+                if member.id in self.config.get('whitelist', {}).get('users', []) or \
+                   any(role.id in self.config.get('whitelist', {}).get('roles', []) for role in member.roles):
+                    continue
+                
+                audio_key = (member.id, member.guild.id)
+                
+                # Se for uma sessão estimada e o usuário realmente saiu, ajustar o tempo
+                if audio_key in self.active_sessions and self.active_sessions[audio_key].get('estimated'):
+                    if before.channel is not None and after.channel is None:
+                        # Ajustar o tempo inicial para refletir melhor a realidade
+                        estimated_start = self.active_sessions[audio_key]['start_time']
+                        actual_start = max(estimated_start, datetime.now(pytz.UTC) - timedelta(hours=1))  # No máximo 1 hora
+                        self.active_sessions[audio_key]['start_time'] = actual_start
+                        self.active_sessions[audio_key]['estimated'] = False  # Não é mais estimada
+                
+                if before.channel is None and after.channel is not None and after.channel.id != absence_channel_id:
+                    await self._handle_voice_join(member, after)
+                
+                elif before.channel is not None and after.channel is None and before.channel.id != absence_channel_id:
+                    await self._handle_voice_leave(member, before)
+                
+                elif before.channel is not None and after.channel is not None and before.channel != after.channel:
+                    await self._handle_voice_move(member, before, after, absence_channel_id)
+                
+                elif before.channel is not None and after.channel is not None and before.channel == after.channel:
+                    if (before.self_deaf != after.self_deaf) or (before.deaf != after.deaf):
+                        await self._handle_audio_change(member, before, after)
+
+            except Exception as e:
+                logger.error(f"Erro ao processar evento de voz para {member}: {e}")
+
+    async def _handle_voice_join(self, member, after):
         try:
-            conn = await self.pool.acquire()
-            await conn.execute('''
-                INSERT INTO user_activity 
-                (user_id, guild_id, last_voice_join, voice_sessions) 
-                VALUES ($1, $2, $3, 1)
-                ON CONFLICT (user_id, guild_id) DO UPDATE 
-                SET last_voice_join = EXCLUDED.last_voice_join,
-                    voice_sessions = user_activity.voice_sessions + 1
-            ''', user_id, guild_id, now)
+            # Registrar entrada no banco de dados
+            await self.db.log_voice_join(member.id, member.guild.id)
+            
+            self.active_sessions[(member.id, member.guild.id)] = {
+                'start_time': datetime.now(pytz.UTC),
+                'last_audio_time': datetime.now(pytz.UTC),
+                'audio_disabled': after.self_deaf or after.deaf,
+                'total_audio_off_time': 0,
+                'estimated': False  # Nova flag para indicar sessões estimadas
+            }
+            
+            embed = discord.Embed(
+                title="🎤 Entrou em Voz",
+                color=discord.Color.green(),
+                timestamp=datetime.now(pytz.UTC))
+            embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
+            embed.add_field(name="Usuário", value=member.mention, inline=True)
+            embed.add_field(name="Canal", value=after.channel.name, inline=True)
+            embed.add_field(name="Estado do Áudio", 
+                          value="🔇 Mudo" if (after.self_deaf or after.deaf) else "🔊 Ativo", 
+                          inline=True)
+            embed.set_footer(text=f"ID: {member.id}")
+            
+            await self.log_action(None, None, embed=embed)
+            
         except Exception as e:
             logger.error(f"Erro ao registrar entrada em voz: {e}")
-            raise
-        finally:
-            if conn:
-                await self.pool.release(conn)
+            await self.log_action(
+                "Erro DB - Entrada em voz",
+                member,
+                str(e)
+            )
 
-    async def log_voice_leave(self, user_id: int, guild_id: int, duration: int):
-        """Registra saída de canal de voz"""
-        now = datetime.now(pytz.utc)
-        conn = None
-        try:
-            conn = await self.pool.acquire()
-            async with conn.transaction():
-                # Atualizar atividade do usuário
-                await conn.execute('''
-                    UPDATE user_activity 
-                    SET last_voice_leave = $1,
-                        total_voice_time = total_voice_time + $2
-                    WHERE user_id = $3 AND guild_id = $4
-                ''', now, duration, user_id, guild_id)
-                
-                # Registrar sessão de voz
-                join_time = now - timedelta(seconds=duration)
-                await conn.execute('''
-                    INSERT INTO voice_sessions
-                    (user_id, guild_id, join_time, leave_time, duration)
-                    VALUES ($1, $2, $3, $4, $5)
-                ''', user_id, guild_id, join_time, now, duration)
-                
-        except Exception as e:
-            logger.error(f"Erro ao registrar saída de voz: {e}")
-            raise
-        finally:
-            if conn:
-                await self.pool.release(conn)
+    async def _handle_voice_leave(self, member, before):
+        session_data = self.active_sessions.get((member.id, member.guild.id))
+        if not session_data:
+            return
 
-    async def get_user_activity(self, user_id: int, guild_id: int) -> Dict:
-        """Obtém dados de atividade do usuário"""
-        conn = None
         try:
-            conn = await self.pool.acquire()
-            result = await conn.fetchrow('''
-                SELECT last_voice_join, last_voice_leave, voice_sessions, total_voice_time 
-                FROM user_activity 
-                WHERE user_id = $1 AND guild_id = $2
-            ''', user_id, guild_id)
+            # Calcular tempo total e tempo sem áudio
+            now = datetime.now(pytz.UTC)
+            total_time = (now - session_data['start_time']).total_seconds()
+            audio_off_time = session_data.get('total_audio_off_time', 0)
             
-            return dict(result) if result else {}
-        except Exception as e:
-            logger.error(f"Erro ao obter atividade do usuário: {e}")
-            return {}
-        finally:
-            if conn:
-                await self.pool.release(conn)
-
-    async def get_voice_sessions(self, user_id: int, guild_id: int, 
-                               start_date: datetime, end_date: datetime) -> List[Dict]:
-        """Obtém sessões de voz do usuário em um período"""
-        conn = None
-        try:
-            conn = await self.pool.acquire()
-            results = await conn.fetch('''
-                SELECT join_time, leave_time, duration 
-                FROM voice_sessions
-                WHERE user_id = $1 AND guild_id = $2
-                AND join_time >= $3 AND leave_time <= $4
-                ORDER BY join_time
-            ''', user_id, guild_id, start_date, end_date)
+            # Adicionar tempo atual se o áudio estava desligado
+            if session_data.get('audio_disabled') and 'audio_off_time' in session_data:
+                audio_off_duration = (now - session_data['audio_off_time']).total_seconds()
+                audio_off_time += audio_off_duration
             
-            return [dict(row) for row in results]
-        except Exception as e:
-            logger.error(f"Erro ao obter sessões de voz: {e}")
-            return []
-        finally:
-            if conn:
-                await self.pool.release(conn)
-
-    async def log_period_check(self, user_id: int, guild_id: int, 
-                             start_date: datetime, end_date: datetime, 
-                             meets_requirements: bool):
-        """Registra verificação de período"""
-        conn = None
-        try:
-            conn = await self.pool.acquire()
-            await conn.execute('''
-                INSERT INTO checked_periods
-                (user_id, guild_id, period_start, period_end, meets_requirements)
-                VALUES ($1, $2, $3, $4, $5)
-                ON CONFLICT (user_id, guild_id, period_start) DO UPDATE
-                SET meets_requirements = EXCLUDED.meets_requirements
-            ''', user_id, guild_id, start_date, end_date, meets_requirements)
-        except Exception as e:
-            logger.error(f"Erro ao registrar verificação de período: {e}")
-            raise
-        finally:
-            if conn:
-                await self.pool.release(conn)
-
-    async def get_last_period_check(self, user_id: int, guild_id: int) -> Optional[Dict]:
-        """Obtém última verificação de período"""
-        conn = None
-        try:
-            conn = await self.pool.acquire()
-            result = await conn.fetchrow('''
-                SELECT period_start, period_end, meets_requirements
-                FROM checked_periods
-                WHERE user_id = $1 AND guild_id = $2
-                ORDER BY period_start DESC
-                LIMIT 1
-            ''', user_id, guild_id)
+            # Calcular tempo efetivo (total - tempo sem áudio)
+            effective_time = max(0, total_time - audio_off_time)
             
-            return dict(result) if result else None
-        except Exception as e:
-            logger.error(f"Erro ao obter última verificação de período: {e}")
-            return None
-        finally:
-            if conn:
-                await self.pool.release(conn)
-
-    async def log_warning(self, user_id: int, guild_id: int, warning_type: str):
-        """Registra aviso enviado ao usuário"""
-        now = datetime.now(pytz.utc)
-        conn = None
-        try:
-            conn = await self.pool.acquire()
-            await conn.execute('''
-                INSERT INTO user_warnings 
-                (user_id, guild_id, warning_type, warning_date) 
-                VALUES ($1, $2, $3, $4)
-                ON CONFLICT (user_id, guild_id, warning_type) DO UPDATE 
-                SET warning_date = EXCLUDED.warning_date
-            ''', user_id, guild_id, warning_type, now)
-        except Exception as e:
-            logger.error(f"Erro ao registrar aviso: {e}")
-            raise
-        finally:
-            if conn:
-                await self.pool.release(conn)
-
-    async def get_last_warning(self, user_id: int, guild_id: int) -> Optional[Tuple[str, datetime]]:
-        """Obtém último aviso enviado ao usuário"""
-        conn = None
-        try:
-            conn = await self.pool.acquire()
-            result = await conn.fetchrow('''
-                SELECT warning_type, warning_date 
-                FROM user_warnings 
-                WHERE user_id = $1 AND guild_id = $2
-                ORDER BY warning_date DESC
-                LIMIT 1
-            ''', user_id, guild_id)
-            
-            if result:
-                warning_date = result['warning_date']
-                if warning_date and warning_date.tzinfo is None:
-                    warning_date = warning_date.replace(tzinfo=pytz.utc)
-                return result['warning_type'], warning_date
-            return None
-        except Exception as e:
-            logger.error(f"Erro ao obter último aviso: {e}")
-            return None
-        finally:
-            if conn:
-                await self.pool.release(conn)
-
-    async def log_removed_roles(self, user_id: int, guild_id: int, role_ids: List[int]):
-        """Registra cargos removidos por inatividade (COM transação)."""
-        conn = None
-        try:
-            conn = await self.pool.acquire()
-            async with conn.transaction():
-                for role_id in role_ids:
-                    await conn.execute('''
-                        INSERT INTO removed_roles 
-                        (user_id, guild_id, role_id, removal_date) 
-                        VALUES ($1, $2, $3, $4)
-                        ON CONFLICT (user_id, guild_id, role_id) DO UPDATE 
-                        SET removal_date = EXCLUDED.removal_date
-                    ''', user_id, guild_id, role_id, datetime.now(pytz.utc))
-        except Exception as e:
-            logger.error(f"Erro ao registrar cargos removidos: {e}")
-            raise
-        finally:
-            if conn:
-                await self.pool.release(conn)
-
-    async def get_last_role_removal(self, user_id: int, guild_id: int) -> Optional[Dict]:
-        """Obtém a última remoção de cargo para um usuário"""
-        conn = None
-        try:
-            conn = await self.pool.acquire()
-            result = await conn.fetchrow('''
-                SELECT removal_date 
-                FROM removed_roles
-                WHERE user_id = $1 AND guild_id = $2
-                ORDER BY removal_date DESC
-                LIMIT 1
-            ''', user_id, guild_id)
-            
-            if result:
-                removal_date = result['removal_date']
-                if removal_date and removal_date.tzinfo is None:
-                    removal_date = removal_date.replace(tzinfo=pytz.utc)
-                return {'removal_date': removal_date}
-            return None
-        except Exception as e:
-            logger.error(f"Erro ao obter última remoção de cargo: {e}")
-            return None
-        finally:
-            if conn:
-                await self.pool.release(conn)         
-
-    async def log_kicked_member(self, user_id: int, guild_id: int, reason: str):
-        """Registra membro expulso por inatividade"""
-        now = datetime.now(pytz.utc)
-        conn = None
-        try:
-            conn = await self.pool.acquire()
-            await conn.execute('''
-                INSERT INTO kicked_members 
-                (user_id, guild_id, kick_date, reason) 
-                VALUES ($1, $2, $3, $4)
-            ''', user_id, guild_id, now, reason)
-        except Exception as e:
-            logger.error(f"Erro ao registrar membro expulso: {e}")
-            raise
-        finally:
-            if conn:
-                await self.pool.release(conn)
-
-    async def get_last_kick(self, user_id: int, guild_id: int) -> Optional[Dict]:
-        """Obtém última expulsão do usuário"""
-        conn = None
-        try:
-            conn = await self.pool.acquire()
-            result = await conn.fetchrow('''
-                SELECT kick_date 
-                FROM kicked_members
-                WHERE user_id = $1 AND guild_id = $2
-                ORDER BY kick_date DESC
-                LIMIT 1
-            ''', user_id, guild_id)
-            
-            return dict(result) if result else None
-        except Exception as e:
-            logger.error(f"Erro ao obter última expulsão: {e}")
-            return None
-        finally:
-            if conn:
-                await self.pool.release(conn)
-
-    async def get_members_with_tracked_roles(self, guild_id: int, role_ids: List[int]) -> List[int]:
-        """Obtém todos os membros que possuem pelo menos um dos cargos monitorados"""
-        if not role_ids:
-            return []
-
-        conn = None
-        try:
-            conn = await self.pool.acquire()
-            results = await conn.fetch('''
-                SELECT DISTINCT user_id 
-                FROM user_activity
-                WHERE guild_id = $1
-                AND EXISTS (
-                    SELECT 1 FROM role_assignments 
-                    WHERE role_assignments.user_id = user_activity.user_id 
-                    AND role_assignments.guild_id = user_activity.guild_id
-                    AND role_assignments.role_id = ANY($2)
-                )
-            ''', guild_id, role_ids)
-            
-            return [r['user_id'] for r in results] if results else []
-        except Exception as e:
-            logger.error(f"Erro ao buscar membros com cargos monitorados: {e}")
-            return []
-        finally:
-            if conn:
-                await self.pool.release(conn)
-
-    async def get_last_periods_batch(self, user_ids: List[int], guild_id: int) -> Dict[int, Dict]:
-        """Obtém os últimos períodos verificados para um lote de usuários"""
-        if not user_ids:
-            return {}
-
-        conn = None
-        try:
-            conn = await self.pool.acquire()
-            results = await conn.fetch('''
-                SELECT DISTINCT ON (user_id) 
-                    user_id, period_start, period_end, meets_requirements
-                FROM checked_periods
-                WHERE user_id = ANY($1) AND guild_id = $2
-                ORDER BY user_id, period_start DESC
-            ''', user_ids, guild_id)
-            
-            last_periods = {}
-            for row in results:
-                last_periods[row['user_id']] = {
-                    'period_start': row['period_start'],
-                    'period_end': row['period_end'],
-                    'meets_requirements': row['meets_requirements']
-                }
-            
-            return last_periods
-        except Exception as e:
-            logger.error(f"Erro ao obter últimos períodos em lote: {e}")
-            return {}
-        finally:
-            if conn:
-                await self.pool.release(conn)
-
-    async def cleanup_old_data(self, days: int = 60) -> str:
-        """Limpa dados antigos do banco de dados"""
-        conn = None
-        try:
-            conn = await self.pool.acquire()
-            async with conn.transaction():
-                # Limpar sessões de voz antigas
-                voice_deleted = await conn.execute("DELETE FROM voice_sessions WHERE leave_time < NOW() - $1 * INTERVAL '1 day'", days)
-                
-                # Limpar avisos antigos
-                warnings_deleted = await conn.execute("DELETE FROM user_warnings WHERE warning_date < NOW() - $1 * INTERVAL '1 day'", days)
-                
-                # Limpar registros de cargos removidos antigos
-                roles_deleted = await conn.execute("DELETE FROM removed_roles WHERE removal_date < NOW() - $1 * INTERVAL '1 day'", days)
-                
-                # Limpar membros expulsos antigos
-                kicks_deleted = await conn.execute("DELETE FROM kicked_members WHERE kick_date < NOW() - $1 * INTERVAL '1 day'", days)
-                
-                # Limpar logs de rate limit antigos
-                rate_limits_deleted = await conn.execute("DELETE FROM rate_limit_logs WHERE log_date < NOW() - $1 * INTERVAL '1 day'", days)
-                
-                # Limpar eventos de voz pendentes antigos
-                pending_events_deleted = await conn.execute("DELETE FROM pending_voice_events WHERE event_time < NOW() - $1 * INTERVAL '1 day'", days)
-                
-                # Limpar atribuições de cargos antigas
-                role_assignments_deleted = await conn.execute("DELETE FROM role_assignments WHERE assigned_at < NOW() - $1 * INTERVAL '1 day'", days)
-                
-                log_message = (
-                    f"Limpeza de dados antigos concluída: "
-                    f"Sessões de voz: {voice_deleted.split()[1]}, "
-                    f"Avisos: {warnings_deleted.split()[1]}, "
-                    f"Cargos removidos: {roles_deleted.split()[1]}, "
-                    f"Expulsões: {kicks_deleted.split()[1]}, "
-                    f"Rate limits: {rate_limits_deleted.split()[1]}, "
-                    f"Eventos pendentes: {pending_events_deleted.split()[1]}, "
-                    f"Atribuições de cargos: {role_assignments_deleted.split()[1]}"
-                )
-                logger.info(log_message)
-                return log_message
-        except Exception as e:
-            logger.error(f"Erro ao limpar dados antigos: {e}")
-            raise
-        finally:
-            if conn:
-                await self.pool.release(conn)
-
-    async def get_rate_limit_history(self, guild_id: int, hours: int = 24) -> List[Dict]:
-        """Obtém histórico de rate limits para uma guild"""
-        conn = None
-        try:
-            since = datetime.now(pytz.utc) - timedelta(hours=hours)
-            conn = await self.pool.acquire()
-            results = await conn.fetch('''
-                SELECT bucket, limit_count, remaining, reset_at, scope, endpoint, retry_after, log_date
-                FROM rate_limit_logs
-                WHERE guild_id = $1 AND log_date >= $2
-                ORDER BY log_date DESC
-            ''', guild_id, since)
-            
-            return [dict(row) for row in results]
-        except Exception as e:
-            logger.error(f"Erro ao obter histórico de rate limits: {e}")
-            return []
-        finally:
-            if conn:
-                await self.pool.release(conn)
-
-    async def cleanup_rate_limit_logs(self, days: int = 7):
-        """Limpa logs de rate limit antigos"""
-        conn = None
-        try:
-            cutoff_date = datetime.now(pytz.utc) - timedelta(days=days)
-            conn = await self.pool.acquire()
-            result = await conn.execute("DELETE FROM rate_limit_logs WHERE log_date < $1", cutoff_date)
-            deleted_count = int(result.split()[1])
-            logger.info(f"Removidos {deleted_count} logs de rate limit antigos")
-            return deleted_count
-        except Exception as e:
-            logger.error(f"Erro ao limpar logs de rate limit: {e}")
-            return 0
-        finally:
-            if conn:
-                await self.pool.release(conn)
-
-    async def get_last_task_execution(self, task_name: str) -> Optional[Dict]:
-        """Obtém a última execução de uma task"""
-        conn = None
-        try:
-            conn = await self.pool.acquire()
-            result = await conn.fetchrow('''
-                SELECT last_execution, monitoring_period 
-                FROM task_executions 
-                WHERE task_name = $1
-            ''', task_name)
-            
-            if result:
-                # Garantir que o datetime retornado está com timezone
-                last_execution = result['last_execution']
-                if last_execution and last_execution.tzinfo is None:
-                    last_execution = last_execution.replace(tzinfo=pytz.utc)
-                    result = dict(result)  # Criar uma cópia mutável
-                    result['last_execution'] = last_execution
-                
-                return result
-            return None
-        except Exception as e:
-            logger.error(f"Erro ao obter última execução da task: {e}")
-            return None
-        finally:
-            if conn:
-                await self.pool.release(conn)
-
-    async def log_task_execution(self, task_name: str, monitoring_period: int):
-        """Registra execução de uma task"""
-        conn = None
-        try:
-            conn = await self.pool.acquire()
-            await conn.execute('''
-                INSERT INTO task_executions 
-                (task_name, last_execution, monitoring_period) 
-                VALUES ($1, $2, $3)
-                ON CONFLICT (task_name) DO UPDATE 
-                SET last_execution = EXCLUDED.last_execution,
-                    monitoring_period = EXCLUDED.monitoring_period
-            ''', task_name, datetime.now(pytz.utc), monitoring_period)
-        except Exception as e:
-            logger.error(f"Erro ao registrar execução da task: {e}")
-            raise
-        finally:
-            if conn:
-                await self.pool.release(conn)
-
-    async def sync_task_periods(self, monitoring_period: int):
-        """Sincroniza os períodos de monitoramento em todas as tasks"""
-        conn = None
-        try:
-            conn = await self.pool.acquire()
-            await conn.execute('''
-                UPDATE task_executions 
-                SET monitoring_period = $1
-                WHERE task_name IN (
-                    'inactivity_check', 'check_warnings', 
-                    'cleanup_members', 'check_previous_periods'
-                )
-            ''', monitoring_period)
-            logger.info("Períodos de monitoramento sincronizados nas tasks")
-        except Exception as e:
-            logger.error(f"Erro ao sincronizar períodos de monitoramento: {e}")
-        finally:
-            if conn:
-                await self.pool.release(conn)
-
-    async def health_check(self):
-        """Verifica a saúde do banco de dados e reinicia tasks se necessário"""
-        # Verificação básica de conexão
-        if not self.pool:
-            return False
-            
-        try:
-            async with self.pool.acquire() as conn:
-                await conn.execute("SELECT 1")
-            
-            # Verifica se as tasks estão rodando
-            active_tasks = {t._name for t in asyncio.all_tasks() if hasattr(t, '_name') and t._name}
-            expected_tasks = {'database_heartbeat'}
-            
-            for task_name in expected_tasks:
-                if task_name not in active_tasks:
-                    logger.warning(f"Task {task_name} não está ativa - reiniciando...")
-                    if task_name == 'database_heartbeat':
-                        self.heartbeat_task = asyncio.create_task(self._db_heartbeat(interval=300))
-                        self.heartbeat_task._name = 'database_heartbeat'
-                        self._active_tasks.add(self.heartbeat_task)
-            
-            # Verifica o status do pool de conexões
-            pool_status = await self.check_pool_status()
-            if pool_status:
-                logger.info(f"Status do pool de conexões: {pool_status}")
-            
-            return True
-        except Exception as e:
-            logger.error(f"Erro na verificação de saúde do banco de dados: {e}")
-            return False
-
-    async def log_role_assignment(self, user_id: int, guild_id: int, role_id: int):
-        """Registra quando um cargo foi atribuído a um usuário"""
-        max_retries = 3
-        retry_delay = 1
-        
-        for attempt in range(max_retries):
-            conn = None
+            # Registrar saída no banco de dados
             try:
-                conn = await asyncio.wait_for(self.pool.acquire(), timeout=10)
-                assigned_at = datetime.now(pytz.UTC)
-                await asyncio.wait_for(conn.execute('''
-                    INSERT INTO role_assignments 
-                    (user_id, guild_id, role_id, assigned_at) 
-                    VALUES ($1, $2, $3, $4)
-                    ON CONFLICT (user_id, guild_id, role_id) DO UPDATE 
-                    SET assigned_at = EXCLUDED.assigned_at
-                ''', user_id, guild_id, role_id, assigned_at), timeout=10)
-                return
-            except (asyncio.TimeoutError, asyncpg.PostgresConnectionError) as e:
-                if attempt == max_retries - 1:
-                    logger.error(f"Falha após {max_retries} tentativas ao registrar atribuição de cargo: {e}")
-                    raise
-                logger.warning(f"Tentativa {attempt + 1} falhou, tentando novamente em {retry_delay} segundos...")
-                await asyncio.sleep(retry_delay)
-                retry_delay *= 2
+                await self.db.log_voice_leave(member.id, member.guild.id, int(effective_time))
             except Exception as e:
-                logger.error(f"Erro ao registrar atribuição de cargo: {e}")
-                raise
-            finally:
-                if conn:
-                    await self.pool.release(conn)
-
-    async def get_role_assigned_time(self, user_id: int, guild_id: int, role_id: int) -> Optional[datetime]:
-        """Obtém quando um cargo foi atribuído a um usuário"""
-        conn = None
-        try:
-            conn = await self.pool.acquire()
-            result = await conn.fetchrow('''
-                SELECT assigned_at 
-                FROM role_assignments
-                WHERE user_id = $1 AND guild_id = $2 AND role_id = $3
-                ORDER BY assigned_at DESC
-                LIMIT 1
-            ''', user_id, guild_id, role_id)
+                logger.error(f"Erro ao registrar saída de voz: {e}")
+                await self.log_action("Erro DB - Saída de voz", member, str(e))
             
-            if result:
-                assigned_at = result['assigned_at']
-                if assigned_at and assigned_at.tzinfo is None:
-                    assigned_at = assigned_at.replace(tzinfo=pytz.utc)
-                return assigned_at
-            return None
+            # Logar a saída
+            channel_name = before.channel.name if before.channel else "Canal desconhecido"
+            embed = discord.Embed(
+                title="🚪 Saiu de Voz",
+                color=discord.Color.blue(),
+                timestamp=now)
+            embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
+            embed.add_field(name="Usuário", value=member.mention, inline=True)
+            embed.add_field(name="Canal", value=channel_name, inline=True)
+            embed.add_field(name="Tempo Efetivo", 
+                          value=f"{int(effective_time//60)} minutos {int(effective_time%60)} segundos", 
+                          inline=True)
+            embed.add_field(name="Tempo sem Áudio", 
+                          value=f"{int(audio_off_time//60)} minutos {int(audio_off_time%60)} segundos", 
+                          inline=True)
+            embed.set_footer(text=f"ID: {member.id}")
+            
+            await self.log_action(None, None, embed=embed)
+            
         except Exception as e:
-            logger.error(f"Erro ao obter data de atribuição de cargo: {e}")
-            return None
+            logger.error(f"Erro ao processar saída de voz: {e}")
         finally:
-            if conn:
-                await self.pool.release(conn)
+            # Garantir que a sessão seja removida
+            self.active_sessions.pop((member.id, member.guild.id), None)
+
+    async def _handle_voice_move(self, member, before, after, absence_channel_id):
+        audio_key = (member.id, member.guild.id)
+        
+        if after.channel.id == absence_channel_id and before.channel.id != absence_channel_id:
+            # Movendo para a sala de ausência - pausar a sessão em vez de encerrar
+            if audio_key in self.active_sessions:
+                # Calcular tempo até agora
+                current_duration = (datetime.now(pytz.UTC) - self.active_sessions[audio_key]['start_time']).total_seconds()
+                
+                # Pausar a sessão mantendo os dados atuais
+                self.active_sessions[audio_key]['paused'] = True
+                self.active_sessions[audio_key]['paused_time'] = datetime.now(pytz.UTC)
+                self.active_sessions[audio_key]['pre_pause_duration'] = current_duration
+                
+                embed = discord.Embed(
+                    title="⏸ Sessão Pausada (Ausência)",
+                    color=discord.Color.light_grey(),
+                    timestamp=datetime.now(pytz.UTC))
+                embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
+                embed.add_field(name="Usuário", value=member.mention, inline=True)
+                embed.add_field(name="De", value=before.channel.name, inline=True)
+                embed.add_field(name="Para", value=after.channel.name, inline=True)
+                embed.add_field(name="Tempo Ativo", 
+                              value=f"{int(current_duration//60)} minutos {int(current_duration%60)} segundos", 
+                              inline=False)
+                embed.set_footer(text=f"ID: {member.id}")
+                
+                await self.log_action(None, None, embed=embed)
+        
+        elif before.channel.id == absence_channel_id and after.channel.id != absence_channel_id:
+            # Voltando da sala de ausência - retomar a sessão
+            if audio_key in self.active_sessions and self.active_sessions[audio_key].get('paused'):
+                # Calcular tempo pausado
+                pause_duration = (datetime.now(pytz.UTC) - self.active_sessions[audio_key]['paused_time']).total_seconds()
+                
+                # Retomar a sessão
+                self.active_sessions[audio_key]['start_time'] = datetime.now(pytz.UTC) - timedelta(
+                    seconds=self.active_sessions[audio_key]['pre_pause_duration'])
+                del self.active_sessions[audio_key]['paused']
+                del self.active_sessions[audio_key]['paused_time']
+                del self.active_sessions[audio_key]['pre_pause_duration']
+                
+                embed = discord.Embed(
+                    title="▶️ Sessão Retomada (Voltou)",
+                    color=discord.Color.green(),
+                    timestamp=datetime.now(pytz.UTC))
+                embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
+                embed.add_field(name="Usuário", value=member.mention, inline=True)
+                embed.add_field(name="De", value=before.channel.name, inline=True)
+                embed.add_field(name="Para", value=after.channel.name, inline=True)
+                embed.add_field(name="Tempo Pausado", 
+                              value=f"{int(pause_duration//60)} minutos {int(pause_duration%60)} segundos", 
+                              inline=False)
+                embed.set_footer(text=f"ID: {member.id}")
+                
+                await self.log_action(None, None, embed=embed)
+        
+        else:
+            # Movimento entre outros canais - apenas registrar
+            if audio_key in self.active_sessions:
+                embed = discord.Embed(
+                    title="🔄 Movido entre Canais",
+                    color=discord.Color.light_grey(),
+                    timestamp=datetime.now(pytz.UTC))
+                embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
+                embed.add_field(name="De", value=before.channel.name, inline=True)
+                embed.add_field(name="Para", value=after.channel.name, inline=True)
+                embed.set_footer(text=f"ID: {member.id}")
+                await self.log_action(None, None, embed=embed)
+
+    async def _handle_audio_change(self, member, before, after):
+        audio_key = (member.id, member.guild.id)
+        
+        # Se não há sessão ativa e o usuário está em um canal, criar uma
+        if audio_key not in self.active_sessions and after.channel is not None:
+            await self._handle_voice_join(member, after)
+            return
+
+        if audio_key not in self.active_sessions:
+            return
+
+        audio_was_off = before.self_deaf or before.deaf
+        audio_is_off = after.self_deaf or after.deaf
+
+        # Se o áudio foi desligado
+        if not audio_was_off and audio_is_off:
+            self.active_sessions[audio_key]['audio_disabled'] = True
+            self.active_sessions[audio_key]['audio_off_time'] = datetime.now(pytz.UTC)  # Usar UTC consistentemente
+            
+            time_in_voice = (datetime.now(pytz.UTC) - self.active_sessions[audio_key]['start_time']).total_seconds()
+            
+            embed = discord.Embed(
+                title="🔇 Áudio Desativado",
+                color=discord.Color.orange(),
+                timestamp=datetime.now(pytz.UTC))
+            embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
+            embed.add_field(name="Usuário", value=member.mention, inline=True)
+            embed.add_field(name="Canal", value=after.channel.name if after.channel else "Desconhecido", inline=True)
+            embed.add_field(name="Tempo em voz", 
+                          value=f"{int(time_in_voice//60)} minutos {int(time_in_voice%60)} segundos", 
+                          inline=False)
+            embed.set_footer(text=f"ID: {member.id}")
+            
+            await self.log_action(None, None, embed=embed)
+        
+        # Se o áudio foi reativado
+        elif audio_was_off and not audio_is_off:
+            self.active_sessions[audio_key]['audio_disabled'] = False
+            if 'audio_off_time' in self.active_sessions[audio_key]:
+                audio_off_duration = (datetime.now(pytz.UTC) - self.active_sessions[audio_key]['audio_off_time']).total_seconds()
+                self.active_sessions[audio_key]['total_audio_off_time'] = \
+                    self.active_sessions[audio_key].get('total_audio_off_time', 0) + audio_off_duration
+                del self.active_sessions[audio_key]['audio_off_time']
+                
+                total_time = (datetime.now(pytz.UTC) - self.active_sessions[audio_key]['start_time']).total_seconds()
+                
+                embed = discord.Embed(
+                    title="🔊 Áudio Reativado",
+                    color=discord.Color.green(),
+                    timestamp=datetime.now(pytz.UTC))
+                embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
+                embed.add_field(name="Usuário", value=member.mention, inline=True)
+                embed.add_field(name="Canal", value=after.channel.name if after.channel else "Desconhecido", inline=True)
+                embed.add_field(name="Tempo sem áudio", 
+                              value=f"{int(audio_off_duration//60)} minutos {int(audio_off_duration%60)} segundos", 
+                              inline=True)
+                embed.add_field(name="Tempo total em voz", 
+                              value=f"{int(total_time//60)} minutos {int(total_time%60)} segundos", 
+                              inline=True)
+                embed.set_footer(text=f"ID: {member.id}")
+                
+                await self.log_action(None, None, embed=embed)
+
+    async def process_voice_events(self):
+        """Processa eventos de voz da fila"""
+        await self.wait_until_ready()
+        while True:
+            try:
+                event = await self.voice_event_queue.get()
+                await self._process_voice_batch([event])
+                self.voice_event_queue.task_done()
+                await asyncio.sleep(0.1)
+            except Exception as e:
+                logger.error(f"Erro no processador de eventos de voz: {e}")
+                await asyncio.sleep(1)
+
+    async def log_action(self, action: str, member: Optional[discord.Member] = None, 
+                       details: str = None, file: discord.File = None, 
+                       embed: discord.Embed = None):
+        """Registra uma ação no canal de logs"""
+        try:
+            if not hasattr(self, 'config') or not self.config.get('log_channel'):
+                if action:
+                    logger.info(f"Ação não logada (canal não configurado): {action}")
+                return
+                
+            log_channel_id = self.config.get('log_channel')
+            if not log_channel_id:
+                logger.warning("Canal de logs não configurado")
+                return
+                
+            channel = self.get_channel(log_channel_id)
+            if not channel:
+                logger.warning(f"Canal de logs com ID {log_channel_id} não encontrado")
+                return
+                
+            if embed is not None:
+                await self.message_queue.put((
+                    channel,
+                    None,
+                    embed,
+                    file
+                ), priority='high')
+                return
+                
+            if action:
+                color = discord.Color.blue()
+                icon = "ℹ️"
+                    
+                embed = discord.Embed(
+                    title=f"{icon} {action}",
+                    color=color,
+                    timestamp=datetime.now(pytz.UTC))
+                
+                if member is not None:
+                    embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
+                    embed.add_field(name="Usuário", value=member.mention, inline=True)
+                    embed.add_field(name="ID", value=f"`{member.id}`", inline=True)
+                
+                if details:
+                    if len(details) > 1024:
+                        details = details[:1021] + "..."
+                    embed.add_field(name="Detalhes", value=details, inline=False)
+                
+                await self.message_queue.put((
+                    channel,
+                    None,
+                    embed,
+                    file
+                ), priority='high')
+                
+        except Exception as e:
+            logger.error(f"Erro ao registrar ação no log: {e}")
+
+    async def notify_roles(self, message: str, is_warning: bool = False):
+        try:
+            channel_id = self.config.get('notification_channel')
+            if not channel_id:
+                logger.warning("Canal de notificação não configurado")
+                return
+                
+            channel = self.get_channel(channel_id)
+            if not channel:
+                logger.warning(f"Canal de notificação {channel_id} não encontrado")
+                return
+                
+            if is_warning:
+                embed = discord.Embed(
+                    title="⚠️ Aviso do Sistema",
+                    description=message,
+                    color=discord.Color.gold(),
+                    timestamp=datetime.now(pytz.UTC))
+                priority = "high"
+            else:
+                embed = discord.Embed(
+                    title="ℹ️ Notificação",
+                    description=message,
+                    color=discord.Color.blue(),
+                    timestamp=datetime.now(pytz.UTC))
+                priority = "normal"
+            
+            await self.message_queue.put((
+                channel,
+                None,
+                embed,
+                None
+            ), priority=priority)
+            
+        except Exception as e:
+            logger.error(f"Erro ao enviar notificação: {e}")
+            await self.log_action("Erro de Notificação", None, f"Falha ao enviar mensagem: {str(e)}")
+
+    async def send_dm(self, member: discord.Member, message_content: str, embed: discord.Embed):
+        try:
+            await self.message_queue.put((
+                member,
+                message_content,
+                embed,
+                None
+            ), priority='low')
+        except discord.Forbidden:
+            logger.warning(f"Não foi possível enviar DM para {member.display_name}. (DMs desabilitadas)")
+            await self.log_action(
+                "Falha ao Enviar DM", 
+                member, 
+                "O usuário provavelmente desabilitou DMs de membros do servidor."
+            )
+        except discord.HTTPException as e:
+            if e.code == 50007:  # Cannot send messages to this user
+                logger.warning(f"Não foi possível enviar DM para {member.display_name}. (DMs desabilitadas)")
+            else:
+                logger.error(f"Erro ao enviar DM para {member}: {e}")
+        except Exception as e:
+            logger.error(f"Erro ao enviar DM para {member}: {e}")
+
+    async def send_warning(self, member: discord.Member, warning_type: str):
+        try:
+            warnings_config = self.config.get('warnings', {})
+            messages = warnings_config.get('messages', {})
+            
+            message_template = messages.get(warning_type)
+            if not message_template:
+                logger.warning(f"Template de mensagem de aviso para '{warning_type}' não encontrado.")
+                return
+
+            format_args = {
+                'days': warnings_config.get('first_warning', 'N/A'),
+                'monitoring_period': self.config.get('monitoring_period', 'N/A'),
+                'required_minutes': self.config.get('required_minutes', 'N/A'),
+                'required_days': self.config.get('required_days', 'N/A'),
+                'guild': member.guild.name
+            }
+            message = message_template.format(**format_args)
+            
+            if warning_type == 'first':
+                title = "⚠️ Primeiro Aviso de Inatividade"
+                color = discord.Color.gold()
+            elif warning_type == 'second':
+                title = "🔴 Último Aviso de Inatividade"
+                color = discord.Color.red()
+            else:
+                title = "❌ Cargos Removidos por Inatividade"
+                color = discord.Color.dark_red()
+            
+            embed = discord.Embed(
+                title=title,
+                description=message,
+                color=color,
+                timestamp=datetime.now(pytz.UTC))
+            
+            if member.guild.icon:
+                embed.set_author(name=member.guild.name, icon_url=member.guild.icon.url)
+            
+            await self.send_dm(member, message, embed)
+            
+            # Registrar aviso no banco de dados
+            await self.db.log_warning(member.id, member.guild.id, warning_type)
+            
+            await self.log_action(f"Aviso Enviado ({warning_type})", member)
+        except Exception as e:
+            logger.error(f"Erro ao enviar aviso para {member}: {e}")
+
+def allowed_roles_only():
+    async def predicate(interaction: discord.Interaction):
+        if not bot.config.get('allowed_roles'):
+            return True
+            
+        if interaction.user.guild_permissions.administrator:
+            return True
+            
+        user_role_ids = {role.id for role in interaction.user.roles}
+        allowed_role_ids = set(bot.config.get('allowed_roles', []))
+        
+        if user_role_ids.intersection(allowed_role_ids):
+            return True
+            
+        await interaction.response.send_message(
+            "❌ Você não tem permissão para usar este comando.",
+            ephemeral=True)
+        return False
+    return commands.check(predicate)
+
+intents = discord.Intents.default()
+intents.members = True
+intents.voice_states = True
+intents.message_content = True
+
+bot = InactivityBot(
+    command_prefix='!', 
+    intents=intents
+)
+
+@bot.event
+async def on_ready():
+    try:
+        if hasattr(bot, '_ready_called') and bot._ready_called:
+            return
+        bot._ready_called = True
+        
+        logger.info(f'Bot conectado como {bot.user}')
+        logger.info(f"Latência: {round(bot.latency * 1000)}ms")
+        
+        # Garantir que o banco de dados está inicializado
+        if not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
+            logger.error("Banco de dados não inicializado - tentando novamente...")
+            await bot.initialize_db()
+            if not bot.db._is_initialized:
+                logger.critical("Falha na inicialização do banco de dados")
+                return
+                
+        # Desative o chunking automático se estiver causando problemas
+        bot._connection._chunk_guilds = False
+        
+        # Carregar configurações e garantir que estão corretas
+        config_loaded = await bot.load_config()
+        if not config_loaded:
+            logger.error("Falha ao carregar configurações - usando padrão")
+        
+        # Verificar consistência das configurações
+        required_keys = ['required_minutes', 'required_days', 'monitoring_period', 
+                        'kick_after_days', 'tracked_roles', 'warnings']
+        for key in required_keys:
+            if key not in bot.config:
+                logger.error(f"Configuração essencial faltando: {key}")
+                bot.config[key] = DEFAULT_CONFIG[key]
+        
+        # Garantir que as configurações estão salvas no banco
+        await bot.save_config()
+
+        # Verificar se o método sync_task_periods existe antes de chamá-lo
+        if hasattr(bot.db, 'sync_task_periods'):
+            monitoring_period = bot.config.get('monitoring_period')
+            if monitoring_period:
+                await bot.db.sync_task_periods(monitoring_period)
+        
+        if hasattr(bot, '_ready_set') and bot._ready_set:
+            return
+            
+        bot._ready_set = True
+        
+        if not bot._tasks_started:
+            logger.info("Configurações verificadas. Iniciando tarefas de fundo...")
+            
+            from tasks import (
+                inactivity_check, check_warnings, cleanup_members,
+                database_backup, cleanup_old_data, monitor_rate_limits,
+                report_metrics, health_check, check_missed_periods,
+                check_previous_periods, process_pending_voice_events,
+                check_current_voice_members, detect_missing_voice_leaves,
+                register_role_assignments, cleanup_ghost_sessions
+            )
+            
+            # Primeiro verificar períodos perdidos
+            await check_missed_periods()
+            
+            # Registrar datas de atribuição de cargos para membros existentes
+            bot.loop.create_task(register_role_assignments(), name='register_role_assignments')
+            
+            # Alteração 3: Forçar verificação imediata de membros
+            bot.loop.create_task(cleanup_members(force_check=True), name='initial_cleanup_members')
+            
+            # Criar tasks com nomes identificáveis
+            bot.loop.create_task(inactivity_check(), name='inactivity_check_wrapper')
+            bot.loop.create_task(check_warnings(), name='check_warnings_wrapper')
+            bot.loop.create_task(cleanup_members(), name='cleanup_members_wrapper')
+            bot.loop.create_task(database_backup(), name='database_backup_wrapper')
+            bot.loop.create_task(cleanup_old_data(), name='cleanup_old_data_wrapper')
+            bot.loop.create_task(monitor_rate_limits(), name='monitor_rate_limits_wrapper')
+            bot.loop.create_task(report_metrics(), name='report_metrics_wrapper')
+            bot.loop.create_task(health_check(), name='health_check_wrapper')
+            bot.loop.create_task(check_previous_periods(), name='check_previous_periods_wrapper')
+            bot.loop.create_task(process_pending_voice_events(), name='process_pending_voice_events')
+            bot.loop.create_task(check_current_voice_members(), name='check_current_voice_members')
+            bot.loop.create_task(detect_missing_voice_leaves(), name='detect_missing_voice_leaves')
+            bot.loop.create_task(cleanup_ghost_sessions(), name='ghost_session_cleanup')
+            bot.loop.create_task(register_role_assignments(), name='register_role_assignments_wrapper')
+            
+            bot.voice_event_processor_task = bot.loop.create_task(bot.process_voice_events(), name='voice_event_processor')
+            bot.queue_processor_task = bot.loop.create_task(bot.process_queues(), name='queue_processor')
+            bot.pool_monitor_task = bot.loop.create_task(bot.monitor_db_pool(), name='db_pool_monitor')
+            bot.health_check_task = bot.loop.create_task(bot.periodic_health_check(), name='periodic_health_check')
+            bot.audio_check_task = bot.loop.create_task(bot.check_audio_states(), name='audio_state_checker')
+
+            bot._tasks_started = True
+            logger.info("Todas as tarefas de fundo foram agendadas com sucesso.")
+
+        # Alteração 4: Verificar membros ativos e canais
+        for guild in bot.guilds:
+            try:
+                # Forçar fetch de todos os membros
+                logger.info(f"Carregando membros para a guilda {guild.name}...")
+                await guild.chunk()
+                logger.info(f"{len(guild.members)} membros carregados para {guild.name}")
+                
+                # Verificar canais de log e notificação
+                log_channel_id = bot.config.get('log_channel')
+                if log_channel_id:
+                    log_channel = bot.get_channel(int(log_channel_id))
+                    if not log_channel:
+                        logger.error(f"Canal de logs (ID: {log_channel_id}) não encontrado - criando fallback")
+                        # Tentar encontrar um canal padrão
+                        for channel in guild.text_channels:
+                            if 'log' in channel.name.lower():
+                                bot.config['log_channel'] = channel.id
+                                await bot.save_config(guild.id)
+                                break
+                
+                notification_channel_id = bot.config.get('notification_channel')
+                if notification_channel_id:
+                    notify_channel = bot.get_channel(int(notification_channel_id))
+                    if not notify_channel:
+                        logger.error(f"Canal de notificações (ID: {notification_channel_id}) não encontrado - criando fallback")
+                        # Tentar encontrar um canal padrão
+                        for channel in guild.text_channels:
+                            if 'geral' in channel.name.lower() or 'notif' in channel.name.lower():
+                                bot.config['notification_channel'] = channel.id
+                                await bot.save_config(guild.id)
+                                break
+
+            except Exception as e:
+                logger.error(f"Erro durante a validação de canais no on_ready para a guilda {guild.name}: {e}", exc_info=True)
+        
+        try:
+            embed = discord.Embed(
+                title="✅ Bot de Controle de Atividades Online",
+                description=f"Conectado como {bot.user.mention}",
+                color=discord.Color.green(),
+                timestamp=datetime.now(bot.timezone))
+            embed.add_field(name="Servidores", value=str(len(bot.guilds)), inline=True)
+            embed.add_field(name="Latência", value=f"{round(bot.latency * 1000)}ms", inline=True)
+            embed.set_thumbnail(url=bot.user.display_avatar.url)
+            embed.set_footer(text="Sistema de Controle de Atividades - Operacional")
+            
+            await bot.log_action(None, None, embed=embed)
+        except Exception as e:
+            logger.error(f"Erro ao enviar embed de inicialização no on_ready: {e}", exc_info=True)
+        
+    except Exception as e:
+        logger.error(f"Erro crítico no on_ready: {e}", exc_info=True)
+
+@bot.event
+async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    if member.bot:
+        return
+
+    try:
+        # Verificar se o banco de dados está inicializado
+        if not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
+            logger.error("Banco de dados não inicializado - pulando evento de voz")
+            return
+            
+        # Extrair informações necessárias dos estados de voz
+        before_channel_id = before.channel.id if before.channel else None
+        after_channel_id = after.channel.id if after.channel else None
+        
+        # Salvar o evento no banco de dados com timestamp UTC
+        await bot.db.save_pending_voice_event(
+            'voice_state_update',
+            member.id,
+            member.guild.id,
+            before_channel_id,
+            after_channel_id,
+            before.self_deaf,
+            before.deaf,
+            after.self_deaf,
+            after.deaf
+        )
+        
+        # Enfileirar para processamento normal
+        await bot.voice_event_queue.put(('voice_state_update', member, before, after))
+    except asyncio.QueueFull:
+        logger.warning("Fila de eventos de voz cheia - evento será processado na próxima inicialização")
+    except Exception as e:
+        logger.error(f"Erro ao enfileirar evento de voz: {e}")
+
+# Importar comandos
+from bot_commands import *
+
+async def main():
+    load_dotenv()
+    DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
+    
+    # Adicionar delay antes de conectar
+    await asyncio.sleep(5)  # Espera 5 segundos antes de tentar conectar
+    
+    # Tentar inicializar o banco de dados antes de iniciar o bot
+    try:
+        if not hasattr(bot, 'initialize_db'):
+            raise AttributeError("Método initialize_db não encontrado na classe InactivityBot")
+            
+        db_initialized = await bot.initialize_db()
+        if not db_initialized:
+            logger.critical("Falha ao inicializar o banco de dados - encerrando")
+            return
+            
+    except Exception as e:
+        logger.critical(f"Falha crítica ao inicializar o banco de dados: {e}")
+        return
+        
+    async with bot:
+        try:
+            await bot.start(DISCORD_TOKEN)
+        except Exception as e:
+            logger.critical(f"Erro ao iniciar o bot: {e}")
+
+if __name__ == '__main__':
+    asyncio.run(main())
