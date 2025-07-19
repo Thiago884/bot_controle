@@ -316,12 +316,27 @@ class InactivityBot(commands.Bot):
             except discord.HTTPException as e:
                 self._connection_attempts += 1
                 if e.status == 429:  # Rate limited
-                    retry_after = e.retry_after
-                    logger.warning(
-                        f"Rate limit ao conectar. O Discord pediu para esperar {retry_after:.2f} segundos. "
-                        f"Tentativa {self._connection_attempts}/{self._max_connection_attempts}"
-                    )
+                    # FIX: Check if 'retry_after' exists, as Cloudflare's 429 response might not have it.
+                    if hasattr(e, 'retry_after') and e.retry_after:
+                        retry_after = e.retry_after
+                        logger.warning(
+                            f"Rate limit da API do Discord ao conectar. Esperando {retry_after:.2f} segundos. "
+                            f"Tentativa {self._connection_attempts}/{self._max_connection_attempts}"
+                        )
+                    else:
+                        # Fallback for Cloudflare rate limits (Error 1015) which don't have 'retry_after'
+                        retry_after = self._connection_delay * (2 ** self._connection_attempts)
+                        logger.warning(
+                            f"Rate limit do Cloudflare (Erro 1015) ao conectar. Sem 'retry_after'. "
+                            f"Usando backoff exponencial e esperando {retry_after}s. "
+                            f"Tentativa {self._connection_attempts}/{self._max_connection_attempts}"
+                        )
+                    
+                    if self._connection_attempts >= self._max_connection_attempts:
+                        logger.critical("Máximo de tentativas de conexão atingido devido a rate limits. Desistindo.", exc_info=False)
+                        raise
                     await asyncio.sleep(retry_after)
+
                 else:
                     wait_time = self._connection_delay * (2 ** self._connection_attempts)
                     logger.error(
