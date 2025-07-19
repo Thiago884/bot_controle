@@ -441,7 +441,7 @@ class InactivityBot(commands.Bot):
                     if monitoring_period:
                         await self.db.sync_task_periods(monitoring_period)
             
-            self._last_config_save = datetime.now(pytz.utc)
+            self._last_config_save = datetime.now(pytz.UTC)
         except Exception as e:
             logger.error(f"Erro ao salvar configuração: {e}")
 
@@ -515,53 +515,37 @@ class InactivityBot(commands.Bot):
                 for guild in self.guilds:
                     for voice_channel in guild.voice_channels:
                         for member in voice_channel.members:
+                            if member.bot:
+                                continue
+                                
                             audio_key = (member.id, guild.id)
-                            if audio_key in self.active_sessions:
-                                current_audio_state = member.voice.self_deaf or member.voice.deaf
+                            current_audio_state = member.voice.self_deaf or member.voice.deaf
+                            
+                            # Se não há sessão ativa, criar uma
+                            if audio_key not in self.active_sessions:
+                                self.active_sessions[audio_key] = {
+                                    'start_time': datetime.now(pytz.UTC),
+                                    'last_audio_time': datetime.now(pytz.UTC),
+                                    'audio_disabled': current_audio_state,
+                                    'total_audio_off_time': 0,
+                                    'estimated': False
+                                }
+                                continue
                                 
-                                if current_audio_state and not self.active_sessions[audio_key]['audio_disabled']:
-                                    self.active_sessions[audio_key]['audio_disabled'] = True
-                                    self.active_sessions[audio_key]['audio_off_time'] = datetime.now(pytz.utc)
-                                    
-                                    time_in_voice = (datetime.now(pytz.utc) - self.active_sessions[audio_key]['start_time']).total_seconds()
-                                    embed = discord.Embed(
-                                        title="🔇 Áudio Desativado (Verificação Periódica)",
-                                        color=discord.Color.orange(),
-                                        timestamp=datetime.now(self.timezone))
-                                    embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
-                                    embed.add_field(name="Usuário", value=member.mention, inline=True)
-                                    embed.add_field(name="Canal", value=voice_channel.name, inline=True)
-                                    embed.add_field(name="Tempo em voz", value=f"{int(time_in_voice//60)} minutos {int(time_in_voice%60)} segundos", inline=False)
-                                    embed.set_footer(text=f"ID: {member.id}")
-                                    
-                                    await self.log_action(None, None, embed=embed)
+                            # Verificar mudanças no estado de áudio
+                            if current_audio_state and not self.active_sessions[audio_key]['audio_disabled']:
+                                # Áudio foi desligado
+                                self.active_sessions[audio_key]['audio_disabled'] = True
+                                self.active_sessions[audio_key]['audio_off_time'] = datetime.now(pytz.UTC)
                                 
-                                elif not current_audio_state and self.active_sessions[audio_key]['audio_disabled']:
-                                    self.active_sessions[audio_key]['audio_disabled'] = False
-                                    if 'audio_off_time' in self.active_sessions[audio_key]:
-                                        audio_off_duration = (datetime.now(pytz.utc) - self.active_sessions[audio_key]['audio_off_time']).total_seconds()
-                                        self.active_sessions[audio_key]['total_audio_off_time'] = \
-                                            self.active_sessions[audio_key].get('total_audio_off_time', 0) + audio_off_duration
-                                        del self.active_sessions[audio_key]['audio_off_time']
-                                        
-                                        total_time = (datetime.now(pytz.utc) - self.active_sessions[audio_key]['start_time']).total_seconds()
-                                        embed = discord.Embed(
-                                            title="🔊 Áudio Reativado (Verificação Periódica)",
-                                            color=discord.Color.green(),
-                                            timestamp=datetime.now(self.timezone))
-                                        embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
-                                        embed.add_field(name="Usuário", value=member.mention, inline=True)
-                                        embed.add_field(name="Canal", value=voice_channel.name, inline=True)
-                                        embed.add_field(name="Tempo sem áudio", 
-                                                      value=f"{int(audio_off_duration//60)} minutos {int(audio_off_duration%60)} segundos", 
-                                                      inline=True)
-                                        embed.add_field(name="Tempo total em voz", 
-                                                      value=f"{int(total_time//60)} minutos {int(total_time%60)} segundos", 
-                                                      inline=True)
-                                        embed.set_footer(text=f"ID: {member.id}")
-                                        
-                                        await self.log_action(None, None, embed=embed)
-                
+                            elif not current_audio_state and self.active_sessions[audio_key]['audio_disabled']:
+                                # Áudio foi ligado
+                                self.active_sessions[audio_key]['audio_disabled'] = False
+                                if 'audio_off_time' in self.active_sessions[audio_key]:
+                                    audio_off_duration = (datetime.now(pytz.UTC) - self.active_sessions[audio_key]['audio_off_time']).total_seconds()
+                                    self.active_sessions[audio_key]['total_audio_off_time'] += audio_off_duration
+                                    del self.active_sessions[audio_key]['audio_off_time']
+            
                 await asyncio.sleep(30)
             except Exception as e:
                 logger.error(f"Erro ao verificar estados de áudio: {e}")
@@ -623,7 +607,7 @@ class InactivityBot(commands.Bot):
                         )
                 
                 if (self._last_config_save is None or 
-                    (datetime.now(pytz.utc) - self._last_config_save).total_seconds() > self._config_save_interval):
+                    (datetime.now(pytz.UTC) - self._last_config_save).total_seconds() > self._config_save_interval):
                     await self.save_config()
                 
                 await asyncio.sleep(self._health_check_interval)
@@ -728,7 +712,7 @@ class InactivityBot(commands.Bot):
                     if before.channel is not None and after.channel is None:
                         # Ajustar o tempo inicial para refletir melhor a realidade
                         estimated_start = self.active_sessions[audio_key]['start_time']
-                        actual_start = max(estimated_start, datetime.now(pytz.utc) - timedelta(hours=1))  # No máximo 1 hora
+                        actual_start = max(estimated_start, datetime.now(pytz.UTC) - timedelta(hours=1))  # No máximo 1 hora
                         self.active_sessions[audio_key]['start_time'] = actual_start
                         self.active_sessions[audio_key]['estimated'] = False  # Não é mais estimada
                 
@@ -754,8 +738,8 @@ class InactivityBot(commands.Bot):
             await self.db.log_voice_join(member.id, member.guild.id)
             
             self.active_sessions[(member.id, member.guild.id)] = {
-                'start_time': datetime.now(pytz.utc),
-                'last_audio_time': datetime.now(pytz.utc),
+                'start_time': datetime.now(pytz.UTC),
+                'last_audio_time': datetime.now(pytz.UTC),
                 'audio_disabled': after.self_deaf or after.deaf,
                 'total_audio_off_time': 0,
                 'estimated': False  # Nova flag para indicar sessões estimadas
@@ -764,7 +748,7 @@ class InactivityBot(commands.Bot):
             embed = discord.Embed(
                 title="🎤 Entrou em Voz",
                 color=discord.Color.green(),
-                timestamp=datetime.now(self.timezone))
+                timestamp=datetime.now(pytz.UTC))
             embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
             embed.add_field(name="Usuário", value=member.mention, inline=True)
             embed.add_field(name="Canal", value=after.channel.name, inline=True)
@@ -785,67 +769,54 @@ class InactivityBot(commands.Bot):
 
     async def _handle_voice_leave(self, member, before):
         session_data = self.active_sessions.get((member.id, member.guild.id))
-        if session_data:
+        if not session_data:
+            return
+
+        try:
+            # Calcular tempo total e tempo sem áudio
+            now = datetime.now(pytz.UTC)
+            total_time = (now - session_data['start_time']).total_seconds()
+            audio_off_time = session_data.get('total_audio_off_time', 0)
+            
+            # Adicionar tempo atual se o áudio estava desligado
+            if session_data.get('audio_disabled') and 'audio_off_time' in session_data:
+                audio_off_duration = (now - session_data['audio_off_time']).total_seconds()
+                audio_off_time += audio_off_duration
+            
+            # Calcular tempo efetivo (total - tempo sem áudio)
+            effective_time = max(0, total_time - audio_off_time)
+            
+            # Registrar saída no banco de dados
             try:
-                # Verificar se a sessão está pausada (usuário estava na sala de ausência)
-                if session_data.get('paused'):
-                    # Não registrar saída, apenas limpar a sessão pausada
-                    self.active_sessions.pop((member.id, member.guild.id), None)
-                    return
-                    
-                # Verificar se é uma sessão estimada e expirou
-                if session_data.get('estimated') and 'max_estimated_time' in session_data:
-                    if datetime.now(pytz.utc) > session_data['max_estimated_time']:
-                        # Sessão estimada expirou - não registrar
-                        self.active_sessions.pop((member.id, member.guild.id), None)
-                        return
-                
-                # Verificar se o canal existe antes de acessar o nome
-                channel_name = before.channel.name if before.channel else "Canal desconhecido"
-                
-                total_time = (datetime.now(pytz.utc) - session_data['start_time']).total_seconds()
-                audio_off_time = session_data.get('total_audio_off_time', 0)
-                
-                if session_data.get('audio_disabled'):
-                    audio_off_duration = (datetime.now(pytz.utc) - session_data.get('audio_off_time', session_data['start_time'])).total_seconds()
-                    audio_off_time += audio_off_duration
-                
-                effective_time = total_time - audio_off_time
-                
-                # Registrar saída no banco de dados mesmo que o tempo seja menor que o requerido
-                try:
-                    await self.db.log_voice_leave(member.id, member.guild.id, int(effective_time))
-                except Exception as e:
-                    logger.error(f"Erro ao registrar saída de voz: {e}")
-                    await self.log_action(
-                        "Erro DB - Saída de voz",
-                        member,
-                        str(e))
-                
-                embed = discord.Embed(
-                    title="🚪 Saiu de Voz",
-                    color=discord.Color.blue(),
-                    timestamp=datetime.now(self.timezone))
-                embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
-                embed.add_field(name="Usuário", value=member.mention, inline=True)
-                embed.add_field(name="Canal", value=channel_name, inline=True)
-                embed.add_field(name="Tempo Efetivo", 
-                              value=f"{int(effective_time//60)} minutos {int(effective_time%60)} segundos", 
-                              inline=True)
-                embed.add_field(name="Tempo sem Áudio", 
-                              value=f"{int(audio_off_time//60)} minutos {int(audio_off_time%60)} segundos", 
-                              inline=True)
-                embed.set_footer(text=f"ID: {member.id}")
-                
-                await self.log_action(None, None, embed=embed)
-                
-            except KeyError as e:
-                logger.warning(f"Chave não encontrada em session_data: {e}")
+                await self.db.log_voice_leave(member.id, member.guild.id, int(effective_time))
             except Exception as e:
-                logger.error(f"Erro ao processar saída de voz: {e}")
-            finally:
-                # Garantir que a sessão seja removida mesmo em caso de erro
-                self.active_sessions.pop((member.id, member.guild.id), None)
+                logger.error(f"Erro ao registrar saída de voz: {e}")
+                await self.log_action("Erro DB - Saída de voz", member, str(e))
+            
+            # Logar a saída
+            channel_name = before.channel.name if before.channel else "Canal desconhecido"
+            embed = discord.Embed(
+                title="🚪 Saiu de Voz",
+                color=discord.Color.blue(),
+                timestamp=now)
+            embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
+            embed.add_field(name="Usuário", value=member.mention, inline=True)
+            embed.add_field(name="Canal", value=channel_name, inline=True)
+            embed.add_field(name="Tempo Efetivo", 
+                          value=f"{int(effective_time//60)} minutos {int(effective_time%60)} segundos", 
+                          inline=True)
+            embed.add_field(name="Tempo sem Áudio", 
+                          value=f"{int(audio_off_time//60)} minutos {int(audio_off_time%60)} segundos", 
+                          inline=True)
+            embed.set_footer(text=f"ID: {member.id}")
+            
+            await self.log_action(None, None, embed=embed)
+            
+        except Exception as e:
+            logger.error(f"Erro ao processar saída de voz: {e}")
+        finally:
+            # Garantir que a sessão seja removida
+            self.active_sessions.pop((member.id, member.guild.id), None)
 
     async def _handle_voice_move(self, member, before, after, absence_channel_id):
         audio_key = (member.id, member.guild.id)
@@ -854,17 +825,17 @@ class InactivityBot(commands.Bot):
             # Movendo para a sala de ausência - pausar a sessão em vez de encerrar
             if audio_key in self.active_sessions:
                 # Calcular tempo até agora
-                current_duration = (datetime.now(pytz.utc) - self.active_sessions[audio_key]['start_time']).total_seconds()
+                current_duration = (datetime.now(pytz.UTC) - self.active_sessions[audio_key]['start_time']).total_seconds()
                 
                 # Pausar a sessão mantendo os dados atuais
                 self.active_sessions[audio_key]['paused'] = True
-                self.active_sessions[audio_key]['paused_time'] = datetime.now(pytz.utc)
+                self.active_sessions[audio_key]['paused_time'] = datetime.now(pytz.UTC)
                 self.active_sessions[audio_key]['pre_pause_duration'] = current_duration
                 
                 embed = discord.Embed(
                     title="⏸ Sessão Pausada (Ausência)",
                     color=discord.Color.light_grey(),
-                    timestamp=datetime.now(self.timezone))
+                    timestamp=datetime.now(pytz.UTC))
                 embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
                 embed.add_field(name="Usuário", value=member.mention, inline=True)
                 embed.add_field(name="De", value=before.channel.name, inline=True)
@@ -880,10 +851,10 @@ class InactivityBot(commands.Bot):
             # Voltando da sala de ausência - retomar a sessão
             if audio_key in self.active_sessions and self.active_sessions[audio_key].get('paused'):
                 # Calcular tempo pausado
-                pause_duration = (datetime.now(pytz.utc) - self.active_sessions[audio_key]['paused_time']).total_seconds()
+                pause_duration = (datetime.now(pytz.UTC) - self.active_sessions[audio_key]['paused_time']).total_seconds()
                 
                 # Retomar a sessão
-                self.active_sessions[audio_key]['start_time'] = datetime.now(pytz.utc) - timedelta(
+                self.active_sessions[audio_key]['start_time'] = datetime.now(pytz.UTC) - timedelta(
                     seconds=self.active_sessions[audio_key]['pre_pause_duration'])
                 del self.active_sessions[audio_key]['paused']
                 del self.active_sessions[audio_key]['paused_time']
@@ -892,7 +863,7 @@ class InactivityBot(commands.Bot):
                 embed = discord.Embed(
                     title="▶️ Sessão Retomada (Voltou)",
                     color=discord.Color.green(),
-                    timestamp=datetime.now(self.timezone))
+                    timestamp=datetime.now(pytz.UTC))
                 embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
                 embed.add_field(name="Usuário", value=member.mention, inline=True)
                 embed.add_field(name="De", value=before.channel.name, inline=True)
@@ -910,7 +881,7 @@ class InactivityBot(commands.Bot):
                 embed = discord.Embed(
                     title="🔄 Movido entre Canais",
                     color=discord.Color.light_grey(),
-                    timestamp=datetime.now(self.timezone))
+                    timestamp=datetime.now(pytz.UTC))
                 embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
                 embed.add_field(name="De", value=before.channel.name, inline=True)
                 embed.add_field(name="Para", value=after.channel.name, inline=True)
@@ -919,30 +890,57 @@ class InactivityBot(commands.Bot):
 
     async def _handle_audio_change(self, member, before, after):
         audio_key = (member.id, member.guild.id)
+        
+        # Se não há sessão ativa e o usuário está em um canal, criar uma
+        if audio_key not in self.active_sessions and after.channel is not None:
+            await self._handle_voice_join(member, after)
+            return
+
         if audio_key not in self.active_sessions:
-            if after.channel is not None:
-                await self._handle_voice_join(member, after)
             return
 
         audio_was_off = before.self_deaf or before.deaf
         audio_is_off = after.self_deaf or after.deaf
 
-        if audio_was_off and not audio_is_off:
+        # Se o áudio foi desligado
+        if not audio_was_off and audio_is_off:
+            self.active_sessions[audio_key]['audio_disabled'] = True
+            self.active_sessions[audio_key]['audio_off_time'] = datetime.now(pytz.UTC)  # Usar UTC consistentemente
+            
+            time_in_voice = (datetime.now(pytz.UTC) - self.active_sessions[audio_key]['start_time']).total_seconds()
+            
+            embed = discord.Embed(
+                title="🔇 Áudio Desativado",
+                color=discord.Color.orange(),
+                timestamp=datetime.now(pytz.UTC))
+            embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
+            embed.add_field(name="Usuário", value=member.mention, inline=True)
+            embed.add_field(name="Canal", value=after.channel.name if after.channel else "Desconhecido", inline=True)
+            embed.add_field(name="Tempo em voz", 
+                          value=f"{int(time_in_voice//60)} minutos {int(time_in_voice%60)} segundos", 
+                          inline=False)
+            embed.set_footer(text=f"ID: {member.id}")
+            
+            await self.log_action(None, None, embed=embed)
+        
+        # Se o áudio foi reativado
+        elif audio_was_off and not audio_is_off:
             self.active_sessions[audio_key]['audio_disabled'] = False
             if 'audio_off_time' in self.active_sessions[audio_key]:
-                audio_off_duration = (datetime.now(pytz.utc) - self.active_sessions[audio_key]['audio_off_time']).total_seconds()
+                audio_off_duration = (datetime.now(pytz.UTC) - self.active_sessions[audio_key]['audio_off_time']).total_seconds()
                 self.active_sessions[audio_key]['total_audio_off_time'] = \
                     self.active_sessions[audio_key].get('total_audio_off_time', 0) + audio_off_duration
                 del self.active_sessions[audio_key]['audio_off_time']
                 
-                total_time = (datetime.now(pytz.utc) - self.active_sessions[audio_key]['start_time']).total_seconds()
+                total_time = (datetime.now(pytz.UTC) - self.active_sessions[audio_key]['start_time']).total_seconds()
+                
                 embed = discord.Embed(
                     title="🔊 Áudio Reativado",
                     color=discord.Color.green(),
-                    timestamp=datetime.now(self.timezone))
+                    timestamp=datetime.now(pytz.UTC))
                 embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
                 embed.add_field(name="Usuário", value=member.mention, inline=True)
-                embed.add_field(name="Canal", value=after.channel.name, inline=True)
+                embed.add_field(name="Canal", value=after.channel.name if after.channel else "Desconhecido", inline=True)
                 embed.add_field(name="Tempo sem áudio", 
                               value=f"{int(audio_off_duration//60)} minutos {int(audio_off_duration%60)} segundos", 
                               inline=True)
@@ -952,25 +950,6 @@ class InactivityBot(commands.Bot):
                 embed.set_footer(text=f"ID: {member.id}")
                 
                 await self.log_action(None, None, embed=embed)
-        
-        elif not audio_was_off and audio_is_off:
-            self.active_sessions[audio_key]['audio_disabled'] = True
-            self.active_sessions[audio_key]['audio_off_time'] = datetime.now(pytz.utc)
-            
-            time_in_voice = (datetime.now(pytz.utc) - self.active_sessions[audio_key]['start_time']).total_seconds()
-            embed = discord.Embed(
-                title="🔇 Áudio Desativado",
-                color=discord.Color.orange(),
-                timestamp=datetime.now(self.timezone))
-            embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
-            embed.add_field(name="Usuário", value=member.mention, inline=True)
-            embed.add_field(name="Canal", value=after.channel.name, inline=True)
-            embed.add_field(name="Tempo em voz", 
-                          value=f"{int(time_in_voice//60)} minutos {int(time_in_voice%60)} segundos", 
-                          inline=False)
-            embed.set_footer(text=f"ID: {member.id}")
-            
-            await self.log_action(None, None, embed=embed)
 
     async def process_voice_events(self):
         """Processa eventos de voz da fila"""
@@ -1021,7 +1000,7 @@ class InactivityBot(commands.Bot):
                 embed = discord.Embed(
                     title=f"{icon} {action}",
                     color=color,
-                    timestamp=datetime.now(self.timezone))
+                    timestamp=datetime.now(pytz.UTC))
                 
                 if member is not None:
                     embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
@@ -1060,14 +1039,14 @@ class InactivityBot(commands.Bot):
                     title="⚠️ Aviso do Sistema",
                     description=message,
                     color=discord.Color.gold(),
-                    timestamp=datetime.now(self.timezone))
+                    timestamp=datetime.now(pytz.UTC))
                 priority = "high"
             else:
                 embed = discord.Embed(
                     title="ℹ️ Notificação",
                     description=message,
                     color=discord.Color.blue(),
-                    timestamp=datetime.now(self.timezone))
+                    timestamp=datetime.now(pytz.UTC))
                 priority = "normal"
             
             await self.message_queue.put((
@@ -1137,7 +1116,7 @@ class InactivityBot(commands.Bot):
                 title=title,
                 description=message,
                 color=color,
-                timestamp=datetime.now(self.timezone))
+                timestamp=datetime.now(pytz.UTC))
             
             if member.guild.icon:
                 embed.set_author(name=member.guild.name, icon_url=member.guild.icon.url)
@@ -1238,7 +1217,7 @@ async def on_ready():
                 report_metrics, health_check, check_missed_periods,
                 check_previous_periods, process_pending_voice_events,
                 check_current_voice_members, detect_missing_voice_leaves,
-                register_role_assignments, cleanup_ghost_sessions  # Nova task adicionada
+                register_role_assignments, cleanup_ghost_sessions
             )
             
             # Primeiro verificar períodos perdidos
@@ -1263,7 +1242,8 @@ async def on_ready():
             bot.loop.create_task(process_pending_voice_events(), name='process_pending_voice_events')
             bot.loop.create_task(check_current_voice_members(), name='check_current_voice_members')
             bot.loop.create_task(detect_missing_voice_leaves(), name='detect_missing_voice_leaves')
-            bot.loop.create_task(cleanup_ghost_sessions(), name='cleanup_ghost_sessions')  # Nova task
+            bot.loop.create_task(cleanup_ghost_sessions(), name='ghost_session_cleanup')
+            bot.loop.create_task(register_role_assignments(), name='register_role_assignments_wrapper')
             
             bot.voice_event_processor_task = bot.loop.create_task(bot.process_voice_events(), name='voice_event_processor')
             bot.queue_processor_task = bot.loop.create_task(bot.process_queues(), name='queue_processor')

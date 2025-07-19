@@ -1785,6 +1785,19 @@ async def cleanup_ghost_sessions():
     try:
         logger.info("Iniciando limpeza de sessões fantasmas...")
         
+        # Limpar sessões estimadas que excederam o tempo máximo
+        now = datetime.now(pytz.UTC)
+        to_remove = []
+        
+        for key, session in bot.active_sessions.items():
+            if session.get('estimated') and 'max_estimated_time' in session:
+                if now > session['max_estimated_time']:
+                    to_remove.append(key)
+        
+        for key in to_remove:
+            bot.active_sessions.pop(key, None)
+            logger.info(f"Removida sessão estimada expirada para usuário {key[0]} na guild {key[1]}")
+        
         # Encontrar sessões onde last_voice_join > last_voice_leave há mais de 24 horas
         async with bot.db.pool.acquire() as conn:
             ghost_sessions = await conn.fetch('''
