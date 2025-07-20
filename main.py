@@ -836,8 +836,8 @@ class InactivityBot(commands.Bot):
             total_time = (now - session_data['start_time']).total_seconds()
             audio_off_time = session_data.get('total_audio_off_time', 0)
             
-            # Adicionar tempo atual se o áudio estava desligado
-            if session_data.get('audio_disabled') and 'audio_off_time' in session_data:
+            # Verificar se o áudio estava desligado e calcular o tempo
+            if 'audio_off_time' in session_data:
                 audio_off_duration = (now - session_data['audio_off_time']).total_seconds()
                 audio_off_time += audio_off_duration
             
@@ -1357,7 +1357,7 @@ async def on_ready():
             bot.loop.create_task(cleanup_ghost_sessions(), name='ghost_session_cleanup')
             bot.loop.create_task(register_role_assignments(), name='register_role_assignments_wrapper')
             
-            bot.voice_event_processor_task = bot.loop.create_task(bot.process_voice_events(), name='voice_event_processor')
+            # Apenas a queue_processor_task é criada aqui, conforme solicitado
             bot.queue_processor_task = bot.loop.create_task(bot.process_queues(), name='queue_processor')
             bot.pool_monitor_task = bot.loop.create_task(bot.monitor_db_pool(), name='db_pool_monitor')
             bot.health_check_task = bot.loop.create_task(bot.periodic_health_check(), name='periodic_health_check')

@@ -1668,37 +1668,30 @@ async def check_current_voice_members():
                         
                     audio_key = (member.id, guild.id)
                     
-                    # Verificar se já temos uma sessão ativa para este membro
-                    if audio_key not in bot.active_sessions:
-                        # Verificar no banco de dados se há uma sessão não encerrada
-                        last_activity = await bot.db.get_user_activity(member.id, guild.id)
+                    # Se já existe sessão ativa, pular
+                    if audio_key in bot.active_sessions:
+                        continue
                         
-                        if last_activity and last_activity.get('last_voice_join') and \
-                           (not last_activity.get('last_voice_leave') or 
-                            last_activity['last_voice_join'] > last_activity['last_voice_leave']):
-                            # Já existe uma sessão não encerrada no banco - não criar nova
-                            continue
-                            
-                        # Criar uma sessão estimada com tempo máximo de 1 hora
-                        max_estimated_duration = timedelta(hours=1)
-                        estimated_start = datetime.now(pytz.UTC) - timedelta(minutes=5)
-                        
-                        bot.active_sessions[audio_key] = {
-                            'start_time': estimated_start,
-                            'last_audio_time': datetime.now(pytz.UTC),
-                            'audio_disabled': member.voice.self_deaf or member.voice.deaf,
-                            'total_audio_off_time': 0,
-                            'estimated': True,
-                            'max_estimated_time': estimated_start + max_estimated_duration
-                        }
-                        
-                        logger.info(f"Sessão estimada criada para {member.display_name} no canal {voice_channel.name}")
-                        
-                        # Registrar como entrada no banco de dados
-                        try:
-                            await bot.db.log_voice_join(member.id, guild.id)
-                        except Exception as e:
-                            logger.error(f"Erro ao registrar entrada estimada: {e}")
+                    # Criar sessão com tempo máximo de 5 minutos (estimativa conservadora)
+                    max_estimated_duration = timedelta(minutes=5)
+                    estimated_start = datetime.now(pytz.UTC) - max_estimated_duration
+                    
+                    bot.active_sessions[audio_key] = {
+                        'start_time': estimated_start,
+                        'last_audio_time': datetime.now(pytz.UTC),
+                        'audio_disabled': member.voice.self_deaf or member.voice.deaf,
+                        'total_audio_off_time': 0,
+                        'estimated': True,
+                        'max_estimated_time': datetime.now(pytz.UTC) + max_estimated_duration
+                    }
+                    
+                    logger.info(f"Sessão estimada criada para {member.display_name} no canal {voice_channel.name}")
+                    
+                    # Registrar como entrada no banco de dados
+                    try:
+                        await bot.db.log_voice_join(member.id, guild.id)
+                    except Exception as e:
+                        logger.error(f"Erro ao registrar entrada estimada: {e}")
         
         logger.info("Verificação de membros em canais de voz concluída")
         
@@ -1798,6 +1791,12 @@ async def cleanup_ghost_sessions():
             if session.get('estimated') and 'max_estimated_time' in session:
                 if now > session['max_estimated_time']:
                     to_remove.append(key)
+                    # Registrar saída no banco de dados
+                    try:
+                        duration = (session['max_estimated_time'] - session['start_time']).total_seconds()
+                        await bot.db.log_voice_leave(key[0], key[1], int(duration))
+                    except Exception as e:
+                        logger.error(f"Erro ao registrar saída estimada: {e}")
         
         for key in to_remove:
             bot.active_sessions.pop(key, None)
