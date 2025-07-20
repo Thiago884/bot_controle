@@ -886,7 +886,7 @@ class InactivityBot(commands.Bot):
             after.channel.id == absence_channel_id):
             
             if audio_key in self.active_sessions:
-                current_duration = (datetime.now(pytz.UTC) - self.active_sessions[audio_key]['start_time']).total_seconds()
+                current_duration = (datetime.now(pytz.UTC)) - self.active_sessions[audio_key]['start_time'].total_seconds()
                 
                 self.active_sessions[audio_key].update({
                     'paused': True,
@@ -914,31 +914,35 @@ class InactivityBot(commands.Bot):
         elif (before.channel is not None and 
               after.channel is None):
             
-            # Se estava na ausência, tratar como saída do canal original
+            # Se estava na ausência e tem sessão ativa
             if before.channel.id == absence_channel_id and audio_key in self.active_sessions:
                 # Obter o canal original antes de pausar
                 original_channel_id = self.active_sessions[audio_key].get('paused_channel_id')
                 original_channel = member.guild.get_channel(original_channel_id) if original_channel_id else None
                 
-                # Criar estado de voz fictício completo
-                before_state_data = {
-                    'channel_id': original_channel.id if original_channel else before.channel.id,
-                    'self_deaf': before.self_deaf,
-                    'deaf': before.deaf,
-                    'self_mute': before.self_mute,
-                    'mute': before.mute,
-                    'self_stream': False,
-                    'self_video': False,
-                    'suppress': False,
-                    'requested_to_speak_at': None
-                }
-                
-                before_state = discord.VoiceState(
-                    data=before_state_data,
-                    channel=original_channel if original_channel else before.channel
-                )
-                
-                await self._handle_voice_leave(member, before_state)
+                # Se encontrou o canal original, criar estado fictício
+                if original_channel:
+                    before_state_data = {
+                        'channel_id': original_channel.id,
+                        'self_deaf': before.self_deaf,
+                        'deaf': before.deaf,
+                        'self_mute': before.self_mute,
+                        'mute': before.mute,
+                        'self_stream': False,
+                        'self_video': False,
+                        'suppress': False,
+                        'requested_to_speak_at': None
+                    }
+                    
+                    before_state = discord.VoiceState(
+                        data=before_state_data,
+                        channel=original_channel
+                    )
+                    
+                    await self._handle_voice_leave(member, before_state)
+                else:
+                    # Se não encontrou o canal original, usar o canal de ausência
+                    await self._handle_voice_leave(member, before)
             else:
                 # Saída normal (não estava na ausência)
                 await self._handle_voice_leave(member, before)
@@ -950,7 +954,7 @@ class InactivityBot(commands.Bot):
               after.channel.id != absence_channel_id):
             
             if audio_key in self.active_sessions and self.active_sessions[audio_key].get('paused'):
-                pause_duration = (datetime.now(pytz.UTC) - self.active_sessions[audio_key]['paused_time']).total_seconds()
+                pause_duration = (datetime.now(pytz.UTC)) - self.active_sessions[audio_key]['paused_time'].total_seconds()
                 
                 # Restaurar tempo de sessão
                 self.active_sessions[audio_key]['start_time'] = datetime.now(pytz.UTC) - timedelta(
@@ -1019,7 +1023,7 @@ class InactivityBot(commands.Bot):
             self.active_sessions[audio_key]['audio_disabled'] = True
             self.active_sessions[audio_key]['audio_off_time'] = datetime.now(pytz.UTC)  # Usar UTC consistentemente
             
-            time_in_voice = (datetime.now(pytz.UTC) - self.active_sessions[audio_key]['start_time']).total_seconds()
+            time_in_voice = (datetime.now(pytz.UTC)) - self.active_sessions[audio_key]['start_time'].total_seconds()
             
             embed = discord.Embed(
                 title="🔇 Áudio Desativado",
