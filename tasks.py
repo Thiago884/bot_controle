@@ -1439,32 +1439,40 @@ async def process_member_previous_periods(member: discord.Member, guild: discord
         
         result['processed'] = 1
         
-        now = datetime.now(pytz.UTC)  # CORRIGIDO
+        now = datetime.now(pytz.UTC)
         
         # Obter todos os períodos verificados onde não cumpriu os requisitos
-        start_time = time.time()
-        async with bot.db.pool.acquire() as conn:
-            failed_periods = await conn.fetch('''
-                SELECT period_start, period_end 
-                FROM checked_periods
-                WHERE user_id = $1 AND guild_id = $2
-                AND meets_requirements = FALSE
-                AND period_end < $3  -- Apenas períodos já encerrados
-                ORDER BY period_start
-            ''', member.id, guild.id, now)
-        perf_metrics.record_db_query(time.time() - start_time)
+        try:
+            start_time = time.time()
+            async with bot.db.pool.acquire() as conn:
+                failed_periods = await conn.fetch('''
+                    SELECT period_start, period_end 
+                    FROM checked_periods
+                    WHERE user_id = $1 AND guild_id = $2
+                    AND meets_requirements = FALSE
+                    AND period_end < $3  -- Apenas períodos já encerrados
+                    ORDER BY period_start
+                ''', member.id, guild.id, now)
+            perf_metrics.record_db_query(time.time() - start_time)
+        except Exception as e:
+            logger.error(f"Erro ao buscar períodos falhos para {member}: {e}")
+            return result
         
         # Se houver períodos onde não cumpriu os requisitos
         if failed_periods:
             # Verificar se já teve cargos removidos para esses períodos
-            start_time = time.time()
-            async with bot.db.pool.acquire() as conn:
-                already_removed = await conn.fetch('''
-                    SELECT DISTINCT role_id 
-                    FROM removed_roles
-                    WHERE user_id = $1 AND guild_id = $2
-                ''', member.id, guild.id)
-            perf_metrics.record_db_query(time.time() - start_time)
+            try:
+                start_time = time.time()
+                async with bot.db.pool.acquire() as conn:
+                    already_removed = await conn.fetch('''
+                        SELECT DISTINCT role_id 
+                        FROM removed_roles
+                        WHERE user_id = $1 AND guild_id = $2
+                    ''', member.id, guild.id)
+                perf_metrics.record_db_query(time.time() - start_time)
+            except Exception as e:
+                logger.error(f"Erro ao verificar cargos já removidos para {member}: {e}")
+                return result
             
             already_removed_ids = {r['role_id'] for r in already_removed}
             
@@ -1519,7 +1527,8 @@ async def process_member_previous_periods(member: discord.Member, guild: discord
                             period['period_start'],
                             period['period_end']
                         )
-                        all_sessions.extend(sessions)
+                        if sessions:
+                            all_sessions.extend(sessions)
                     
                     report_file = await generate_activity_report(member, all_sessions)
                     
