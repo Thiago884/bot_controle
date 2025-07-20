@@ -1738,8 +1738,13 @@ async def detect_missing_voice_leaves():
                 
             # Verificar se o membro não está mais em um canal de voz
             if not member.voice or not member.voice.channel:
+                # Garantir que last_voice_join está com timezone
+                join_time = session['last_voice_join']
+                if join_time.tzinfo is None:
+                    join_time = join_time.replace(tzinfo=pytz.UTC)
+                
                 # Calcular duração estimada
-                duration = (datetime.now(pytz.UTC) - session['last_voice_join']).total_seconds()
+                duration = (datetime.now(pytz.UTC) - join_time).total_seconds()
                 
                 # Registrar saída no banco de dados
                 try:

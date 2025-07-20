@@ -825,56 +825,56 @@ class InactivityBot(commands.Bot):
                 str(e)
             )
 
-    async def _handle_voice_leave(self, member, before):
-        session_data = self.active_sessions.get((member.id, member.guild.id))
-        if not session_data:
-            return
+async def _handle_voice_leave(self, member, before):
+    session_data = self.active_sessions.get((member.id, member.guild.id))
+    if not session_data:
+        return
 
+    try:
+        # Calcular tempo total e tempo sem áudio
+        now = datetime.now(pytz.UTC)
+        total_time = (now - session_data['start_time']).total_seconds()  # Corrigido: chamada em timedelta
+        audio_off_time = session_data.get('total_audio_off_time', 0)
+        
+        # Verificar se o áudio estava desligado e calcular o tempo
+        if 'audio_off_time' in session_data:
+            audio_off_duration = (now - session_data['audio_off_time']).total_seconds()  # Corrigido
+            audio_off_time += audio_off_duration
+        
+        # Calcular tempo efetivo (total - tempo sem áudio)
+        effective_time = max(0, total_time - audio_off_time)
+        
+        # Registrar saída no banco de dados
         try:
-            # Calcular tempo total e tempo sem áudio
-            now = datetime.now(pytz.UTC)
-            total_time = (now - session_data['start_time']).total_seconds()
-            audio_off_time = session_data.get('total_audio_off_time', 0)
-            
-            # Verificar se o áudio estava desligado e calcular o tempo
-            if 'audio_off_time' in session_data:
-                audio_off_duration = (now - session_data['audio_off_time']).total_seconds()
-                audio_off_time += audio_off_duration
-            
-            # Calcular tempo efetivo (total - tempo sem áudio)
-            effective_time = max(0, total_time - audio_off_time)
-            
-            # Registrar saída no banco de dados
-            try:
-                await self.db.log_voice_leave(member.id, member.guild.id, int(effective_time))
-            except Exception as e:
-                logger.error(f"Erro ao registrar saída de voz: {e}")
-                await self.log_action("Erro DB - Saída de voz", member, str(e))
-            
-            # Logar a saída
-            channel_name = before.channel.name if before.channel else "Canal desconhecido"
-            embed = discord.Embed(
-                title="🚪 Saiu de Voz",
-                color=discord.Color.blue(),
-                timestamp=now)
-            embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
-            embed.add_field(name="Usuário", value=member.mention, inline=True)
-            embed.add_field(name="Canal", value=channel_name, inline=True)
-            embed.add_field(name="Tempo Efetivo", 
-                          value=f"{int(effective_time//60)} minutos {int(effective_time%60)} segundos", 
-                          inline=True)
-            embed.add_field(name="Tempo sem Áudio", 
-                          value=f"{int(audio_off_time//60)} minutos {int(audio_off_time%60)} segundos", 
-                          inline=True)
-            embed.set_footer(text=f"ID: {member.id}")
-            
-            await self.log_action(None, None, embed=embed)
-            
+            await self.db.log_voice_leave(member.id, member.guild.id, int(effective_time))
         except Exception as e:
-            logger.error(f"Erro ao processar saída de voz: {e}")
-        finally:
-            # Garantir que a sessão seja removida
-            self.active_sessions.pop((member.id, member.guild.id), None)
+            logger.error(f"Erro ao registrar saída de voz: {e}")
+            await self.log_action("Erro DB - Saída de voz", member, str(e))
+        
+        # Logar a saída
+        channel_name = before.channel.name if before.channel else "Canal desconhecido"
+        embed = discord.Embed(
+            title="🚪 Saiu de Voz",
+            color=discord.Color.blue(),
+            timestamp=now)
+        embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
+        embed.add_field(name="Usuário", value=member.mention, inline=True)
+        embed.add_field(name="Canal", value=channel_name, inline=True)
+        embed.add_field(name="Tempo Efetivo", 
+                      value=f"{int(effective_time//60)} minutos {int(effective_time%60)} segundos", 
+                      inline=True)
+        embed.add_field(name="Tempo sem Áudio", 
+                      value=f"{int(audio_off_time//60)} minutos {int(audio_off_time%60)} segundos", 
+                      inline=True)
+        embed.set_footer(text=f"ID: {member.id}")
+        
+        await self.log_action(None, None, embed=embed)
+        
+    except Exception as e:
+        logger.error(f"Erro ao processar saída de voz: {e}")
+    finally:
+        # Garantir que a sessão seja removida
+        self.active_sessions.pop((member.id, member.guild.id), None)
 
     async def _handle_voice_move(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState, absence_channel_id: int):
         audio_key = (member.id, member.guild.id)
