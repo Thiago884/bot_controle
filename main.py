@@ -876,131 +876,131 @@ class InactivityBot(commands.Bot):
             # Garantir que a sessão seja removida
             self.active_sessions.pop((member.id, member.guild.id), None)
 
-async def _handle_voice_move(self, member, before, after, absence_channel_id):
-    audio_key = (member.id, member.guild.id)
-    
-    # Caso 1: Entrando no canal de ausência a partir de outro canal
-    if (before.channel is not None and 
-        before.channel.id != absence_channel_id and 
-        after.channel is not None and 
-        after.channel.id == absence_channel_id):
+    async def _handle_voice_move(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState, absence_channel_id: int):
+        audio_key = (member.id, member.guild.id)
         
-        if audio_key in self.active_sessions:
-            current_duration = (datetime.now(pytz.UTC) - self.active_sessions[audio_key]['start_time']).total_seconds()
+        # Caso 1: Entrando no canal de ausência a partir de outro canal
+        if (before.channel is not None and 
+            before.channel.id != absence_channel_id and 
+            after.channel is not None and 
+            after.channel.id == absence_channel_id):
             
-            self.active_sessions[audio_key].update({
-                'paused': True,
-                'paused_time': datetime.now(pytz.UTC),
-                'pre_pause_duration': current_duration,
-                'paused_channel_id': before.channel.id  # Armazena o canal original
-            })
-            
-            embed = discord.Embed(
-                title="⏸ Sessão Pausada (Ausência)",
-                color=discord.Color.light_grey(),
-                timestamp=datetime.now(pytz.UTC))
-            embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
-            embed.add_field(name="Usuário", value=member.mention, inline=True)
-            embed.add_field(name="De", value=before.channel.name, inline=True)
-            embed.add_field(name="Para", value=after.channel.name, inline=True)
-            embed.add_field(name="Tempo Ativo", 
-                          value=f"{int(current_duration//60)} minutos {int(current_duration%60)} segundos", 
-                          inline=False)
-            embed.set_footer(text=f"ID: {member.id}")
-            
-            await self.log_action(None, None, embed=embed)
-    
-    # Caso 2: Saindo completamente do canal de voz (incluindo da ausência)
-    elif (before.channel is not None and 
-          after.channel is None):
+            if audio_key in self.active_sessions:
+                current_duration = (datetime.now(pytz.UTC) - self.active_sessions[audio_key]['start_time']).total_seconds()
+                
+                self.active_sessions[audio_key].update({
+                    'paused': True,
+                    'paused_time': datetime.now(pytz.UTC),
+                    'pre_pause_duration': current_duration,
+                    'paused_channel_id': before.channel.id  # Armazena o canal original
+                })
+                
+                embed = discord.Embed(
+                    title="⏸ Sessão Pausada (Ausência)",
+                    color=discord.Color.light_grey(),
+                    timestamp=datetime.now(pytz.UTC))
+                embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
+                embed.add_field(name="Usuário", value=member.mention, inline=True)
+                embed.add_field(name="De", value=before.channel.name, inline=True)
+                embed.add_field(name="Para", value=after.channel.name, inline=True)
+                embed.add_field(name="Tempo Ativo", 
+                              value=f"{int(current_duration//60)} minutos {int(current_duration%60)} segundos", 
+                              inline=False)
+                embed.set_footer(text=f"ID: {member.id}")
+                
+                await self.log_action(None, None, embed=embed)
         
-        # Se estava na ausência, tratar como saída do canal original
-        if before.channel.id == absence_channel_id and audio_key in self.active_sessions:
-            # Obter o canal original antes de pausar
-            original_channel_id = self.active_sessions[audio_key].get('paused_channel_id')
-            original_channel = member.guild.get_channel(original_channel_id) if original_channel_id else None
+        # Caso 2: Saindo completamente do canal de voz (incluindo da ausência)
+        elif (before.channel is not None and 
+              after.channel is None):
             
-            # Criar estado de voz fictício completo
-            before_state_data = {
-                'channel_id': original_channel.id if original_channel else before.channel.id,
-                'self_deaf': before.self_deaf,
-                'deaf': before.deaf,
-                'self_mute': before.self_mute,
-                'mute': before.mute,
-                'self_stream': False,
-                'self_video': False,
-                'suppress': False,
-                'requested_to_speak_at': None
-            }
-            
-            before_state = discord.VoiceState(
-                data=before_state_data,
-                channel=original_channel if original_channel else before.channel
-            )
-            
-            await self._handle_voice_leave(member, before_state)
-        else:
-            # Saída normal (não estava na ausência)
-            await self._handle_voice_leave(member, before)
-    
-    # Caso 3: Voltando da ausência para outro canal
-    elif (before.channel is not None and 
-          before.channel.id == absence_channel_id and 
-          after.channel is not None and 
-          after.channel.id != absence_channel_id):
+            # Se estava na ausência, tratar como saída do canal original
+            if before.channel.id == absence_channel_id and audio_key in self.active_sessions:
+                # Obter o canal original antes de pausar
+                original_channel_id = self.active_sessions[audio_key].get('paused_channel_id')
+                original_channel = member.guild.get_channel(original_channel_id) if original_channel_id else None
+                
+                # Criar estado de voz fictício completo
+                before_state_data = {
+                    'channel_id': original_channel.id if original_channel else before.channel.id,
+                    'self_deaf': before.self_deaf,
+                    'deaf': before.deaf,
+                    'self_mute': before.self_mute,
+                    'mute': before.mute,
+                    'self_stream': False,
+                    'self_video': False,
+                    'suppress': False,
+                    'requested_to_speak_at': None
+                }
+                
+                before_state = discord.VoiceState(
+                    data=before_state_data,
+                    channel=original_channel if original_channel else before.channel
+                )
+                
+                await self._handle_voice_leave(member, before_state)
+            else:
+                # Saída normal (não estava na ausência)
+                await self._handle_voice_leave(member, before)
         
-        if audio_key in self.active_sessions and self.active_sessions[audio_key].get('paused'):
-            pause_duration = (datetime.now(pytz.UTC) - self.active_sessions[audio_key]['paused_time']).total_seconds()
+        # Caso 3: Voltando da ausência para outro canal
+        elif (before.channel is not None and 
+              before.channel.id == absence_channel_id and 
+              after.channel is not None and 
+              after.channel.id != absence_channel_id):
             
-            # Restaurar tempo de sessão
-            self.active_sessions[audio_key]['start_time'] = datetime.now(pytz.UTC) - timedelta(
-                seconds=self.active_sessions[audio_key]['pre_pause_duration'])
-            
-            # Limpar estado pausado
-            for key in ['paused', 'paused_time', 'pre_pause_duration', 'paused_channel_id']:
-                self.active_sessions[audio_key].pop(key, None)
-            
-            embed = discord.Embed(
-                title="▶️ Sessão Retomada (Voltou)",
-                color=discord.Color.green(),
-                timestamp=datetime.now(pytz.UTC))
-            embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
-            embed.add_field(name="Usuário", value=member.mention, inline=True)
-            embed.add_field(name="De", value=before.channel.name, inline=True)
-            embed.add_field(name="Para", value=after.channel.name, inline=True)
-            embed.add_field(name="Tempo Pausado", 
-                          value=f"{int(pause_duration//60)} minutos {int(pause_duration%60)} segundos", 
-                          inline=False)
-            embed.set_footer(text=f"ID: {member.id}")
-            
-            await self.log_action(None, None, embed=embed)
-    
-    # Caso 4: Movimento entre outros canais (não envolvendo ausência)
-    elif (before.channel is not None and 
-          after.channel is not None and 
-          before.channel != after.channel and
-          before.channel.id != absence_channel_id and 
-          after.channel.id != absence_channel_id):
+            if audio_key in self.active_sessions and self.active_sessions[audio_key].get('paused'):
+                pause_duration = (datetime.now(pytz.UTC) - self.active_sessions[audio_key]['paused_time']).total_seconds()
+                
+                # Restaurar tempo de sessão
+                self.active_sessions[audio_key]['start_time'] = datetime.now(pytz.UTC) - timedelta(
+                    seconds=self.active_sessions[audio_key]['pre_pause_duration'])
+                
+                # Limpar estado pausado
+                for key in ['paused', 'paused_time', 'pre_pause_duration', 'paused_channel_id']:
+                    self.active_sessions[audio_key].pop(key, None)
+                
+                embed = discord.Embed(
+                    title="▶️ Sessão Retomada (Voltou)",
+                    color=discord.Color.green(),
+                    timestamp=datetime.now(pytz.UTC))
+                embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
+                embed.add_field(name="Usuário", value=member.mention, inline=True)
+                embed.add_field(name="De", value=before.channel.name, inline=True)
+                embed.add_field(name="Para", value=after.channel.name, inline=True)
+                embed.add_field(name="Tempo Pausado", 
+                              value=f"{int(pause_duration//60)} minutos {int(pause_duration%60)} segundos", 
+                              inline=False)
+                embed.set_footer(text=f"ID: {member.id}")
+                
+                await self.log_action(None, None, embed=embed)
         
-        if audio_key in self.active_sessions:
-            embed = discord.Embed(
-                title="🔄 Movido entre Canais",
-                color=discord.Color.light_grey(),
-                timestamp=datetime.now(pytz.UTC))
-            embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
-            embed.add_field(name="De", value=before.channel.name, inline=True)
-            embed.add_field(name="Para", value=after.channel.name, inline=True)
-            embed.set_footer(text=f"ID: {member.id}")
-            await self.log_action(None, None, embed=embed)
-    
-    # Caso 5: Mudança de estado no mesmo canal (ex: mute/deafen)
-    elif (before.channel is not None and 
-          after.channel is not None and 
-          before.channel == after.channel):
+        # Caso 4: Movimento entre outros canais (não envolvendo ausência)
+        elif (before.channel is not None and 
+              after.channel is not None and 
+              before.channel != after.channel and
+              before.channel.id != absence_channel_id and 
+              after.channel.id != absence_channel_id):
+            
+            if audio_key in self.active_sessions:
+                embed = discord.Embed(
+                    title="🔄 Movido entre Canais",
+                    color=discord.Color.light_grey(),
+                    timestamp=datetime.now(pytz.UTC))
+                embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
+                embed.add_field(name="De", value=before.channel.name, inline=True)
+                embed.add_field(name="Para", value=after.channel.name, inline=True)
+                embed.set_footer(text=f"ID: {member.id}")
+                await self.log_action(None, None, embed=embed)
         
-        await self._handle_audio_change(member, before, after)
+        # Caso 5: Mudança de estado no mesmo canal (ex: mute/deafen)
+        elif (before.channel is not None and 
+              after.channel is not None and 
+              before.channel == after.channel):
+            
+            await self._handle_audio_change(member, before, after)
 
-    async def _handle_audio_change(self, member, before, after):
+    async def _handle_audio_change(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
         audio_key = (member.id, member.guild.id)
         
         # Se não há sessão ativa e o usuário está em um canal, criar uma
