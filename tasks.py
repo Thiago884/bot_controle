@@ -1682,6 +1682,18 @@ async def check_current_voice_members():
                     max_estimated_duration = timedelta(minutes=5)
                     estimated_start = datetime.now(pytz.UTC) - max_estimated_duration
                     
+                    # Obter a última entrada do banco de dados para evitar discrepâncias
+                    try:
+                        last_join = await bot.db.get_user_activity(member.id, guild.id)
+                        if last_join and last_join.get('last_voice_join'):
+                            # Usar o mais recente entre: agora-5min ou último registro no banco
+                            estimated_start = min(
+                                estimated_start,
+                                last_join['last_voice_join']
+                            )
+                    except Exception as e:
+                        logger.error(f"Erro ao obter última entrada para {member}: {e}")
+                    
                     bot.active_sessions[audio_key] = {
                         'start_time': estimated_start,
                         'last_audio_time': datetime.now(pytz.UTC),
@@ -1691,14 +1703,8 @@ async def check_current_voice_members():
                         'max_estimated_time': datetime.now(pytz.UTC) + max_estimated_duration
                     }
                     
-                    logger.info(f"Sessão estimada criada para {member.display_name} no canal {voice_channel.name}")
+                    logger.info(f"Sessão estimada criada para {member.display_name} no canal {voice_channel.name} - Início: {estimated_start}")
                     
-                    # Registrar como entrada no banco de dados
-                    try:
-                        await bot.db.log_voice_join(member.id, guild.id)
-                    except Exception as e:
-                        logger.error(f"Erro ao registrar entrada estimada: {e}")
-        
         logger.info("Verificação de membros em canais de voz concluída")
         
     except Exception as e:
@@ -1740,8 +1746,12 @@ async def detect_missing_voice_leaves():
                 if join_time.tzinfo is None:
                     join_time = join_time.replace(tzinfo=pytz.UTC)
                 
-                # Calcular duração estimada
-                duration = (datetime.now(pytz.UTC) - join_time).total_seconds()
+                # Limitar a duração máxima a 10 minutos para sessões estimadas
+                max_duration = timedelta(minutes=10).total_seconds()
+                duration = min(
+                    (datetime.now(pytz.UTC) - join_time).total_seconds(),
+                    max_duration
+                )
                 
                 # Registrar saída no banco de dados
                 try:
