@@ -916,32 +916,41 @@ class InactivityBot(commands.Bot):
             
             # Se estava na ausência e tem sessão ativa
             if before.channel.id == absence_channel_id and audio_key in self.active_sessions:
-                # Obter o canal original antes de pausar
-                original_channel_id = self.active_sessions[audio_key].get('paused_channel_id')
-                original_channel = member.guild.get_channel(original_channel_id) if original_channel_id else None
-                
-                # Se encontrou o canal original, criar estado fictício
-                if original_channel:
-                    before_state_data = {
-                        'channel_id': original_channel.id,
-                        'self_deaf': before.self_deaf,
-                        'deaf': before.deaf,
-                        'self_mute': before.self_mute,
-                        'mute': before.mute,
-                        'self_stream': False,
-                        'self_video': False,
-                        'suppress': False,
-                        'requested_to_speak_at': None
-                    }
+                # Se a sessão estava pausada, tratar como saída normal do canal original
+                if self.active_sessions[audio_key].get('paused'):
+                    # Obter o canal original antes de pausar
+                    original_channel_id = self.active_sessions[audio_key].get('paused_channel_id')
+                    original_channel = member.guild.get_channel(original_channel_id) if original_channel_id else None
                     
-                    before_state = discord.VoiceState(
-                        data=before_state_data,
-                        channel=original_channel
-                    )
+                    # Se encontrou o canal original, criar estado fictício
+                    if original_channel:
+                        before_state_data = {
+                            'channel_id': original_channel.id,
+                            'self_deaf': before.self_deaf,
+                            'deaf': before.deaf,
+                            'self_mute': before.self_mute,
+                            'mute': before.mute,
+                            'self_stream': False,
+                            'self_video': False,
+                            'suppress': False,
+                            'requested_to_speak_at': None
+                        }
+                        
+                        before_state = discord.VoiceState(
+                            data=before_state_data,
+                            channel=original_channel
+                        )
+                        
+                        await self._handle_voice_leave(member, before_state)
+                    else:
+                        # Se não encontrou o canal original, usar o canal de ausência
+                        await self._handle_voice_leave(member, before)
                     
-                    await self._handle_voice_leave(member, before_state)
+                    # Limpar estado pausado
+                    for key in ['paused', 'paused_time', 'pre_pause_duration', 'paused_channel_id']:
+                        self.active_sessions[audio_key].pop(key, None)
                 else:
-                    # Se não encontrou o canal original, usar o canal de ausência
+                    # Se não estava pausada, tratar como saída normal
                     await self._handle_voice_leave(member, before)
             else:
                 # Saída normal (não estava na ausência)
