@@ -361,20 +361,23 @@ def prioritize_members(members: list[discord.Member]) -> list[discord.Member]:
 async def get_time_without_roles(member: discord.Member) -> Optional[timedelta]:
     """Obtém há quanto tempo o membro está sem cargos (exceto @everyone)"""
     try:
-        # Se o membro tem mais que o cargo @everyone, não está sem cargos
-        if len(member.roles) > 1:
+        # Se o membro tem mais que o cargo @everyone (len=1) ou nenhum cargo (len=0)
+        if len(member.roles) > 1:  
             return None
             
         # Obter a data em que o membro perdeu todos os cargos (exceto @everyone)
-        # Isso pode ser obtido verificando quando os cargos foram removidos
         last_role_removal = await bot.db.get_last_role_removal(member.id, member.guild.id)
         
         if last_role_removal:
-            return datetime.now(pytz.UTC) - last_role_removal['removal_date']
+            removal_date = last_role_removal['removal_date']
+            if removal_date.tzinfo is None:
+                removal_date = removal_date.replace(tzinfo=pytz.UTC)
+            return datetime.now(pytz.UTC) - removal_date
             
         # Se não há registro de remoção de cargos, usar a data de entrada no servidor
         if member.joined_at:
-            return datetime.now(pytz.UTC) - member.joined_at.replace(tzinfo=pytz.UTC)
+            joined_at = member.joined_at.replace(tzinfo=pytz.UTC) if member.joined_at.tzinfo is None else member.joined_at
+            return datetime.now(pytz.UTC) - joined_at
             
         return None
     except Exception as e:
@@ -877,12 +880,6 @@ async def _cleanup_members(force_check: bool = False):
         logger.info("Expulsão de membros inativos desativada na configuração")
         return
     
-    # Se for uma verificação forçada (como no on_ready), usar um cutoff_date mais antigo
-    if force_check:
-        cutoff_date = datetime.now(pytz.UTC) - timedelta(days=kick_after_days * 2)  # Verificar membros que estão sem cargos há mais tempo
-    else:
-        cutoff_date = datetime.now(pytz.UTC) - timedelta(days=kick_after_days)
-        
     members_kicked = 0
     batch_size = bot._batch_processing_size
     
@@ -891,7 +888,7 @@ async def _cleanup_members(force_check: bool = False):
         for i in range(0, len(members), batch_size):
             batch = members[i:i + batch_size]
             results = await asyncio.gather(*[
-                process_member_cleanup(member, guild, cutoff_date, kick_after_days) 
+                process_member_cleanup(member, guild, kick_after_days) 
                 for member in batch
             ])
             
@@ -913,7 +910,7 @@ async def cleanup_members(force_check: bool = False):
     return task
 
 async def process_member_cleanup(member: discord.Member, guild: discord.Guild, 
-                               cutoff_date: datetime, kick_after_days: int):
+                               kick_after_days: int):
     """Process cleanup for a single member and returns whether member was kicked"""
     try:
         # Verificar whitelist (usuários isentos)
