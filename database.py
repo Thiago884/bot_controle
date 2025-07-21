@@ -178,7 +178,7 @@ class Database:
             return True
             
         max_retries = 5
-        initial_delay = 2
+        initial_delay = 5  # Increased initial delay
         for attempt in range(max_retries):
             try:
                 db_url = os.getenv('DATABASE_URL')
@@ -186,27 +186,30 @@ class Database:
                 if not db_url:
                     raise ValueError("Variável de ambiente DATABASE_URL não definida")
                     
-                logger.info("Tentando conectar ao banco de dados usando DATABASE_URL")
+                logger.info(f"Tentando conectar ao banco de dados (Tentativa {attempt + 1}/{max_retries})")
                 
-                # Configuração específica para Supabase
+                # CORREÇÃO: Ajuste dos parâmetros do pool de conexão
                 self.pool = await create_pool(
                     dsn=db_url,
-                    min_size=10,
-                    max_size=100,
+                    min_size=2,  # Reduzido para diminuir a carga inicial
+                    max_size=20, # Reduzido para um valor mais razoável
                     command_timeout=60,
                     max_inactive_connection_lifetime=300,
                     ssl='require',
+                    # Aumenta o tempo limite para estabelecer a conexão
+                    timeout=30, # Timeout para a conexão inicial
                     server_settings={
                         'application_name': 'inactivity_bot',
-                        'statement_timeout': '30000'
+                        'statement_timeout': '60000' # Aumentado para 60s
                     }
                 )
 
                 # Testar a conexão com timeout
                 try:
                     async with self.pool.acquire() as conn:
-                        await asyncio.wait_for(conn.execute("SELECT 1"), timeout=10)
+                        await asyncio.wait_for(conn.execute("SELECT 1"), timeout=20)
                 except asyncio.TimeoutError:
+                    logger.error("Timeout ao testar a nova conexão com o banco.")
                     await self.pool.close()
                     raise
                     
@@ -222,7 +225,8 @@ class Database:
                 return True
                 
             except (OSError, asyncpg.PostgresError, asyncio.TimeoutError) as e:
-                logger.error(f"Tentativa {attempt + 1} de conexão falhou: {e}")
+                # CORREÇÃO: Log aprimorado para incluir o erro específico
+                logger.error(f"Tentativa {attempt + 1} de conexão falhou: {e}", exc_info=True)
                 if hasattr(self, 'pool') and self.pool:
                     await self.pool.close()
                 
@@ -242,14 +246,15 @@ class Database:
         db_url = os.getenv('DATABASE_URL')
         self.pool = await create_pool(
             dsn=db_url,
-            min_size=10,
-            max_size=100,
+            min_size=2,
+            max_size=20,
             command_timeout=60,
             max_inactive_connection_lifetime=300,
             ssl='require',
+            timeout=30,
             server_settings={
                 'application_name': 'inactivity_bot',
-                'statement_timeout': '30000'
+                'statement_timeout': '60000'
             }
         )
 
