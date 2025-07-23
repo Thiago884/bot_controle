@@ -1890,13 +1890,14 @@ async def cleanup_ghost_sessions():
         
         # Encontrar sessões onde last_voice_join > last_voice_leave há mais de 24 horas
         async with bot.db.pool.acquire() as conn:
+            # CORREÇÃO: Adicionado 'last_voice_join' à cláusula RETURNING
             ghost_sessions = await conn.fetch('''
                 UPDATE user_activity 
                 SET last_voice_leave = last_voice_join + INTERVAL '1 hour',
                     total_voice_time = total_voice_time + 3600
                 WHERE (last_voice_leave IS NULL OR last_voice_join > last_voice_leave)
                 AND last_voice_join < NOW() - INTERVAL '24 hours'
-                RETURNING user_id, guild_id
+                RETURNING user_id, guild_id, last_voice_join
             ''')
             
             if ghost_sessions:
@@ -1905,6 +1906,7 @@ async def cleanup_ghost_sessions():
                 # Registrar sessões de voz para os membros afetados
                 for session in ghost_sessions:
                     try:
+                        # Agora 'session['last_voice_join']' existe e o erro é evitado
                         await conn.execute('''
                             INSERT INTO voice_sessions
                             (user_id, guild_id, join_time, leave_time, duration)
