@@ -873,15 +873,15 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
             all_warnings = []
             try:
                 async with bot.db.pool.acquire() as conn:
-                    async with conn.cursor() as cursor:
-                        await cursor.execute('''
-                            SELECT warning_type, warning_date 
-                            FROM user_warnings 
-                            WHERE user_id = %s AND guild_id = %s
-                            ORDER BY warning_date DESC
-                            LIMIT 3
-                        ''', (member.id, member.guild.id))
-                        all_warnings = await cursor.fetchall()
+                    # The query now uses $1 and $2 for parameters.
+                    # The arguments are passed individually, not as a tuple.
+                    all_warnings = await conn.fetch('''
+                        SELECT warning_type, warning_date 
+                        FROM user_warnings 
+                        WHERE user_id = $1 AND guild_id = $2
+                        ORDER BY warning_date DESC
+                        LIMIT 3
+                    ''', member.id, member.guild.id)
             except Exception as e:
                 logger.error(f"Erro ao obter avisos: {e}")
 
