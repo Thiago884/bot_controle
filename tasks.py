@@ -819,6 +819,32 @@ async def process_member_warnings(member: discord.Member, guild: discord.Guild,
         if not any(role.id in tracked_roles for role in member.roles):
             return
         
+        # Obter data de atribuição do cargo mais antigo
+        role_assignment_times = []
+        for role in member.roles:
+            if role.id in tracked_roles:
+                try:
+                    assigned_time = await bot.db.get_role_assigned_time(member.id, guild.id, role.id)
+                    if assigned_time:
+                        role_assignment_times.append(assigned_time)
+                except Exception as e:
+                    logger.error(f"Erro ao obter data de atribuição para cargo {role.id}: {e}")
+                    continue
+        
+        if not role_assignment_times:
+            # Se não encontrou data de atribuição, registrar agora e usar a data atual
+            for role in member.roles:
+                if role.id in tracked_roles:
+                    try:
+                        await bot.db.log_role_assignment(member.id, guild.id, role.id)
+                    except Exception as e:
+                        logger.error(f"Erro ao registrar atribuição de cargo {role.id}: {e}")
+                        continue
+            
+            role_assignment_time = datetime.now(pytz.UTC)
+        else:
+            role_assignment_time = min(role_assignment_times)  # Usar a atribuição mais antiga
+        
         # Obter última verificação
         start_time = time.time()
         last_check = await bot.db.get_last_period_check(member.id, guild.id)
@@ -827,10 +853,10 @@ async def process_member_warnings(member: discord.Member, guild: discord.Guild,
         if not last_check:
             # Se não tem verificação anterior, criar um novo período
             monitoring_period = bot.config['monitoring_period']
-            period_end = datetime.now(pytz.UTC) + timedelta(days=monitoring_period)
+            period_end = role_assignment_time + timedelta(days=monitoring_period)
             await bot.db.log_period_check(
                 member.id, guild.id, 
-                datetime.now(pytz.UTC),
+                role_assignment_time,
                 period_end, 
                 False
             )
@@ -840,7 +866,13 @@ async def process_member_warnings(member: discord.Member, guild: discord.Guild,
         period_end = last_check['period_end']
         if period_end.tzinfo is None:  # Garantir timezone
             period_end = period_end.replace(tzinfo=pytz.UTC)
-        days_remaining = (period_end - datetime.now(pytz.UTC)).days
+        
+        now = datetime.now(pytz.UTC)
+        if period_end < now:
+            # Período já terminou, não enviar avisos
+            return
+            
+        days_remaining = (period_end - now).days
             
         # Obter último aviso
         start_time = time.time()
@@ -849,12 +881,12 @@ async def process_member_warnings(member: discord.Member, guild: discord.Guild,
         
         # Verificar necessidade de avisos
         if days_remaining <= first_warning_days and (
-            not last_warning or (datetime.now(pytz.UTC) - last_warning[1]).days >= 1):
+            not last_warning or (now - last_warning[1]).days >= 1):
             await bot.send_warning(member, 'first')
             warnings_sent['first'] += 1
         
         elif days_remaining <= second_warning_days and (
-            not last_warning or (datetime.now(pytz.UTC) - last_warning[1]).days >= 1):
+            not last_warning or (now - last_warning[1]).days >= 1):
             await bot.send_warning(member, 'second')
             warnings_sent['second'] += 1
             
@@ -1438,7 +1470,34 @@ async def process_member_previous_periods(member: discord.Member, guild: discord
         
         now = datetime.now(pytz.UTC)
         
+        # Obter data de atribuição do cargo mais antigo
+        role_assignment_times = []
+        for role in member.roles:
+            if role.id in tracked_roles:
+                try:
+                    assigned_time = await bot.db.get_role_assigned_time(member.id, guild.id, role.id)
+                    if assigned_time:
+                        role_assignment_times.append(assigned_time)
+                except Exception as e:
+                    logger.error(f"Erro ao obter data de atribuição para cargo {role.id}: {e}")
+                    continue
+        
+        if not role_assignment_times:
+            # Se não encontrou data de atribuição, registrar agora e usar a data atual
+            for role in member.roles:
+                if role.id in tracked_roles:
+                    try:
+                        await bot.db.log_role_assignment(member.id, guild.id, role.id)
+                    except Exception as e:
+                        logger.error(f"Erro ao registrar atribuição de cargo {role.id}: {e}")
+                        continue
+            
+            role_assignment_time = now
+        else:
+            role_assignment_time = min(role_assignment_times)  # Usar a atribuição mais antiga
+        
         # Obter todos os períodos verificados onde não cumpriu os requisitos
+        # APENAS após a data de atribuição do cargo
         try:
             start_time = time.time()
             async with bot.db.pool.acquire() as conn:
@@ -1447,9 +1506,9 @@ async def process_member_previous_periods(member: discord.Member, guild: discord
                     FROM checked_periods
                     WHERE user_id = $1 AND guild_id = $2
                     AND meets_requirements = FALSE
-                    AND period_end < $3  -- Apenas períodos já encerrados
+                    AND period_start >= $3  -- Apenas períodos após atribuição do cargo
                     ORDER BY period_start
-                ''', member.id, guild.id, now)
+                ''', member.id, guild.id, role_assignment_time)
             perf_metrics.record_db_query(time.time() - start_time)
         except Exception as e:
             logger.error(f"Erro ao buscar períodos falhos para {member}: {e}")
@@ -1457,15 +1516,21 @@ async def process_member_previous_periods(member: discord.Member, guild: discord
         
         # Se houver períodos onde não cumpriu os requisitos
         if failed_periods:
-            # Verificar se já teve cargos removidos para esses períodos
+            # Verificar se já teve cargos removidos para esses períodos específicos
             try:
                 start_time = time.time()
                 async with bot.db.pool.acquire() as conn:
+                    # Verificar se há remoções registradas para os mesmos períodos
                     already_removed = await conn.fetch('''
-                        SELECT DISTINCT role_id 
-                        FROM removed_roles
-                        WHERE user_id = $1 AND guild_id = $2
-                    ''', member.id, guild.id)
+                        SELECT DISTINCT r.role_id 
+                        FROM removed_roles r
+                        JOIN checked_periods c ON 
+                            r.user_id = c.user_id AND 
+                            r.guild_id = c.guild_id AND
+                            r.removal_date BETWEEN c.period_start AND c.period_end
+                        WHERE r.user_id = $1 AND r.guild_id = $2
+                        AND c.period_start = ANY($3::timestamptz[])
+                    ''', member.id, guild.id, [p['period_start'] for p in failed_periods])
                 perf_metrics.record_db_query(time.time() - start_time)
             except Exception as e:
                 logger.error(f"Erro ao verificar cargos já removidos para {member}: {e}")
@@ -1885,6 +1950,8 @@ async def register_role_assignments():
         for guild in bot.guilds:
             logger.info(f"Registrando atribuições de cargos para guild {guild.name} (ID: {guild.id})")
             
+            tracked_roles = bot.config['tracked_roles']
+            
             # Processar em lotes menores para evitar sobrecarga
             batch_size = 20
             members = list(guild.members)
@@ -1892,33 +1959,39 @@ async def register_role_assignments():
             for i in range(0, len(members), batch_size):
                 batch = members[i:i + batch_size]
                 
-                for member in batch:
-                    try:
-                        # Verificar se tem cargos monitorados
-                        tracked_roles = bot.config['tracked_roles']
-                        member_roles = [role for role in member.roles if role.id in tracked_roles]
-                        
-                        if not member_roles:
+                # Verificar quais membros já têm registros de atribuição
+                try:
+                    async with bot.db.pool.acquire() as conn:
+                        existing_assignments = await conn.fetch('''
+                            SELECT DISTINCT user_id FROM role_assignments
+                            WHERE guild_id = $1 AND role_id = ANY($2)
+                        ''', guild.id, tracked_roles)
+                    
+                    existing_user_ids = {r['user_id'] for r in existing_assignments}
+                    
+                    for member in batch:
+                        try:
+                            # Verificar se tem cargos monitorados e não está registrado
+                            if member.id not in existing_user_ids:
+                                member_roles = [role for role in member.roles if role.id in tracked_roles]
+                                
+                                if member_roles:
+                                    # Registrar data de atribuição para cada cargo
+                                    for role in member_roles:
+                                        try:
+                                            await bot.db.log_role_assignment(member.id, guild.id, role.id)
+                                            logger.debug(f"Registrado cargo {role.name} para {member.display_name}")
+                                        except Exception as e:
+                                            logger.error(f"Erro ao registrar cargo {role.id} para {member}: {e}")
+                                            continue
+                                            
+                        except Exception as e:
+                            logger.error(f"Erro ao processar membro {member}: {e}")
                             continue
-                            
-                        # Registrar data de atribuição para cada cargo
-                        for role in member_roles:
-                            try:
-                                # Verificar se já existe registro
-                                assigned_time = await bot.db.get_role_assigned_time(member.id, guild.id, role.id)
-                                
-                                if not assigned_time:
-                                    # Registrar com a data atual
-                                    await bot.db.log_role_assignment(member.id, guild.id, role.id)
-                                    logger.debug(f"Registrado cargo {role.name} para {member.display_name}")
-                                    
-                            except Exception as e:
-                                logger.error(f"Erro ao registrar cargo {role.id} para {member}: {e}")
-                                continue
-                                
-                    except Exception as e:
-                        logger.error(f"Erro ao processar membro {member}: {e}")
-                        continue
+                
+                except Exception as e:
+                    logger.error(f"Erro ao verificar atribuições existentes: {e}")
+                    continue
                 
                 # Pequeno delay entre lotes para evitar rate limits
                 await asyncio.sleep(1)
