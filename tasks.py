@@ -1992,7 +1992,7 @@ async def register_role_assignments():
                             continue
                 
                 except Exception as e:
-                    logger.error(f"Erro ao verificar atribuições existentes: {e}")
+                    logger.error("Erro ao verificar atribuições existentes", exc_info=True)
                     continue
                 
                 # Pequeno delay entre lotes para evitar rate limits

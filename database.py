@@ -468,8 +468,10 @@ class Database:
                 )''')
                 
                 await conn.execute('CREATE INDEX IF NOT EXISTS idx_role_assignment ON role_assignments (user_id, guild_id, role_id, assigned_at)')
-                
+
+                await conn.execute('CREATE INDEX IF NOT EXISTS idx_role_assignment_lookup ON role_assignments (guild_id, role_id, user_id)')
                 logger.info("Tabelas criadas/verificadas com sucesso")
+                
             except Exception as e:
                 logger.error(f"Erro ao criar tabelas: {e}")
                 raise
