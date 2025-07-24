@@ -553,16 +553,17 @@ class Database:
                     (event_type, user_id, guild_id, before_channel_id, after_channel_id,
                      before_self_deaf, before_deaf, after_self_deaf, after_deaf, event_time)
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                    ON CONFLICT (id) DO NOTHING
                 ''', 
                 event_type,
                 user_id,
                 guild_id,
                 before_channel_id,
                 after_channel_id,
-                before_self_deaf,
-                before_deaf,
-                after_self_deaf,
-                after_deaf,
+                before_self_deaf or False,
+                before_deaf or False,
+                after_self_deaf or False,
+                after_deaf or False,
                 event_time)
                 return
             except (asyncpg.PostgresConnectionError, asyncpg.InterfaceError) as e:
@@ -954,31 +955,46 @@ class Database:
                 if removal_date and removal_date.tzinfo is None:
                     removal_date = removal_date.replace(tzinfo=pytz.utc)
                 return {'removal_date': removal_date}
-            return None
+            return {'removal_date': None}  # Retorna dict mesmo quando não há resultados
         except Exception as e:
             logger.error(f"Erro ao obter última remoção de cargo: {e}")
-            return None
+            return {'removal_date': None}  # Garante retorno consistente
         finally:
             if conn:
                 await self.pool.release(conn)         
 
     async def log_kicked_member(self, user_id: int, guild_id: int, reason: str):
         """Registra membro expulso por inatividade"""
-        now = datetime.now(pytz.utc)
-        conn = None
-        try:
-            conn = await self.pool.acquire()
-            await conn.execute('''
-                INSERT INTO kicked_members 
-                (user_id, guild_id, kick_date, reason) 
-                VALUES ($1, $2, $3, $4)
-            ''', user_id, guild_id, now, reason)
-        except Exception as e:
-            logger.error(f"Erro ao registrar membro expulso: {e}")
-            raise
-        finally:
-            if conn:
-                await self.pool.release(conn)
+        max_retries = 3
+        retry_delay = 1
+        
+        for attempt in range(max_retries):
+            conn = None
+            try:
+                conn = await self.pool.acquire()
+                now = datetime.now(pytz.utc)
+                await conn.execute('''
+                    INSERT INTO kicked_members 
+                    (user_id, guild_id, kick_date, reason) 
+                    VALUES ($1, $2, $3, $4)
+                    ON CONFLICT (user_id, guild_id) DO UPDATE 
+                    SET kick_date = EXCLUDED.kick_date,
+                        reason = EXCLUDED.reason
+                ''', user_id, guild_id, now, reason)
+                return
+            except (asyncpg.PostgresConnectionError, asyncpg.InterfaceError) as e:
+                if attempt == max_retries - 1:
+                    logger.error(f"Falha após {max_retries} tentativas ao registrar membro expulso: {e}")
+                    raise
+                logger.warning(f"Tentativa {attempt + 1} falhou, tentando novamente em {retry_delay} segundos...")
+                await asyncio.sleep(retry_delay)
+                retry_delay *= 2
+            except Exception as e:
+                logger.error(f"Erro ao registrar membro expulso: {e}")
+                raise
+            finally:
+                if conn:
+                    await self.pool.release(conn)
 
     async def get_last_kick(self, user_id: int, guild_id: int) -> Optional[Dict]:
         """Obtém última expulsão do usuário"""

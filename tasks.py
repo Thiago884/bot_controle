@@ -978,12 +978,21 @@ async def process_member_cleanup(member: discord.Member, guild: discord.Guild,
                 
             # Verificar se já foi expulso recentemente
             last_kick = await bot.db.get_last_kick(member.id, guild.id)
-            if last_kick and (datetime.now(pytz.UTC) - last_kick['kick_date']).days < kick_after_days:
+            if last_kick and last_kick.get('kick_date') and (datetime.now(pytz.UTC) - last_kick['kick_date']).days < kick_after_days:
                 return False
                 
             # 🔴 **LÓGICA PRINCIPAL**: Expulsar se passou mais tempo que kick_after_days sem cargos
             if time_without_roles >= timedelta(days=kick_after_days):
                 try:
+                    # Verificar permissões antes de tentar expulsar
+                    if not guild.me.guild_permissions.kick_members:
+                        await bot.log_action("Erro ao Expulsar", member, "Bot não tem permissão para expulsar membros")
+                        return False
+                        
+                    if guild.me.top_role <= member.top_role:
+                        await bot.log_action("Erro ao Expulsar", member, "Hierarquia de cargos impede a expulsão")
+                        return False
+
                     await member.kick(reason=f"Sem cargos há mais de {kick_after_days} dias")
                     
                     # Registrar no banco de dados
@@ -1006,6 +1015,8 @@ async def process_member_cleanup(member: discord.Member, guild: discord.Guild,
                     
                 except discord.Forbidden:
                     await bot.log_action("Erro ao Expulsar", member, "Permissões insuficientes")
+                except discord.HTTPException as e:
+                    await bot.log_action("Erro ao Expulsar", member, f"Erro HTTP: {e}")
                 except Exception as e:
                     logger.error(f"Erro ao expulsar membro {member}: {e}")
         return False
