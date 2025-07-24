@@ -522,6 +522,9 @@ class InactivityBot(commands.Bot):
             except Exception as e:
                 logger.error(f"Erro ao sincronizar comandos slash: {e}")
 
+            # Adicionar task de processamento de eventos de voz
+            self.voice_event_processor_task = self.loop.create_task(self.process_voice_events(), name='voice_event_processor')
+
             self._setup_complete = True
             logger.info("Setup hook concluído.")
         else:
@@ -1396,6 +1399,7 @@ async def on_ready():
             bot.pool_monitor_task = bot.loop.create_task(bot.monitor_db_pool(), name='db_pool_monitor')
             bot.health_check_task = bot.loop.create_task(bot.periodic_health_check(), name='periodic_health_check')
             bot.audio_check_task = bot.loop.create_task(bot.check_audio_states(), name='audio_state_checker')
+            bot.voice_event_processor_task = bot.loop.create_task(bot.process_voice_events(), name='voice_event_processor')
 
             bot._tasks_started = True
             logger.info("Todas as tarefas de fundo foram agendadas com sucesso.")

@@ -391,6 +391,19 @@ async def get_time_without_roles(member: discord.Member) -> Optional[timedelta]:
         logger.error(f"Erro ao verificar tempo sem cargos para {member}: {e}")
         return None
 
+async def voice_event_processor():
+    """Processa eventos de voz da fila principal"""
+    await bot.wait_until_ready()
+    while True:
+        try:
+            event = await bot.voice_event_queue.get()
+            await bot._process_voice_batch([event])
+            bot.voice_event_queue.task_done()
+            await asyncio.sleep(0.1)
+        except Exception as e:
+            logger.error(f"Erro no processador de eventos de voz: {e}")
+            await asyncio.sleep(1)
+
 async def execute_task_with_persistent_interval(task_name: str, monitoring_period: int, task_func: callable, force_check: bool = False):
     """Executa a task mantendo intervalo persistente de 24h"""
     await bot.wait_until_ready()
@@ -624,7 +637,6 @@ async def _health_check():
             'report_metrics_wrapper',
             'health_check_wrapper',
             'check_previous_periods_wrapper',
-            'voice_event_processor',
             'queue_processor',
             'db_pool_monitor',
             'periodic_health_check',
@@ -632,8 +644,7 @@ async def _health_check():
             'process_pending_voice_events',
             'check_current_voice_members',
             'detect_missing_voice_leaves',
-            'cleanup_processed_events',
-            'cleanup_ghost_sessions_wrapper',  # Adicionado para a nova task
+            'cleanup_ghost_sessions_wrapper',
             'register_role_assignments_wrapper'
         }
 
@@ -658,24 +669,20 @@ async def _health_check():
                     asyncio.create_task(health_check(), name='health_check_wrapper')
                 elif task_name == 'check_previous_periods_wrapper':
                     asyncio.create_task(check_previous_periods(), name='check_previous_periods_wrapper')
-                elif task_name == 'voice_event_processor':
-                    asyncio.create_task(voice_event_processor(), name='voice_event_processor')
                 elif task_name == 'queue_processor':
-                    asyncio.create_task(queue_processor(), name='queue_processor')
+                    asyncio.create_task(bot.process_queues(), name='queue_processor')
                 elif task_name == 'db_pool_monitor':
-                    asyncio.create_task(db_pool_monitor(), name='db_pool_monitor')
+                    asyncio.create_task(bot.monitor_db_pool(), name='db_pool_monitor')
                 elif task_name == 'periodic_health_check':
-                    asyncio.create_task(periodic_health_check(), name='periodic_health_check')
+                    asyncio.create_task(bot.periodic_health_check(), name='periodic_health_check')
                 elif task_name == 'audio_state_checker':
-                    asyncio.create_task(audio_state_checker(), name='audio_state_checker')
+                    asyncio.create_task(bot.check_audio_states(), name='audio_state_checker')
                 elif task_name == 'process_pending_voice_events':
                     asyncio.create_task(process_pending_voice_events(), name='process_pending_voice_events')
                 elif task_name == 'check_current_voice_members':
                     asyncio.create_task(check_current_voice_members(), name='check_current_voice_members')
                 elif task_name == 'detect_missing_voice_leaves':
                     asyncio.create_task(detect_missing_voice_leaves(), name='detect_missing_voice_leaves')
-                elif task_name == 'cleanup_processed_events':
-                    asyncio.create_task(cleanup_processed_events(), name='cleanup_processed_events')
                 elif task_name == 'cleanup_ghost_sessions_wrapper':
                     asyncio.create_task(cleanup_ghost_sessions(), name='cleanup_ghost_sessions_wrapper')
                 elif task_name == 'register_role_assignments_wrapper':
@@ -1929,10 +1936,10 @@ async def cleanup_ghost_sessions():
     try:
         logger.info("Iniciando limpeza de sessões fantasmas...")
         
-        # Limpar sessões estimadas que excederam o tempo máximo
         now = datetime.now(pytz.UTC)
         to_remove = []
         
+        # Limpar sessões estimadas que excederam o tempo máximo
         for key, session in bot.active_sessions.items():
             if session.get('estimated') and 'max_estimated_time' in session:
                 if now > session['max_estimated_time']:
@@ -1948,15 +1955,14 @@ async def cleanup_ghost_sessions():
             bot.active_sessions.pop(key, None)
             logger.info(f"Removida sessão estimada expirada para usuário {key[0]} na guild {key[1]}")
         
-        # Encontrar sessões onde last_voice_join > last_voice_leave há mais de 24 horas
+        # Corrigir sessões onde last_voice_join > last_voice_leave há mais de 24 horas
         async with bot.db.pool.acquire() as conn:
-            # CORREÇÃO: Adicionado 'last_voice_join' à cláusula RETURNING
             ghost_sessions = await conn.fetch('''
                 UPDATE user_activity 
-                SET last_voice_leave = last_voice_join + INTERVAL '1 hour',
+                SET last_voice_leave = COALESCE(last_voice_join, NOW()) + INTERVAL '1 hour',
                     total_voice_time = total_voice_time + 3600
                 WHERE (last_voice_leave IS NULL OR last_voice_join > last_voice_leave)
-                AND last_voice_join < NOW() - INTERVAL '24 hours'
+                AND (last_voice_join < NOW() - INTERVAL '24 hours')
                 RETURNING user_id, guild_id, last_voice_join
             ''')
             
@@ -1966,7 +1972,10 @@ async def cleanup_ghost_sessions():
                 # Registrar sessões de voz para os membros afetados
                 for session in ghost_sessions:
                     try:
-                        # Agora 'session['last_voice_join']' existe e o erro é evitado
+                        join_time = session['last_voice_join']
+                        if join_time.tzinfo is None:
+                            join_time = join_time.replace(tzinfo=pytz.UTC)
+                            
                         await conn.execute('''
                             INSERT INTO voice_sessions
                             (user_id, guild_id, join_time, leave_time, duration)
@@ -1974,8 +1983,8 @@ async def cleanup_ghost_sessions():
                         ''', 
                         session['user_id'], 
                         session['guild_id'],
-                        session['last_voice_join'],
-                        session['last_voice_join'] + timedelta(hours=1),
+                        join_time,
+                        join_time + timedelta(hours=1),
                         3600)
                     except Exception as e:
                         logger.error(f"Erro ao registrar sessão fantasma: {e}")
