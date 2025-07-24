@@ -183,23 +183,30 @@ class BatchProcessor:
                         assigned_time = await self.bot.db.get_role_assigned_time(member.id, member.guild.id, role.id)
                         if assigned_time:
                             role_assignment_times.append(assigned_time)
+                        else:
+                            # Se não tem registro, criar um com a data atual
+                            await self.bot.db.log_role_assignment(member.id, member.guild.id, role.id)
+                            role_assignment_times.append(now)
+                            logger.info(f"Criado registro de atribuição para cargo {role.id} do usuário {member.id}")
                     except Exception as e:
                         logger.error(f"Erro ao obter data de atribuição para cargo {role.id}: {e}")
                         continue
             
             if not role_assignment_times:
-                # Se não encontrou data de atribuição, registrar agora e usar a data atual
+                # Se não encontrou nenhuma atribuição, registrar todas com a data atual
                 for role in member.roles:
                     if role.id in tracked_roles:
                         try:
                             await self.bot.db.log_role_assignment(member.id, member.guild.id, role.id)
+                            role_assignment_times.append(now)
                         except Exception as e:
                             logger.error(f"Erro ao registrar atribuição de cargo {role.id}: {e}")
                             continue
                 
-                role_assignment_time = now
-            else:
-                role_assignment_time = min(role_assignment_times)  # Usar a atribuição mais antiga
+                if not role_assignment_times:
+                    return result
+            
+            role_assignment_time = min(role_assignment_times)  # Usar a atribuição mais antiga
             
             monitoring_period = self.bot.config['monitoring_period']
             period_end = role_assignment_time + timedelta(days=monitoring_period)
@@ -827,6 +834,11 @@ async def process_member_warnings(member: discord.Member, guild: discord.Guild,
                     assigned_time = await bot.db.get_role_assigned_time(member.id, guild.id, role.id)
                     if assigned_time:
                         role_assignment_times.append(assigned_time)
+                    else:
+                        # Se não tem registro, criar um com a data atual
+                        await bot.db.log_role_assignment(member.id, guild.id, role.id)
+                        assigned_time = datetime.now(pytz.UTC)
+                        role_assignment_times.append(assigned_time)
                 except Exception as e:
                     logger.error(f"Erro ao obter data de atribuição para cargo {role.id}: {e}")
                     continue
@@ -837,13 +849,16 @@ async def process_member_warnings(member: discord.Member, guild: discord.Guild,
                 if role.id in tracked_roles:
                     try:
                         await bot.db.log_role_assignment(member.id, guild.id, role.id)
+                        assigned_time = datetime.now(pytz.UTC)
+                        role_assignment_times.append(assigned_time)
                     except Exception as e:
                         logger.error(f"Erro ao registrar atribuição de cargo {role.id}: {e}")
                         continue
             
-            role_assignment_time = datetime.now(pytz.UTC)
-        else:
-            role_assignment_time = min(role_assignment_times)  # Usar a atribuição mais antiga
+            if not role_assignment_times:
+                return
+        
+        role_assignment_time = min(role_assignment_times)  # Usar a atribuição mais antiga
         
         # Obter última verificação
         start_time = time.time()

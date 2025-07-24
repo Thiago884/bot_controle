@@ -1286,6 +1286,30 @@ bot = InactivityBot(
 )
 
 @bot.event
+async def on_member_update(before: discord.Member, after: discord.Member):
+    """Evento que detecta quando membros recebem cargos"""
+    if before.roles == after.roles:
+        return
+    
+    # Verificar se há cargos monitorados na configuração
+    if not hasattr(bot, 'config') or not bot.config.get('tracked_roles'):
+        return
+    
+    tracked_roles = set(bot.config['tracked_roles'])
+    
+    # Encontrar cargos adicionados
+    added_roles = [role for role in after.roles if role not in before.roles and role.id in tracked_roles]
+    
+    if added_roles:
+        try:
+            # Registrar a atribuição de cada cargo novo
+            for role in added_roles:
+                await bot.db.log_role_assignment(after.id, after.guild.id, role.id)
+                logger.info(f"Registrada atribuição de cargo {role.name} para {after.display_name}")
+        except Exception as e:
+            logger.error(f"Erro ao registrar atribuição de cargo: {e}")
+
+@bot.event
 async def on_ready():
     try:
         if hasattr(bot, '_ready_called') and bot._ready_called:
