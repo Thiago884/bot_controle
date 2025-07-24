@@ -1375,9 +1375,6 @@ async def on_ready():
             # Registrar datas de atribuição de cargos para membros existentes
             bot.loop.create_task(register_role_assignments(), name='register_role_assignments')
             
-            # Alteração 3: Forçar verificação imediata de membros
-            bot.loop.create_task(cleanup_members(force_check=True), name='initial_cleanup_members')
-            
             # Criar tasks com nomes identificáveis
             bot.loop.create_task(inactivity_check(), name='inactivity_check_wrapper')
             bot.loop.create_task(check_warnings(), name='check_warnings_wrapper')
