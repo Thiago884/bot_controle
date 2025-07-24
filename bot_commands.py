@@ -368,14 +368,14 @@ async def manage_tracked_roles(
         )
         await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="force_role_assignment_log", description="Força o registro de atribuição de cargos para todos os membros com um cargo específico")
+@bot.tree.command(name="force_role_assignment_log", description="Força o registro de atribuição para membros sem data registrada.")
 @app_commands.describe(
     role="Cargo para registrar a atribuição"
 )
 @allowed_roles_only()
 @commands.has_permissions(administrator=True)
 async def force_role_assignment_log(interaction: discord.Interaction, role: discord.Role):
-    """Força o registro de atribuição de cargos para todos os membros com um cargo específico"""
+    """Força o registro de atribuição de cargos apenas para membros que ainda não têm um registro para o cargo especificado."""
     try:
         await interaction.response.defer(thinking=True)
         
@@ -391,20 +391,31 @@ async def force_role_assignment_log(interaction: discord.Interaction, role: disc
             
         processed = 0
         errors = 0
+        already_logged = 0
         
         for member in members_with_role:
             try:
-                await bot.db.log_role_assignment(member.id, interaction.guild.id, role.id)
-                processed += 1
+                # Verificar se já existe uma data de atribuição
+                existing_time = await bot.db.get_role_assigned_time(member.id, interaction.guild.id, role.id)
+                
+                # Se não existir, registrar agora
+                if existing_time is None:
+                    await bot.db.log_role_assignment(member.id, interaction.guild.id, role.id)
+                    processed += 1
+                else:
+                    already_logged += 1
             except Exception as e:
-                logger.error(f"Erro ao registrar atribuição de cargo para {member.display_name}: {e}")
+                logger.error(f"Erro ao processar registro de atribuição de cargo para {member.display_name}: {e}")
                 errors += 1
                 
         embed = discord.Embed(
             title="✅ Registro de Atribuição de Cargos Concluído",
             description=(
-                f"Processado: {processed} membros com o cargo {role.mention}\n"
-                f"Erros: {errors}"
+                f"Verificação para o cargo {role.mention}:\n"
+                f"- **Novos registros criados:** {processed}\n"
+                f"- **Membros que já possuíam registro:** {already_logged}\n"
+                f"- **Total de membros com o cargo:** {total_members}\n"
+                f"- **Erros:** {errors}"
             ),
             color=discord.Color.green()
         )
@@ -414,7 +425,7 @@ async def force_role_assignment_log(interaction: discord.Interaction, role: disc
         await bot.log_action(
             "Registro Forçado de Atribuição de Cargos",
             interaction.user,
-            f"Cargo: {role.name} (ID: {role.id})\nMembros processados: {processed}\nErros: {errors}"
+            f"Cargo: {role.name} (ID: {role.id})\nNovos registros: {processed}\nJá registrados: {already_logged}\nErros: {errors}"
         )
         
     except Exception as e:
