@@ -1448,23 +1448,33 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
         before_channel_id = before.channel.id if before.channel else None
         after_channel_id = after.channel.id if after.channel else None
         
-        # Salvar o evento no banco de dados com timestamp UTC
-        await bot.db.save_pending_voice_event(
-            'voice_state_update',
-            member.id,
-            member.guild.id,
-            before_channel_id,
-            after_channel_id,
-            before.self_deaf,
-            before.deaf,
-            after.self_deaf,
-            after.deaf
-        )
+        # Tentar salvar o evento com retry
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                await bot.db.save_pending_voice_event(
+                    'voice_state_update',
+                    member.id,
+                    member.guild.id,
+                    before_channel_id,
+                    after_channel_id,
+                    before.self_deaf,
+                    before.deaf,
+                    after.self_deaf,
+                    after.deaf
+                )
+                break
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    logger.error(f"Falha após {max_retries} tentativas ao salvar evento pendente: {e}")
+                else:
+                    await asyncio.sleep(1 * (attempt + 1))
         
         # Enfileirar para processamento normal
-        await bot.voice_event_queue.put(('voice_state_update', member, before, after))
-    except asyncio.QueueFull:
-        logger.warning("Fila de eventos de voz cheia - evento será processado na próxima inicialização")
+        try:
+            await bot.voice_event_queue.put(('voice_state_update', member, before, after))
+        except asyncio.QueueFull:
+            logger.warning("Fila de eventos de voz cheia - evento será processado na próxima inicialização")
     except Exception as e:
         logger.error(f"Erro ao enfileirar evento de voz: {e}")
 

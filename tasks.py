@@ -1050,25 +1050,48 @@ async def _cleanup_old_data():
         # Usar UTC para o cutoff_date
         cutoff_date = datetime.now(pytz.UTC) - timedelta(days=60)
         
-        start_time = time.time()
-        log_message = await bot.db.cleanup_old_data(days=60)
-        perf_metrics.record_db_query(time.time() - start_time)
+        # Processar em lotes menores para evitar timeout
+        tables_to_clean = [
+            ('voice_sessions', 'leave_time'),
+            ('user_warnings', 'warning_date'),
+            ('removed_roles', 'removal_date'),
+            ('kicked_members', 'kick_date'),
+            ('rate_limit_logs', 'log_date'),
+            ('pending_voice_events', 'event_time'),
+            ('role_assignments', 'assigned_at')
+        ]
         
-        if log_message:
-            await bot.log_action("Limpeza de Dados", None, log_message)
+        deleted_counts = {}
+        
+        for table, date_field in tables_to_clean:
+            try:
+                start_time = time.time()
+                result = await bot.db.execute_query(
+                    f"DELETE FROM {table} WHERE {date_field} < $1 LIMIT 1000",
+                    (cutoff_date,)
+                )
+                perf_metrics.record_db_query(time.time() - start_time)
+                deleted_counts[table] = int(result.split()[1])
+                logger.info(f"Removidos {deleted_counts[table]} registros de {table}")
+            except Exception as e:
+                logger.error(f"Erro ao limpar tabela {table}: {e}")
+                deleted_counts[table] = 0
+        
+        log_message = (
+            f"Limpeza de dados antigos concluída: " +
+            ", ".join([f"{table}: {count}" for table, count in deleted_counts.items()])
+        )
+        
+        await bot.log_action("Limpeza de Dados", None, log_message)
+        return log_message
+        
     except Exception as e:
         logger.error(f"Erro ao limpar dados antigos: {e}")
-        await bot.log_action("Erro na Limpeza de Dados", None, f"Falha ao limpar dados antigos: {str(e)}")
-
-async def cleanup_old_data():
-    """Wrapper para a task com intervalo persistente"""
-    monitoring_period = 1  # Cleanup should run daily regardless of monitoring period
-    task = bot.loop.create_task(execute_task_with_persistent_interval(
-        "cleanup_old_data", 
-        monitoring_period,
-        _cleanup_old_data
-    ), name='cleanup_old_data_wrapper')
-    return task
+        await bot.log_action(
+            "Erro na Limpeza de Dados", 
+            None, 
+            f"Falha ao limpar dados antigos: {str(e)}"
+        )
 
 @log_task_metrics("monitor_rate_limits")
 async def _monitor_rate_limits():
