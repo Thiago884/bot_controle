@@ -1542,7 +1542,7 @@ async def process_member_previous_periods(member: discord.Member, guild: discord
             role_assignment_time = min(role_assignment_times)  # Usar a atribuição mais antiga
         
         # Obter todos os períodos verificados onde não cumpriu os requisitos
-        # APENAS após a data de atribuição do cargo
+        # APENAS após a data de atribuição do cargo e que JÁ TERMINARAM
         try:
             start_time = time.time()
             async with bot.db.pool.acquire() as conn:
@@ -1552,14 +1552,15 @@ async def process_member_previous_periods(member: discord.Member, guild: discord
                     WHERE user_id = $1 AND guild_id = $2
                     AND meets_requirements = FALSE
                     AND period_start >= $3  -- Apenas períodos após atribuição do cargo
+                    AND period_end <= $4    -- Apenas períodos que já terminaram
                     ORDER BY period_start
-                ''', member.id, guild.id, role_assignment_time)
+                ''', member.id, guild.id, role_assignment_time, now)  # Adicionado now como parâmetro
             perf_metrics.record_db_query(time.time() - start_time)
         except Exception as e:
             logger.error(f"Erro ao buscar períodos falhos para {member}: {e}")
             return result
         
-        # Se houver períodos onde não cumpriu os requisitos
+        # Se houver períodos onde não cumpriu os requisitos E QUE JÁ TERMINARAM
         if failed_periods:
             # Verificar se já teve cargos removidos para esses períodos específicos
             try:
