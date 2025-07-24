@@ -313,8 +313,8 @@ class BatchProcessor:
                     meets_requirements
                 )
             
-            # SOLUÇÃO IMPLEMENTADA: Só registrar novo período se o atual terminou
-            if now >= period_end:
+            # SOLUÇÃO IMPLEMENTADA: Só registrar novo período se o usuário ainda tiver cargos monitorados
+            if now >= period_end and any(role.id in tracked_roles for role in member.roles):
                 # Definir novo período de verificação (futuro)
                 new_period_end = now + timedelta(days=monitoring_period)
                 new_period_start = now
@@ -1428,9 +1428,10 @@ async def process_member_missed_periods(member_id: int, guild: discord.Guild,
                 except Exception as e:
                     logger.error(f"Erro ao remover cargos de {member}: {e}")
         
-        # Criar novo período atual
-        new_period_end = now + timedelta(days=monitoring_period)
-        await bot.db.log_period_check(member.id, guild.id, now, new_period_end, False)
+        # SOLUÇÃO IMPLEMENTADA: Criar novo período atual apenas se ainda tiver cargos monitorados
+        if any(role.id in tracked_roles for role in member.roles):
+            new_period_end = now + timedelta(days=monitoring_period)
+            await bot.db.log_period_check(member.id, guild.id, now, new_period_end, False)
             
     except Exception as e:
         logger.error(f"Erro ao verificar períodos perdidos para {member_id}: {e}")
@@ -1630,13 +1631,15 @@ async def process_member_previous_periods(member: discord.Member, guild: discord
                     )
                     perf_metrics.record_db_query(time.time() - start_time)
                     
-                    # Registrar novo período de verificação
-                    new_period_end = now + timedelta(days=monitoring_period)
-                    await bot.db.log_period_check(
-                        member.id, guild.id,
-                        now, new_period_end,
-                        False  # Assume que começa não cumprindo
-                    )
+                    # SOLUÇÃO IMPLEMENTADA: Só registrar novo período se o usuário ainda tiver cargos monitorados
+                    if any(role.id in tracked_roles for role in member.roles):
+                        # Registrar novo período de verificação
+                        new_period_end = now + timedelta(days=monitoring_period)
+                        await bot.db.log_period_check(
+                            member.id, guild.id,
+                            now, new_period_end,
+                            False  # Assume que começa não cumprindo
+                        )
                     
                     # Gerar relatório
                     all_sessions = []
