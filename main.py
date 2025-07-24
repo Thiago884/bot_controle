@@ -1296,7 +1296,7 @@ async def on_ready():
         logger.info(f"Latência: {round(bot.latency * 1000)}ms")
         
         # Garantir que o banco de dados está inicializado
-        if not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
+        if not hasattr(bot, 'db') or not bot.db or not hasattr(bot.db, 'pool') or not bot.db._is_initialized:
             logger.error("Banco de dados não inicializado - tentando novamente...")
             await bot.initialize_db()
             if not bot.db._is_initialized:
@@ -1338,7 +1338,7 @@ async def on_ready():
             
             from tasks import (
                 inactivity_check, check_warnings, cleanup_members,
-                database_backup, cleanup_old_data, monitor_rate_limits,
+                database_backup, _cleanup_old_data as cleanup_old_data, monitor_rate_limits,
                 report_metrics, health_check, check_missed_periods,
                 check_previous_periods, process_pending_voice_events,
                 check_current_voice_members, detect_missing_voice_leaves,
@@ -1432,6 +1432,9 @@ async def on_ready():
         
     except Exception as e:
         logger.error(f"Erro crítico no on_ready: {e}", exc_info=True)
+        # Tentar reiniciar após um delay
+        await asyncio.sleep(60)
+        await bot.close()
 
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
@@ -1439,9 +1442,9 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
         return
 
     try:
-        # Verificar se o banco de dados está inicializado
-        if not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
-            logger.error("Banco de dados não inicializado - pulando evento de voz")
+        # Verificação mais robusta da inicialização do banco
+        if not hasattr(bot, 'db') or not bot.db or not hasattr(bot.db, 'pool') or not bot.db._is_initialized:
+            logger.warning("Banco de dados não inicializado - pulando evento de voz")
             return
             
         # Extrair informações necessárias dos estados de voz
