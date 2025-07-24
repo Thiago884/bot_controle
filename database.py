@@ -492,6 +492,10 @@ class Database:
                 result = await asyncio.wait_for(conn.execute(query, *(params or ())), timeout=timeout)
                 return result
                 
+            except asyncpg.PostgresSyntaxError as e:
+                logger.error(f"Erro de sintaxe SQL (tentativa {attempt + 1}/{max_retries}): {e}")
+                raise  # Re-raise para que o chamador saiba que é um erro de sintaxe
+                
             except (asyncpg.PostgresError, asyncpg.InterfaceError) as e:
                 logger.error(f"Erro de conexão (tentativa {attempt + 1}/{max_retries}): {e}")
                 if conn:

@@ -1066,10 +1066,17 @@ async def _cleanup_old_data():
         for table, date_field in tables_to_clean:
             try:
                 start_time = time.time()
-                result = await bot.db.execute_query(
-                    f"DELETE FROM {table} WHERE {date_field} < $1 LIMIT 1000",
-                    (cutoff_date,)
-                )
+                # Usar a sintaxe correta do PostgreSQL para DELETE com LIMIT
+                if table == 'voice_sessions':
+                    result = await bot.db.execute_query(
+                        f"DELETE FROM {table} WHERE id IN (SELECT id FROM {table} WHERE {date_field} < $1 ORDER BY id LIMIT 1000)",
+                        (cutoff_date,)
+                    )
+                else:
+                    result = await bot.db.execute_query(
+                        f"DELETE FROM {table} WHERE {date_field} < $1",
+                        (cutoff_date,)
+                    )
                 perf_metrics.record_db_query(time.time() - start_time)
                 deleted_counts[table] = int(result.split()[1])
                 logger.info(f"Removidos {deleted_counts[table]} registros de {table}")
