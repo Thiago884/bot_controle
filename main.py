@@ -1373,7 +1373,7 @@ async def on_ready():
             await check_missed_periods()
             
             # Registrar datas de atribuição de cargos para membros existentes
-            bot.loop.create_task(register_role_assignments(), name='register_role_assignments')
+            bot.loop.create_task(register_role_assignments_wrapper(), name='register_role_assignments_wrapper')
             
             # Criar tasks com nomes identificáveis
             bot.loop.create_task(inactivity_check(), name='inactivity_check_wrapper')
