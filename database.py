@@ -193,21 +193,21 @@ class Database:
                     dsn=db_url,
                     min_size=2,  # Reduzido para diminuir a carga inicial
                     max_size=20, # Reduzido para um valor mais razoável
-                    command_timeout=60,
+                    command_timeout=90, # Aumentado de 60 para 90
                     max_inactive_connection_lifetime=300,
                     ssl='require',
                     # Aumenta o tempo limite para estabelecer a conexão
-                    timeout=30, # Timeout para a conexão inicial
+                    timeout=60, # Aumentado de 30 para 60
                     server_settings={
                         'application_name': 'inactivity_bot',
-                        'statement_timeout': '60000' # Aumentado para 60s
+                        'statement_timeout': '90000' # Aumentado para 90s
                     }
                 )
 
                 # Testar a conexão com timeout
                 try:
                     async with self.pool.acquire() as conn:
-                        await asyncio.wait_for(conn.execute("SELECT 1"), timeout=20)
+                        await asyncio.wait_for(conn.execute("SELECT 1"), timeout=45) # Aumentado de 20 para 45
                 except asyncio.TimeoutError:
                     logger.error("Timeout ao testar a nova conexão com o banco.")
                     await self.pool.close()
@@ -248,13 +248,13 @@ class Database:
             dsn=db_url,
             min_size=2,
             max_size=20,
-            command_timeout=60,
+            command_timeout=90,
             max_inactive_connection_lifetime=300,
             ssl='require',
-            timeout=30,
+            timeout=60,
             server_settings={
                 'application_name': 'inactivity_bot',
-                'statement_timeout': '60000'
+                'statement_timeout': '90000'
             }
         )
 
@@ -614,23 +614,33 @@ class Database:
                 await self.pool.release(conn)
 
     async def mark_events_as_processed(self, event_ids: List[int]):
-        """Marca eventos como processados"""
+        """Marca eventos como processados com retries"""
         if not event_ids:
             return
             
-        conn = None
-        try:
-            conn = await self.pool.acquire()
-            await conn.execute('''
-                UPDATE pending_voice_events
-                SET processed = TRUE
-                WHERE id = ANY($1)
-            ''', event_ids)
-        except Exception as e:
-            logger.error(f"Erro ao marcar eventos como processados: {e}")
-        finally:
-            if conn:
-                await self.pool.release(conn)
+        max_retries = 3
+        for attempt in range(max_retries):
+            conn = None
+            try:
+                conn = await self.pool.acquire()
+                await conn.execute('''
+                    UPDATE pending_voice_events
+                    SET processed = TRUE
+                    WHERE id = ANY($1)
+                ''', event_ids)
+                return  # Sucesso, sair da função
+            except (asyncpg.PostgresConnectionError, asyncpg.InterfaceError) as e:
+                logger.warning(f"Erro de conexão ao marcar eventos (tentativa {attempt + 1}/{max_retries}): {e}")
+                if attempt == max_retries - 1:
+                    logger.error("Falha ao marcar eventos como processados após várias tentativas.", exc_info=True)
+                    raise
+                await asyncio.sleep(1 * (2 ** attempt))  # Backoff: 1s, 2s, 4s
+            except Exception as e:
+                logger.error(f"Erro ao marcar eventos como processados: {e}", exc_info=True)
+                raise  # Re-lança outros erros imediatamente
+            finally:
+                if conn:
+                    await self.pool.release(conn)
 
     async def save_config(self, guild_id: int, config: dict):
         """Salva configuração com cache"""
@@ -957,7 +967,7 @@ class Database:
                 return {'removal_date': removal_date}
             return {'removal_date': None}  # Retorna dict mesmo quando não há resultados
         except Exception as e:
-            logger.error(f"Erro ao obter última remoção de cargo: {e}")
+            logger.error(f"Erro ao obter última remoção de cargo: {e}", exc_info=True) # CORREÇÃO: Adicionado exc_info
             return {'removal_date': None}  # Garante retorno consistente
         finally:
             if conn:
@@ -1313,7 +1323,7 @@ class Database:
                 return assigned_at
             return None
         except Exception as e:
-            logger.error(f"Erro ao obter data de atribuição de cargo: {e}")
+            logger.error(f"Erro ao obter data de atribuição de cargo: {e}", exc_info=True)
             return None
         finally:
             if conn:

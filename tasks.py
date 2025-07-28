@@ -382,14 +382,15 @@ def prioritize_members(members: list[discord.Member]) -> list[discord.Member]:
 async def get_time_without_roles(member: discord.Member) -> Optional[timedelta]:
     """Obtém há quanto tempo o membro está sem cargos (exceto @everyone)"""
     try:
-        # Se o membro tem mais que o cargo @everyone (len=1) ou nenhum cargo (len=0)
-        if len(member.roles) > 1:  
+        # Se o membro tem mais que o cargo @everyone (len=1)
+        if len(member.roles) > 1:
             return None
             
         # Obter a data em que o membro perdeu todos os cargos (exceto @everyone)
         last_role_removal = await bot.db.get_last_role_removal(member.id, member.guild.id)
         
-        if last_role_removal:
+        # CORREÇÃO: Verificar se last_role_removal e a data existem
+        if last_role_removal and last_role_removal.get('removal_date'):
             removal_date = last_role_removal['removal_date']
             if removal_date.tzinfo is None:
                 removal_date = removal_date.replace(tzinfo=pytz.UTC)
@@ -402,7 +403,7 @@ async def get_time_without_roles(member: discord.Member) -> Optional[timedelta]:
             
         return None
     except Exception as e:
-        logger.error(f"Erro ao verificar tempo sem cargos para {member}: {e}")
+        logger.error(f"Erro ao verificar tempo sem cargos para {member}: {e}", exc_info=True) # Adicionado exc_info
         return None
 
 async def voice_event_processor():
