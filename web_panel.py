@@ -249,6 +249,9 @@ def dashboard():
                 if pool_status_data:
                     pool_status = pool_status_data
                     db_status = "Operacional" if pool_status.get('size', 0) > 0 else "Erro"
+            except TimeoutError:
+                db_status = "Timeout / Não Responsivo"
+                web_logger.error("Timeout ao verificar status do banco no dashboard. O loop do bot pode estar sobrecarregado.")
             except Exception as e:
                 db_status = f"Erro: {str(e)}"
                 web_logger.error(f"Erro ao verificar status do banco no dashboard: {e}", exc_info=True)
