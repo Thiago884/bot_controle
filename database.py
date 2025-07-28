@@ -372,14 +372,13 @@ class Database:
                 # Tabela de membros expulsos
                 await conn.execute('''
                 CREATE TABLE IF NOT EXISTS kicked_members (
-                    id SERIAL PRIMARY KEY,
                     user_id BIGINT,
                     guild_id BIGINT,
                     kick_date TIMESTAMPTZ,
-                    reason TEXT
+                    reason TEXT,
+                    PRIMARY KEY (user_id, guild_id)
                 )''')
                 
-                await conn.execute('CREATE INDEX IF NOT EXISTS idx_user_guild ON kicked_members (user_id, guild_id)')
                 await conn.execute('CREATE INDEX IF NOT EXISTS idx_kick_date ON kicked_members (kick_date)')
                 
                 # Tabela de períodos verificados

@@ -1162,6 +1162,16 @@ async def _cleanup_old_data():
             f"Falha ao limpar dados antigos: {str(e)}"
         )
 
+async def cleanup_old_data():
+    """Wrapper para a task com intervalo persistente"""
+    monitoring_period = 7  # Limpeza de dados deve rodar semanalmente
+    task = bot.loop.create_task(execute_task_with_persistent_interval(
+        "cleanup_old_data",
+        monitoring_period,
+        _cleanup_old_data
+    ), name='cleanup_old_data_wrapper')
+    return task
+
 @log_task_metrics("monitor_rate_limits")
 async def _monitor_rate_limits():
     """Lógica original da task"""

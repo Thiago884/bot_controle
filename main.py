@@ -1402,11 +1402,11 @@ async def on_ready():
             # CORREÇÃO: Importar a função 'register_role_assignments_wrapper'
             from tasks import (
                 inactivity_check, check_warnings, cleanup_members,
-                database_backup, _cleanup_old_data as cleanup_old_data, monitor_rate_limits,
+                database_backup, cleanup_old_data, monitor_rate_limits,
                 report_metrics, health_check, check_missed_periods,
                 check_previous_periods, process_pending_voice_events,
                 check_current_voice_members, detect_missing_voice_leaves,
-                cleanup_ghost_sessions, register_role_assignments_wrapper
+                cleanup_ghost_sessions_wrapper, register_role_assignments_wrapper
             )
             
             # Primeiro verificar períodos perdidos
@@ -1428,7 +1428,7 @@ async def on_ready():
             bot.loop.create_task(process_pending_voice_events(), name='process_pending_voice_events')
             bot.loop.create_task(check_current_voice_members(), name='check_current_voice_members')
             bot.loop.create_task(detect_missing_voice_leaves(), name='detect_missing_voice_leaves')
-            bot.loop.create_task(cleanup_ghost_sessions(), name='ghost_session_cleanup')
+            bot.loop.create_task(cleanup_ghost_sessions_wrapper(), name='cleanup_ghost_sessions_wrapper')
             # CORREÇÃO: Remover a chamada duplicada/incorreta
             # bot.loop.create_task(register_role_assignments(), name='register_role_assignments_wrapper')
             
