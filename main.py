@@ -104,11 +104,6 @@ class RateLimitMonitor:
             'endpoint': str(headers.get('endpoint', 'unknown'))
         })
     
-    def get_remaining(self, bucket='global'):
-        if bucket == 'global':
-            return self.global_limits['remaining']
-        return self.buckets.get(bucket, {}).get('remaining', 50)
-    
     def should_delay(self):
         now = time.time()
         if now < self.cooldown_until:
@@ -1188,14 +1183,39 @@ class InactivityBot(commands.Bot):
             logger.error(f"Erro ao enviar notificação: {e}")
             await self.log_action("Erro de Notificação", None, f"Falha ao enviar mensagem: {str(e)}")
 
+    async def notify_admins_dm(self, guild: discord.Guild, embed: discord.Embed):
+        """Envia uma mensagem direta a todos os membros com permissões de administrador em uma guilda."""
+        if not guild:
+            logger.warning("notify_admins_dm chamada sem guilda.")
+            return
+
+        admin_role_holders = [member for member in guild.members if member.guild_permissions.administrator and not member.bot]
+
+        if not admin_role_holders:
+            logger.info(f"Nenhum administrador encontrado na guilda {guild.name} para notificar via DM.")
+            return
+
+        logger.info(f"Notificando {len(admin_role_holders)} administradores em {guild.name} via DM.")
+
+        for admin in admin_role_holders:
+            try:
+                # Usa o método send_dm existente que enfileira a mensagem
+                await self.send_dm(admin, message_content=None, embed=embed)
+                logger.debug(f"DM de notificação de administrador enfileirada para {admin.display_name} ({admin.id}).")
+            except Exception as e:
+                # send_dm já registra a maioria dos erros, mas podemos adicionar um específico aqui.
+                logger.error(f"Falha ao enfileirar DM de notificação de administrador para {admin.display_name} na guilda {guild.name}: {e}")
+
     async def send_dm(self, member: discord.Member, message_content: str, embed: discord.Embed):
         try:
+            # A prioridade para DMs de admin será alta
+            priority = 'high' if embed and (embed.title.startswith("🚨") or embed.title.startswith("👢")) else 'low'
             await self.message_queue.put((
                 member,
                 message_content,
                 embed,
                 None
-            ), priority='low')
+            ), priority=priority)
         except discord.Forbidden:
             logger.warning(f"Não foi possível enviar DM para {member.display_name}. (DMs desabilitadas)")
             await self.log_action(
@@ -1255,6 +1275,22 @@ class InactivityBot(commands.Bot):
             await self.db.log_warning(member.id, member.guild.id, warning_type)
             
             await self.log_action(f"Aviso Enviado ({warning_type})", member)
+            
+            # Notificar administradores se for primeiro ou segundo aviso
+            if warning_type in ['first', 'second']:
+                admin_embed = discord.Embed(
+                    title=f"🔔 Relatório de Aviso: {warning_type.capitalize()}",
+                    description=f"Um aviso de inatividade foi enviado para {member.mention}.",
+                    color=discord.Color.blue(),
+                    timestamp=datetime.now(pytz.utc)
+                )
+                admin_embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
+                admin_embed.add_field(name="Usuário", value=f"{member.mention} (`{member.id}`)", inline=False)
+                admin_embed.add_field(name="Tipo de Aviso", value=warning_type.capitalize(), inline=True)
+                admin_embed.set_footer(text=f"Servidor: {member.guild.name}")
+                
+                await self.notify_admins_dm(member.guild, embed=admin_embed)
+
         except Exception as e:
             logger.error(f"Erro ao enviar aviso para {member}: {e}")
 

@@ -9,7 +9,7 @@ from typing import Optional, Dict, List
 from utils import generate_activity_graph
 from collections import defaultdict
 import time
-import pytz  # Added import
+import pytz
 
 logger = logging.getLogger('inactivity_bot')
 
@@ -273,6 +273,20 @@ class BatchProcessor:
                         # Enviar mensagem de aviso final via DM
                         await self.bot.send_warning(member, 'final')
                         
+                        # Notificar administradores por DM
+                        admin_embed = discord.Embed(
+                            title="🚨 Cargos Removidos por Inatividade",
+                            description=f"Os cargos de {member.mention} foram removidos por inatividade.",
+                            color=discord.Color.dark_red(),
+                            timestamp=datetime.now(pytz.utc)
+                        )
+                        admin_embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
+                        admin_embed.add_field(name="Usuário", value=f"{member.mention} (`{member.id}`)", inline=False)
+                        admin_embed.add_field(name="Cargos Removidos", value=", ".join([r.mention for r in roles_to_remove]), inline=False)
+                        admin_embed.set_footer(text=f"Servidor: {member.guild.name}")
+                        
+                        await self.bot.notify_admins_dm(member.guild, embed=admin_embed)
+
                         # Registrar cargos removidos
                         start_time = time.time()
                         await self.bot.db.log_removed_roles(
@@ -1002,6 +1016,20 @@ async def process_member_cleanup(member: discord.Member, guild: discord.Guild,
 
                     await member.kick(reason=f"Sem cargos há mais de {kick_after_days} dias")
                     
+                    # Notificar administradores por DM
+                    admin_embed = discord.Embed(
+                        title="👢 Membro Expulso por Inatividade",
+                        description=f"{member.mention} foi expulso do servidor.",
+                        color=discord.Color.from_rgb(156, 39, 176), # Roxo
+                        timestamp=datetime.now(pytz.utc)
+                    )
+                    admin_embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
+                    admin_embed.add_field(name="Usuário", value=f"{member.mention} (`{member.id}`)", inline=False)
+                    admin_embed.add_field(name="Motivo", value=f"Sem cargos monitorados por mais de {kick_after_days} dias.", inline=False)
+                    admin_embed.set_footer(text=f"Servidor: {guild.name}")
+                    
+                    await bot.notify_admins_dm(guild, embed=admin_embed)
+
                     # Registrar no banco de dados
                     await bot.db.log_kicked_member(
                         member.id, guild.id, 
@@ -1404,6 +1432,20 @@ async def process_member_missed_periods(member_id: int, guild: discord.Guild,
                     await bot.send_warning(member, 'final')
                     await bot.db.log_removed_roles(member.id, guild.id, [r.id for r in roles_to_remove])
                     
+                    # Notificar administradores por DM
+                    admin_embed = discord.Embed(
+                        title="🚨 Cargos Removidos (Período Perdido)",
+                        description=f"Os cargos de {member.mention} foram removidos por inatividade durante um período em que o bot esteve offline.",
+                        color=discord.Color.dark_red(),
+                        timestamp=datetime.now(pytz.utc)
+                    )
+                    admin_embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
+                    admin_embed.add_field(name="Usuário", value=f"{member.mention} (`{member.id}`)", inline=False)
+                    admin_embed.add_field(name="Cargos Removidos", value=", ".join([r.mention for r in roles_to_remove]), inline=False)
+                    admin_embed.set_footer(text=f"Servidor: {guild.name}")
+                    
+                    await bot.notify_admins_dm(guild, embed=admin_embed)
+
                     report_file = await generate_activity_report(member, sessions)
                     log_message = (
                         f"Cargos removidos: {', '.join([r.name for r in roles_to_remove])}\n"
@@ -1629,6 +1671,20 @@ async def process_member_previous_periods(member: discord.Member, guild: discord
                     
                     # Enviar mensagem de aviso final via DM
                     await bot.send_warning(member, 'final')
+
+                    # Notificar administradores por DM
+                    admin_embed = discord.Embed(
+                        title="🚨 Cargos Removidos (Períodos Anteriores)",
+                        description=f"Os cargos de {member.mention} foram removidos por inatividade em períodos de verificação anteriores.",
+                        color=discord.Color.dark_red(),
+                        timestamp=datetime.now(pytz.utc)
+                    )
+                    admin_embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
+                    admin_embed.add_field(name="Usuário", value=f"{member.mention} (`{member.id}`)", inline=False)
+                    admin_embed.add_field(name="Cargos Removidos", value=", ".join([r.mention for r in roles_to_remove]), inline=False)
+                    admin_embed.set_footer(text=f"Servidor: {member.guild.name}")
+                    
+                    await bot.notify_admins_dm(member.guild, embed=admin_embed)
                     
                     # Registrar cargos removidos
                     start_time = time.time()
