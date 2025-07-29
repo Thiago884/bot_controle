@@ -301,6 +301,23 @@ class InactivityBot(commands.Bot):
         self._connection_attempts = 0
         self._max_connection_attempts = 5
         self._connection_delay = 10  # segundos
+        
+        # Novos atributos para controle de eventos
+        self.event_counter = 0
+        self.last_reconnect_time = None
+
+    def generate_event_id(self):
+        """Gera um ID único para cada evento"""
+        self.event_counter += 1
+        return f"{int(time.time())}_{self.event_counter}"
+        
+    async def clear_queues(self):
+        """Limpa todas as filas de eventos"""
+        self.voice_event_queue = asyncio.Queue(maxsize=500)
+        self.message_queue = SmartPriorityQueue()
+        self.event_counter = 0
+        self.last_reconnect_time = datetime.now(pytz.UTC)
+        logger.info("Filas de eventos limpas")
 
     async def start(self, token: str, *, reconnect: bool = True) -> None:
         """Override do método start para lidar com rate limits de forma robusta."""
@@ -1080,7 +1097,21 @@ class InactivityBot(commands.Bot):
         while True:
             try:
                 event = await self.voice_event_queue.get()
-                await self._process_voice_batch([event])
+                
+                # Verificar se o evento é válido (tem todos os campos esperados)
+                if len(event) < 6:  # Evento antigo sem timestamp/ID
+                    self.voice_event_queue.task_done()
+                    continue
+                    
+                _, member, before, after, event_id, event_time = event
+                
+                # Ignorar eventos muito antigos
+                if (datetime.now(pytz.UTC) - event_time) > timedelta(minutes=5):
+                    logger.debug(f"Ignorando evento antigo: {event_id}")
+                    self.voice_event_queue.task_done()
+                    continue
+                    
+                await self._process_voice_batch([(_, member, before, after)])
                 self.voice_event_queue.task_done()
                 await asyncio.sleep(0.1)
             except Exception as e:
@@ -1429,8 +1460,6 @@ async def on_ready():
             bot.loop.create_task(check_current_voice_members(), name='check_current_voice_members')
             bot.loop.create_task(detect_missing_voice_leaves(), name='detect_missing_voice_leaves')
             bot.loop.create_task(cleanup_ghost_sessions_wrapper(), name='cleanup_ghost_sessions_wrapper')
-            # CORREÇÃO: Remover a chamada duplicada/incorreta
-            # bot.loop.create_task(register_role_assignments(), name='register_role_assignments_wrapper')
             
             # Apenas a queue_processor_task é criada aqui, conforme solicitado
             bot.queue_processor_task = bot.loop.create_task(bot.process_queues(), name='queue_processor')
@@ -1505,42 +1534,22 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
         return
 
     try:
-        # Verificação mais robusta da inicialização do banco
-        if not hasattr(bot, 'db') or not bot.db or not hasattr(bot.db, 'pool') or not bot.db._is_initialized:
-            logger.warning("Banco de dados não inicializado - pulando evento de voz")
+        event_id = bot.generate_event_id()
+        event_time = datetime.now(pytz.UTC)
+        
+        # Se acabamos de reconectar, ignorar eventos muito antigos
+        if bot.last_reconnect_time and (event_time - bot.last_reconnect_time) < timedelta(seconds=10):
+            logger.debug(f"Ignorando evento pós-reconexão: {event_id}")
             return
             
-        # Extrair informações necessárias dos estados de voz
-        before_channel_id = before.channel.id if before.channel else None
-        after_channel_id = after.channel.id if after.channel else None
-        
-        # Tentar salvar o evento com retry
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                await bot.db.save_pending_voice_event(
-                    'voice_state_update',
-                    member.id,
-                    member.guild.id,
-                    before_channel_id,
-                    after_channel_id,
-                    before.self_deaf,
-                    before.deaf,
-                    after.self_deaf,
-                    after.deaf
-                )
-                break
-            except Exception as e:
-                if attempt == max_retries - 1:
-                    logger.error(f"Falha após {max_retries} tentativas ao salvar evento pendente: {e}")
-                else:
-                    await asyncio.sleep(1 * (attempt + 1))
-        
-        # Enfileirar para processamento normal
-        try:
-            await bot.voice_event_queue.put(('voice_state_update', member, before, after))
-        except asyncio.QueueFull:
-            logger.warning("Fila de eventos de voz cheia - evento será processado na próxima inicialização")
+        await bot.voice_event_queue.put((
+            'voice_state_update',
+            member,
+            before,
+            after,
+            event_id,
+            event_time
+        ))
     except Exception as e:
         logger.error(f"Erro ao enfileirar evento de voz: {e}")
 

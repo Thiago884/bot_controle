@@ -514,9 +514,13 @@ async def on_shutdown():
 async def on_resumed():
     """Executa ações quando o bot reconecta após uma queda."""
     logger.info("Bot reconectado após queda")
-    await bot.log_action("Reconexão", None, "Bot reconectado após queda")
-    await check_missed_periods()  # Verificar períodos perdidos durante a queda
-    await process_pending_voice_events()  # Processar eventos pendentes após reconexão
+    
+    # Limpar filas e reinicializar contadores
+    await bot.clear_queues()
+    
+    await bot.log_action("Reconexão", None, "Bot reconectado após queda - Filas reinicializadas")
+    await check_missed_periods()
+    await process_pending_voice_events()
 
 @bot.event
 async def on_disconnect():
