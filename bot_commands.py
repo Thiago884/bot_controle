@@ -10,9 +10,24 @@ from utils import generate_activity_report, calculate_most_active_days
 import numpy as np
 import time
 from tasks import perf_metrics
-import pytz  # Added import for UTC timezone handling
+import pytz
+import asyncpg  # Importação adicionada para tratamento específico de erros
 
 logger = logging.getLogger('inactivity_bot')
+
+async def check_db_connection(interaction: discord.Interaction) -> bool:
+    """Verifica se a conexão com o banco de dados está disponível"""
+    if not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
+        if interaction.response.is_done():
+            await interaction.followup.send(
+                "⚠️ Banco de dados não disponível no momento.",
+                ephemeral=True)
+        else:
+            await interaction.response.send_message(
+                "⚠️ Banco de dados não disponível no momento.",
+                ephemeral=True)
+        return False
+    return True
 
 @bot.tree.command(name="list_allowed_roles", description="Lista os cargos com permissão para usar comandos")
 @app_commands.describe(role="Selecione um cargo para ver detalhes (opcional)")
@@ -379,6 +394,9 @@ async def force_role_assignment_log(interaction: discord.Interaction, role: disc
     try:
         await interaction.response.defer(thinking=True)
         
+        if not await check_db_connection(interaction):
+            return
+            
         members_with_role = [member for member in interaction.guild.members if role in member.roles]
         total_members = len(members_with_role)
         
@@ -393,20 +411,31 @@ async def force_role_assignment_log(interaction: discord.Interaction, role: disc
         errors = 0
         already_logged = 0
         
-        for member in members_with_role:
-            try:
-                # Verificar se já existe uma data de atribuição
-                existing_time = await bot.db.get_role_assigned_time(member.id, interaction.guild.id, role.id)
-                
-                # Se não existir, registrar agora
-                if existing_time is None:
-                    await bot.db.log_role_assignment(member.id, interaction.guild.id, role.id)
-                    processed += 1
-                else:
-                    already_logged += 1
-            except Exception as e:
-                logger.error(f"Erro ao processar registro de atribuição de cargo para {member.display_name}: {e}")
-                errors += 1
+        async with bot.db.pool.acquire() as conn:
+            async with conn.transaction():
+                for member in members_with_role:
+                    try:
+                        # Verificar se já existe uma data de atribuição
+                        existing_time = await conn.fetchval(
+                            "SELECT assigned_at FROM role_assignments WHERE user_id = $1 AND guild_id = $2 AND role_id = $3",
+                            member.id, interaction.guild.id, role.id
+                        )
+                        
+                        # Se não existir, registrar agora
+                        if existing_time is None:
+                            await conn.execute(
+                                "INSERT INTO role_assignments (user_id, guild_id, role_id, assigned_at) VALUES ($1, $2, $3, NOW())",
+                                member.id, interaction.guild.id, role.id
+                            )
+                            processed += 1
+                        else:
+                            already_logged += 1
+                    except asyncpg.PostgresError as e:
+                        logger.error(f"Erro de banco de dados ao processar {member.display_name}: {e}")
+                        errors += 1
+                    except Exception as e:
+                        logger.error(f"Erro ao processar registro de atribuição de cargo para {member.display_name}: {e}")
+                        errors += 1
                 
         embed = discord.Embed(
             title="✅ Registro de Atribuição de Cargos Concluído",
@@ -428,6 +457,12 @@ async def force_role_assignment_log(interaction: discord.Interaction, role: disc
             f"Cargo: {role.name} (ID: {role.id})\nNovos registros: {processed}\nJá registrados: {already_logged}\nErros: {errors}"
         )
         
+    except asyncpg.PostgresError as e:
+        logger.error(f"Erro de banco de dados no comando force_role_assignment_log: {e}")
+        await interaction.followup.send(
+            "❌ Ocorreu um erro no banco de dados ao processar o registro de atribuição de cargos.",
+            ephemeral=True
+        )
     except Exception as e:
         logger.error(f"Erro no comando force_role_assignment_log: {e}")
         await interaction.followup.send(
@@ -655,10 +690,7 @@ async def show_config(interaction: discord.Interaction):
     """Mostra todas as configurações atuais do bot"""
     try:
         # Verificar banco de dados
-        if not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
-            await interaction.response.send_message(
-                "⚠️ Banco de dados não disponível no momento.",
-                ephemeral=True)
+        if not await check_db_connection(interaction):
             return
             
         logger.info(f"Comando show_config acionado por {interaction.user}")
@@ -775,193 +807,203 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
             await interaction.followup.send("⚠️ O período deve ser entre 1 e 30 dias.", ephemeral=True)
             return
         
+        # Verificar banco de dados
+        if not await check_db_connection(interaction):
+            return
+        
         # Usar UTC consistentemente
         end_date = datetime.now(pytz.utc)
         start_date = end_date - timedelta(days=days)
         
         try:
-            # Verificar se o banco está disponível
-            if not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
-                raise RuntimeError("Banco de dados não disponível")
-                
-            user_data = await bot.db.get_user_activity(member.id, member.guild.id)
-            voice_sessions = await bot.db.get_voice_sessions(member.id, member.guild.id, start_date, end_date)
-            
-            # Calcular tempo total apenas para o período solicitado
-            total_time = sum(session['duration'] for session in voice_sessions) if voice_sessions else 0
-            total_minutes = total_time / 60
-            sessions_count = len(voice_sessions)
-            avg_session_duration = total_minutes / sessions_count if sessions_count else 0
-            
-            # Calcular dias mais ativos com datas
-            most_active_days = calculate_most_active_days(voice_sessions, days)
-            
-            # Formatar a lista de dias mais ativos com datas
-            active_days_text = "Nenhum dia com atividade significativa"
-            if most_active_days:
-                active_days_text = "\n".join(
-                    f"• {day_name} ({date_str}): {total} min (⌀ {avg} min/sessão)" 
-                    for day_name, date_str, total, avg in most_active_days[:3]  # Mostrar top 3 dias
+            async with bot.db.pool.acquire() as conn:
+                # Obter dados do usuário
+                user_data = await conn.fetchrow(
+                    "SELECT * FROM user_activity WHERE user_id = $1 AND guild_id = $2",
+                    member.id, member.guild.id
                 )
+                
+                # Obter sessões de voz
+                voice_sessions = await conn.fetch(
+                    "SELECT * FROM voice_sessions WHERE user_id = $1 AND guild_id = $2 AND join_time >= $3 AND leave_time <= $4",
+                    member.id, member.guild.id, start_date, end_date
+                )
+                
+                # Calcular tempo total apenas para o período solicitado
+                total_time = sum(session['duration'] for session in voice_sessions) if voice_sessions else 0
+                total_minutes = total_time / 60
+                sessions_count = len(voice_sessions)
+                avg_session_duration = total_minutes / sessions_count if sessions_count else 0
+                
+                # Calcular dias mais ativos com datas
+                most_active_days = calculate_most_active_days(voice_sessions, days)
+                
+                # Formatar a lista de dias mais ativos com datas
+                active_days_text = "Nenhum dia com atividade significativa"
+                if most_active_days:
+                    active_days_text = "\n".join(
+                        f"• {day_name} ({date_str}): {total} min (⌀ {avg} min/sessão)" 
+                        for day_name, date_str, total, avg in most_active_days[:3]  # Mostrar top 3 dias
+                    )
 
-            # Configurações de requisitos
-            required_min = bot.config['required_minutes']
-            required_days = bot.config['required_days']
-            monitoring_period = bot.config['monitoring_period']
-            
-            # Criar embed principal
-            embed = discord.Embed(
-                title=f"📊 Atividade de {member.display_name} (últimos {days} dias)",
-                color=discord.Color.blue(),
-                timestamp=datetime.now(pytz.utc)
-            )
-            embed.set_thumbnail(url=member.display_avatar.url)
-            
-            # Seção de estatísticas básicas
-            embed.add_field(
-                name="📈 Estatísticas Gerais",
-                value=(
-                    f"**Sessões:** {sessions_count}\n"
-                    f"**Tempo Total:** {int(total_minutes)} min\n"
-                    f"**Duração Média:** {int(avg_session_duration)} min/sessão\n"
-                    f"**Dias Mais Ativos:**\n{active_days_text}\n"
-                    f"**Última Atividade:** {max(s['join_time'] for s in voice_sessions).strftime('%d/%m %H:%M') if voice_sessions else 'N/D'}"
-                ),
-                inline=True
-            )
-            
-            # Seção de requisitos do servidor
-            embed.add_field(
-                name="📋 Requisitos do Servidor",
-                value=(
-                    f"**Minutos necessários:** {required_min} min\n"
-                    f"**Dias necessários:** {required_days} dias\n"
-                    f"**Período de monitoramento:** {monitoring_period} dias"
-                ),
-                inline=True
-            )
-            
-            # Seção de status atual
-            last_check = await bot.db.get_last_period_check(member.id, member.guild.id)
-            if last_check:
-                period_start = last_check['period_start'].replace(tzinfo=pytz.utc)
-                period_end = last_check['period_end'].replace(tzinfo=pytz.utc)
-                days_remaining = (period_end - datetime.now(pytz.utc)).days
+                # Configurações de requisitos
+                required_min = bot.config['required_minutes']
+                required_days = bot.config['required_days']
+                monitoring_period = bot.config['monitoring_period']
                 
-                status_emoji = "✅" if last_check['meets_requirements'] else "⚠️"
-                status_text = "Cumprindo" if last_check['meets_requirements'] else "Não cumprindo"
+                # Criar embed principal
+                embed = discord.Embed(
+                    title=f"📊 Atividade de {member.display_name} (últimos {days} dias)",
+                    color=discord.Color.blue(),
+                    timestamp=datetime.now(pytz.utc)
+                )
+                embed.set_thumbnail(url=member.display_avatar.url)
                 
+                # Seção de estatísticas básicas
                 embed.add_field(
-                    name="🔄 Status Atual",
+                    name="📈 Estatísticas Gerais",
                     value=(
-                        f"{status_emoji} **{status_text}** os requisitos\n"
-                        f"**Período:** {period_start.strftime('%d/%m/%Y')} a {period_end.strftime('%d/%m/%Y')}\n"
-                        f"**Dias Restantes:** {days_remaining}"
+                        f"**Sessões:** {sessions_count}\n"
+                        f"**Tempo Total:** {int(total_minutes)} min\n"
+                        f"**Duração Média:** {int(avg_session_duration)} min/sessão\n"
+                        f"**Dias Mais Ativos:**\n{active_days_text}\n"
+                        f"**Última Atividade:** {max(s['join_time'] for s in voice_sessions).strftime('%d/%m %H:%M') if voice_sessions else 'N/D'}"
                     ),
                     inline=True
                 )
                 
-                # Calcular dias válidos para o período atual
-                valid_days = set()
-                current_sessions = await bot.db.get_voice_sessions(member.id, member.guild.id, period_start, period_end)
-                for session in current_sessions:
-                    if session['duration'] >= required_min * 60:
-                        day = session['join_time'].replace(tzinfo=pytz.utc).date()
-                        valid_days.add(day)
-                
-                # Barra de progresso
-                progress = min(1.0, len(valid_days) / required_days)
-                progress_bar = "[" + "█" * int(progress * 10) + " " * (10 - int(progress * 10)) + "]"
-                progress_text = f"{progress*100:.0f}% ({len(valid_days)}/{required_days} dias)"
-                
+                # Seção de requisitos do servidor
                 embed.add_field(
-                    name="📊 Progresso",
-                    value=f"{progress_bar}\n{progress_text}",
-                    inline=False
-                )
-            
-            # Seção de avisos
-            all_warnings = []
-            try:
-                async with bot.db.pool.acquire() as conn:
-                    # The query now uses $1 and $2 for parameters.
-                    # The arguments are passed individually, not as a tuple.
-                    all_warnings = await conn.fetch('''
-                        SELECT warning_type, warning_date 
-                        FROM user_warnings 
-                        WHERE user_id = $1 AND guild_id = $2
-                        ORDER BY warning_date DESC
-                        LIMIT 3
-                    ''', member.id, member.guild.id)
-            except Exception as e:
-                logger.error(f"Erro ao obter avisos: {e}")
-
-            if all_warnings:
-                warnings_text = "\n".join(
-                    f"• {warn['warning_type'].capitalize()} - {warn['warning_date'].strftime('%d/%m/%Y %H:%M')}"
-                    for warn in all_warnings
-                )
-                embed.add_field(
-                    name="⚠️ Histórico de Avisos",
-                    value=warnings_text,
-                    inline=False
-                )
-            
-            # Seção de cargos monitorados
-            tracked_roles = [
-                role for role in member.roles 
-                if role.id in bot.config['tracked_roles']
-            ]
-            
-            if tracked_roles:
-                embed.add_field(
-                    name="🎖️ Cargos Monitorados",
-                    value="\n".join(role.mention for role in tracked_roles),
+                    name="📋 Requisitos do Servidor",
+                    value=(
+                        f"**Minutos necessários:** {required_min} min\n"
+                        f"**Dias necessários:** {required_days} dias\n"
+                        f"**Período de monitoramento:** {monitoring_period} dias"
+                    ),
                     inline=True
                 )
-            
-            # Seção de data de atribuição dos cargos
-            if tracked_roles:
-                assignment_info = []
-                for role in tracked_roles:
-                    assigned_at = await bot.db.get_role_assigned_time(member.id, member.guild.id, role.id)
-                    if assigned_at:
-                        assignment_info.append(f"• {role.mention}: {assigned_at.strftime('%d/%m/%Y')}")
-                    else:
-                        assignment_info.append(f"• {role.mention}: Data desconhecida")
                 
-                embed.add_field(
-                    name="📅 Data de Atribuição dos Cargos",
-                    value="\n".join(assignment_info),
-                    inline=True
+                # Seção de status atual
+                last_check = await conn.fetchrow(
+                    "SELECT * FROM period_checks WHERE user_id = $1 AND guild_id = $2 ORDER BY period_end DESC LIMIT 1",
+                    member.id, member.guild.id
                 )
-            
-            # Enviar resposta com tratamento de rate limit
-            try:
-                if voice_sessions:
-                    try:
-                        report_file = await generate_activity_report(member, voice_sessions, days)
-                        if report_file:
-                            await interaction.followup.send(embed=embed, file=report_file)
-                            return
-                    except Exception as e:
-                        logger.error(f"Erro ao gerar gráfico: {e}")
                 
-                await interaction.followup.send(embed=embed)
-                
-            except discord.errors.HTTPException as e:
-                if e.status == 429:
-                    retry_after = float(e.response.headers.get('Retry-After', 60))
-                    logger.warning(f"Rate limit ao enviar resposta. Tentando novamente em {retry_after} segundos")
-                    await asyncio.sleep(retry_after)
-                    try:
-                        await interaction.followup.send(embed=embed)
-                    except Exception as e:
-                        logger.error(f"Erro ao enviar resposta após rate limit: {e}")
-                else:
-                    raise
+                if last_check:
+                    period_start = last_check['period_start'].replace(tzinfo=pytz.utc)
+                    period_end = last_check['period_end'].replace(tzinfo=pytz.utc)
+                    days_remaining = (period_end - datetime.now(pytz.utc)).days
                     
-        except Exception as db_error:
+                    status_emoji = "✅" if last_check['meets_requirements'] else "⚠️"
+                    status_text = "Cumprindo" if last_check['meets_requirements'] else "Não cumprindo"
+                    
+                    embed.add_field(
+                        name="🔄 Status Atual",
+                        value=(
+                            f"{status_emoji} **{status_text}** os requisitos\n"
+                            f"**Período:** {period_start.strftime('%d/%m/%Y')} a {period_end.strftime('%d/%m/%Y')}\n"
+                            f"**Dias Restantes:** {days_remaining}"
+                        ),
+                        inline=True
+                    )
+                    
+                    # Calcular dias válidos para o período atual
+                    valid_days = set()
+                    current_sessions = await conn.fetch(
+                        "SELECT * FROM voice_sessions WHERE user_id = $1 AND guild_id = $2 AND join_time >= $3 AND leave_time <= $4",
+                        member.id, member.guild.id, period_start, period_end
+                    )
+                    for session in current_sessions:
+                        if session['duration'] >= required_min * 60:
+                            day = session['join_time'].replace(tzinfo=pytz.utc).date()
+                            valid_days.add(day)
+                    
+                    # Barra de progresso
+                    progress = min(1.0, len(valid_days) / required_days)
+                    progress_bar = "[" + "█" * int(progress * 10) + " " * (10 - int(progress * 10)) + "]"
+                    progress_text = f"{progress*100:.0f}% ({len(valid_days)}/{required_days} dias)"
+                    
+                    embed.add_field(
+                        name="📊 Progresso",
+                        value=f"{progress_bar}\n{progress_text}",
+                        inline=False
+                    )
+                
+                # Seção de avisos
+                all_warnings = await conn.fetch(
+                    "SELECT warning_type, warning_date FROM user_warnings WHERE user_id = $1 AND guild_id = $2 ORDER BY warning_date DESC LIMIT 3",
+                    member.id, member.guild.id
+                )
+
+                if all_warnings:
+                    warnings_text = "\n".join(
+                        f"• {warn['warning_type'].capitalize()} - {warn['warning_date'].strftime('%d/%m/%Y %H:%M')}"
+                        for warn in all_warnings
+                    )
+                    embed.add_field(
+                        name="⚠️ Histórico de Avisos",
+                        value=warnings_text,
+                        inline=False
+                    )
+                
+                # Seção de cargos monitorados
+                tracked_roles = [
+                    role for role in member.roles 
+                    if role.id in bot.config['tracked_roles']
+                ]
+                
+                if tracked_roles:
+                    embed.add_field(
+                        name="🎖️ Cargos Monitorados",
+                        value="\n".join(role.mention for role in tracked_roles),
+                        inline=True
+                    )
+                
+                # Seção de data de atribuição dos cargos
+                if tracked_roles:
+                    assignment_info = []
+                    for role in tracked_roles:
+                        assigned_at = await conn.fetchval(
+                            "SELECT assigned_at FROM role_assignments WHERE user_id = $1 AND guild_id = $2 AND role_id = $3",
+                            member.id, member.guild.id, role.id
+                        )
+                        if assigned_at:
+                            assignment_info.append(f"• {role.mention}: {assigned_at.strftime('%d/%m/%Y')}")
+                        else:
+                            assignment_info.append(f"• {role.mention}: Data desconhecida")
+                    
+                    embed.add_field(
+                        name="📅 Data de Atribuição dos Cargos",
+                        value="\n".join(assignment_info),
+                        inline=True
+                    )
+                
+                # Enviar resposta com tratamento de rate limit
+                try:
+                    if voice_sessions:
+                        try:
+                            report_file = await generate_activity_report(member, voice_sessions, days)
+                            if report_file:
+                                await interaction.followup.send(embed=embed, file=report_file)
+                                return
+                        except Exception as e:
+                            logger.error(f"Erro ao gerar gráfico: {e}")
+                    
+                    await interaction.followup.send(embed=embed)
+                    
+                except discord.errors.HTTPException as e:
+                    if e.status == 429:
+                        retry_after = float(e.response.headers.get('Retry-After', 60))
+                        logger.warning(f"Rate limit ao enviar resposta. Tentando novamente em {retry_after} segundos")
+                        await asyncio.sleep(retry_after)
+                        try:
+                            await interaction.followup.send(embed=embed)
+                        except Exception as e:
+                            logger.error(f"Erro ao enviar resposta após rate limit: {e}")
+                    else:
+                        raise
+                        
+        except asyncpg.PostgresError as db_error:
             logger.error(f"Erro de banco de dados: {db_error}")
             await interaction.followup.send(
                 "❌ Erro ao acessar o banco de dados. Tente novamente mais tarde.",
@@ -1001,10 +1043,7 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
         await interaction.response.defer(thinking=True)
         
         # Verificar se o banco está disponível
-        if not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
-            await interaction.followup.send(
-                "⚠️ Banco de dados não disponível no momento.",
-                ephemeral=True)
+        if not await check_db_connection(interaction):
             return
         
         # Definir período de análise em UTC
@@ -1081,6 +1120,7 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
             description="\n".join(ranking),
             color=discord.Color.gold(),
             timestamp=datetime.now(pytz.utc))
+        
         # Adicionar estatísticas gerais
         embed.add_field(
             name="📊 Estatísticas Gerais",
@@ -1161,8 +1201,8 @@ async def force_check(interaction: discord.Interaction, member: discord.Member):
         await interaction.response.defer(thinking=True)
         
         # Verificar se o banco está disponível
-        if not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
-            raise RuntimeError("Banco de dados não disponível")
+        if not await check_db_connection(interaction):
+            return
         
         # Usar UTC para todas as datas
         now = datetime.now(pytz.utc)
@@ -1320,24 +1360,53 @@ async def cleanup_data(interaction: discord.Interaction, days: int = 60):
         await interaction.response.defer(thinking=True)
         
         # Verificar se o banco está disponível
-        if not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
-            await interaction.followup.send(
-                "⚠️ Banco de dados não disponível no momento.",
-                ephemeral=True)
+        if not await check_db_connection(interaction):
             return
         
-        result = await bot.db.cleanup_old_data(days)
+        async with bot.db.pool.acquire() as conn:
+            async with conn.transaction():
+                # Limpar sessões de voz antigas
+                voice_result = await conn.execute(
+                    "DELETE FROM voice_sessions WHERE leave_time < NOW() - $1::interval",
+                    f"{days} days"
+                )
+                
+                # Limpar verificações de período antigas
+                checks_result = await conn.execute(
+                    "DELETE FROM period_checks WHERE period_end < NOW() - $1::interval",
+                    f"{days} days"
+                )
+                
+                # Limpar avisos antigos
+                warnings_result = await conn.execute(
+                    "DELETE FROM user_warnings WHERE warning_date < NOW() - $1::interval",
+                    f"{days} days"
+                )
+                
         await interaction.followup.send(
-            f"✅ Limpeza de dados concluída: {result}")
+            f"✅ Limpeza de dados concluída:\n"
+            f"- Sessões de voz removidas: {voice_result.split()[1]}\n"
+            f"- Verificações de período removidas: {checks_result.split()[1]}\n"
+            f"- Avisos removidos: {warnings_result.split()[1]}"
+        )
+        
         await bot.log_action(
             "Limpeza de Dados Manual",
             interaction.user,
             f"Dados antigos removidos (mais de {days} dias)"
         )
+    except asyncpg.PostgresError as e:
+        logger.error(f"Erro de banco de dados ao limpar dados antigos: {e}")
+        await interaction.followup.send(
+            "❌ Ocorreu um erro no banco de dados ao limpar os dados.",
+            ephemeral=True
+        )
     except Exception as e:
         logger.error(f"Erro ao limpar dados antigos: {e}")
         await interaction.followup.send(
-            "❌ Ocorreu um erro ao limpar os dados. Por favor, tente novamente.")
+            "❌ Ocorreu um erro ao limpar os dados. Por favor, tente novamente.",
+            ephemeral=True
+        )
 
 @bot.tree.command(name="set_log_channel", description="Define o canal para logs do bot")
 @allowed_roles_only()

@@ -17,6 +17,7 @@ from collections import deque
 from flask import Flask
 import sys
 import traceback
+from io import BytesIO
 
 # Importe sua classe Database
 from database import Database
@@ -72,8 +73,9 @@ class RateLimitMonitor:
         self.last_updated = 0
         self.history = deque(maxlen=100)  # Mantém histórico dos últimos 100 eventos
         self.adaptive_delay = 1.0
-        self.max_delay = 10.0
+        self.max_delay = 30.0  # Aumentado para 30 segundos
         self.cooldown_until = 0
+        self.cloudflare_blocked_until = 0
     
     def update_from_headers(self, headers):
         now = time.time()
@@ -104,8 +106,20 @@ class RateLimitMonitor:
             'endpoint': str(headers.get('endpoint', 'unknown'))
         })
     
+    def handle_cloudflare_block(self):
+        """Lida com bloqueio do Cloudflare (Error 1015)"""
+        now = time.time()
+        self.cloudflare_blocked_until = now + 60  # Bloqueio por 1 minuto
+        self.adaptive_delay = min(self.max_delay, self.adaptive_delay * 2)
+        logger.warning("Bloqueio do Cloudflare detectado. Entrando em modo de resfriamento por 60 segundos.")
+    
     def should_delay(self):
         now = time.time()
+        
+        # Verificar se estamos bloqueados pelo Cloudflare
+        if now < self.cloudflare_blocked_until:
+            return True
+            
         if now < self.cooldown_until:
             return True
         
@@ -180,21 +194,36 @@ DEFAULT_CONFIG = {
 class SmartPriorityQueue:
     def __init__(self):
         self.queues = {
-            'critical': asyncio.Queue(maxsize=20),   # Alertas e notificações urgentes
-            'high': asyncio.Queue(maxsize=100),      # Comandos de administração
-            'normal': asyncio.Queue(maxsize=500),    # Mensagens regulares
-            'low': asyncio.Queue(maxsize=1000)       # Logs e estatísticas
+            'critical': asyncio.Queue(maxsize=20),
+            'high': asyncio.Queue(maxsize=100),
+            'normal': asyncio.Queue(maxsize=500),
+            'low': asyncio.Queue(maxsize=1000)
         }
         self.bucket_limits = {
-            'critical': 5,   # Máximo de 5 mensagens por segundo
-            'high': 2,       # Máximo de 2 mensagens por segundo
-            'normal': 1,     # Máximo de 1 mensagem por segundo
-            'low': 0.5       # Máximo de 1 mensagem a cada 2 segundos
+            'critical': 5,
+            'high': 2,
+            'normal': 1,
+            'low': 0.5
         }
         self.last_sent = {priority: 0 for priority in self.queues}
+        self._adaptive_batch_size = 5  # Tamanho inicial do lote
+        self._min_batch_size = 1
+        self._max_batch_size = 10
+    
+    def adjust_batch_size(self, success: bool):
+        """Ajusta dinamicamente o tamanho do lote baseado no sucesso"""
+        if success:
+            self._adaptive_batch_size = min(
+                self._max_batch_size,
+                self._adaptive_batch_size + 1
+            )
+        else:
+            self._adaptive_batch_size = max(
+                self._min_batch_size,
+                self._adaptive_batch_size - 1
+            )
     
     async def get_next_message(self):
-        # Verificar rate limits por prioridade
         now = time.time()
         for priority in ['critical', 'high', 'normal', 'low']:
             if not self.queues[priority].empty():
@@ -211,6 +240,10 @@ class SmartPriorityQueue:
     
     def qsize(self):
         return {priority: q.qsize() for priority, q in self.queues.items()}
+    
+    @property
+    def batch_size(self):
+        return self._adaptive_batch_size
 
 class InactivityBot(commands.Bot):
     def __init__(self, *args, **kwargs):
@@ -324,31 +357,22 @@ class InactivityBot(commands.Bot):
         while self._connection_attempts < self._max_connection_attempts:
             try:
                 await super().start(token, reconnect=reconnect)
-                break  # Sai do loop se a conexão for bem-sucedida
+                break
             except discord.HTTPException as e:
                 self._connection_attempts += 1
-                if e.status == 429:  # Rate limited
-                    # FIX: Check if 'retry_after' exists, as Cloudflare's 429 response might not have it.
-                    if hasattr(e, 'retry_after') and e.retry_after:
-                        retry_after = e.retry_after
-                        logger.warning(
-                            f"Rate limit da API do Discord ao conectar. Esperando {retry_after:.2f} segundos. "
-                            f"Tentativa {self._connection_attempts}/{self._max_connection_attempts}"
-                        )
-                    else:
-                        # Fallback for Cloudflare rate limits (Error 1015) which don't have 'retry_after'
-                        retry_after = self._connection_delay * (2 ** self._connection_attempts)
-                        logger.warning(
-                            f"Rate limit do Cloudflare (Erro 1015) ao conectar. Sem 'retry_after'. "
-                            f"Usando backoff exponencial e esperando {retry_after}s. "
-                            f"Tentativa {self._connection_attempts}/{self._max_connection_attempts}"
-                        )
+                if e.status == 429 or "Cloudflare" in str(e) or "1015" in str(e):  # Rate limited ou bloqueio Cloudflare
+                    self.rate_limit_monitor.handle_cloudflare_block()
+                    retry_after = self.rate_limit_monitor.adaptive_delay
+                    logger.warning(
+                        f"Rate limit da API do Discord/Cloudflare ao conectar. Esperando {retry_after:.2f} segundos. "
+                        f"Tentativa {self._connection_attempts}/{self._max_connection_attempts}"
+                    )
                     
                     if self._connection_attempts >= self._max_connection_attempts:
-                        logger.critical("Máximo de tentativas de conexão atingido devido a rate limits. Desistindo.", exc_info=False)
+                        logger.critical("Máximo de tentativas de conexão atingido devido a rate limits. Desistindo.")
                         raise
+                        
                     await asyncio.sleep(retry_after)
-
                 else:
                     wait_time = self._connection_delay * (2 ** self._connection_attempts)
                     logger.error(
@@ -545,26 +569,45 @@ class InactivityBot(commands.Bot):
 
     async def send_with_fallback(self, destination, content=None, embed=None, file=None):
         """Envia mensagens com tratamento de erros e fallback para rate limits."""
-        try:
-            if file:
-                # Se for um objeto BytesIO, criar um File discord.File
-                if isinstance(file, BytesIO):
-                    file.seek(0)  # Voltar ao início do buffer
-                    file = discord.File(file, filename='activity_report.png')
-                await destination.send(content=content, embed=embed, file=file)
-            elif embed:
-                await destination.send(embed=embed)
-            elif content:
-                await destination.send(content)
-        except discord.HTTPException as e:
-            if e.code == 429:  # Rate limited
-                retry_after = e.retry_after
-                logger.warning(f"Rate limit atingido. Tentando novamente em {retry_after} segundos")
-                await asyncio.sleep(retry_after)
-                await self.send_with_fallback(destination, content, embed, file)
-            else:
-                logger.error(f"Erro ao enviar mensagem para {destination}: {e}")
+        max_retries = 3
+        base_delay = 2.0
+        
+        for attempt in range(max_retries):
+            try:
+                if file:
+                    if isinstance(file, BytesIO):
+                        file.seek(0)
+                        file = discord.File(file, filename='activity_report.png')
+                    await destination.send(content=content, embed=embed, file=file)
+                elif embed:
+                    await destination.send(embed=embed)
+                elif content:
+                    await destination.send(content)
+                return  # Se enviou com sucesso, sai do loop
+                
+            except discord.HTTPException as e:
+                if e.status == 429:  # Rate limited
+                    # Usar delay exponencial com jitter
+                    delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                    logger.warning(f"Rate limit atingido (tentativa {attempt + 1}/{max_retries}). Tentando novamente em {delay:.2f} segundos")
+                    
+                    # Atualizar monitor de rate limits
+                    self.rate_limit_monitor.adaptive_delay = min(
+                        self.rate_limit_monitor.max_delay,
+                        self.rate_limit_monitor.adaptive_delay * 1.5
+                    )
+                    
+                    await asyncio.sleep(delay)
+                    continue
+                    
+                logger.error(f"Erro HTTP ao enviar mensagem para {destination}: {e}")
                 raise
+                
+            except Exception as e:
+                logger.error(f"Erro inesperado ao enviar mensagem para {destination}: {e}")
+                if attempt == max_retries - 1:
+                    raise
+                await asyncio.sleep(base_delay * (2 ** attempt))
 
     async def on_error(self, event, *args, **kwargs):
         """Tratamento de erros genéricos."""
@@ -692,6 +735,13 @@ class InactivityBot(commands.Bot):
         await self.wait_until_ready()
         while True:
             try:
+                # Verificar rate limits antes de processar
+                if self.rate_limit_monitor.should_delay():
+                    delay = self.rate_limit_monitor.adaptive_delay
+                    logger.debug(f"Delay ativado por rate limit. Esperando {delay:.2f} segundos")
+                    await asyncio.sleep(delay)
+                    continue
+
                 if not self.voice_event_queue.empty():
                     batch = []
                     for _ in range(min(self._batch_processing_size, self.voice_event_queue.qsize())):
@@ -704,7 +754,7 @@ class InactivityBot(commands.Bot):
                 
                 item, priority = await self.message_queue.get_next_message()
                 if item is None:
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.5)  # Aumentado o sleep quando não há mensagens
                     continue
                     
                 try:
@@ -729,12 +779,16 @@ class InactivityBot(commands.Bot):
                         logger.warning(f"Item da fila não é um destino válido: {type(item)}")
                 except Exception as e:
                     logger.error(f"Erro ao processar item da fila: {e}")
+                    if "Cloudflare" in str(e) or "1015" in str(e):
+                        self.rate_limit_monitor.handle_cloudflare_block()
                     
                 self.message_queue.task_done(priority)
                     
             except Exception as e:
                 logger.error(f"Erro no processador de filas: {e}")
-                await asyncio.sleep(1)
+                if "Cloudflare" in str(e) or "1015" in str(e):
+                    self.rate_limit_monitor.handle_cloudflare_block()
+                await asyncio.sleep(5)  # Aumentado o tempo de espera em caso de erro
 
     async def _process_voice_batch(self, batch):
         processed = {}
