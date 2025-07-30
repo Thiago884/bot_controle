@@ -885,7 +885,7 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
                 
                 # Seção de status atual
                 last_check = await conn.fetchrow(
-                    "SELECT * FROM period_checks WHERE user_id = $1 AND guild_id = $2 ORDER BY period_end DESC LIMIT 1",
+                    "SELECT * FROM checked_periods WHERE user_id = $1 AND guild_id = $2 ORDER BY period_end DESC LIMIT 1",
                     member.id, member.guild.id
                 )
                 
@@ -1373,7 +1373,7 @@ async def cleanup_data(interaction: discord.Interaction, days: int = 60):
                 
                 # Limpar verificações de período antigas
                 checks_result = await conn.execute(
-                    "DELETE FROM period_checks WHERE period_end < NOW() - $1::interval",
+                    "DELETE FROM checked_periods WHERE period_end < NOW() - $1::interval",
                     f"{days} days"
                 )
                 
