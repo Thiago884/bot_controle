@@ -741,7 +741,10 @@ class InactivityBot(commands.Bot):
         
         for event in batch:
             try:
-                event_type, member, before, after = event
+                # CORREÇÃO: Unpack dos 4 primeiros elementos, ignorando os extras.
+                # Isso resolve o erro "too many values to unpack" lidando com os dois formatos de evento (4 e 6 elementos).
+                event_type, member, before, after = event[:4]
+                
                 key = (member.id, member.guild.id)
                 
                 if key not in processed:
@@ -751,7 +754,7 @@ class InactivityBot(commands.Bot):
                     }
                 processed[key]['events'].append((before, after))
             except Exception as e:
-                logger.error(f"Erro ao processar evento de voz: {e}")
+                logger.error(f"Erro ao processar evento de voz: {e}", exc_info=True)
                 continue
         
         for user_data in processed.values():
