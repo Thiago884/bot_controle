@@ -242,6 +242,7 @@ class BatchProcessor:
                 
                 meets_requirements = len(valid_days) >= required_days
             
+            roles_to_remove = []
             # Ações para quem não cumpriu os requisitos
             if not meets_requirements:
                 roles_to_remove = [role for role in member.roles if role.id in tracked_roles]
@@ -327,8 +328,20 @@ class BatchProcessor:
                     meets_requirements
                 )
             
-            # SOLUÇÃO IMPLEMENTADA: Só registrar novo período se o usuário ainda tiver cargos monitorados
-            if now >= period_end and any(role.id in tracked_roles for role in member.roles):
+            # CORREÇÃO: A lógica para decidir sobre um novo período deve verificar se, APÓS a remoção,
+            # o usuário AINDA possui algum cargo monitorado.
+            
+            # Obter o conjunto de cargos que o membro tem atualmente (pode estar desatualizado)
+            current_member_roles_ids = {r.id for r in member.roles}
+            # Obter o conjunto de cargos que acabamos de remover
+            removed_roles_ids = {r.id for r in roles_to_remove}
+            # Calcular os cargos restantes
+            remaining_roles_ids = current_member_roles_ids - removed_roles_ids
+            
+            # Verificar se algum dos cargos restantes é um cargo monitorado
+            still_has_tracked_roles = any(role_id in tracked_roles for role_id in remaining_roles_ids)
+
+            if now >= period_end and still_has_tracked_roles:
                 # Definir novo período de verificação (futuro)
                 new_period_end = now + timedelta(days=monitoring_period)
                 new_period_start = now
@@ -903,7 +916,10 @@ async def process_member_warnings(member: discord.Member, guild: discord.Guild,
             )
             return
         
-        # Calcular dias restantes
+        # Calcular dias restantes e obter datas do período
+        period_start = last_check['period_start']
+        if period_start.tzinfo is None:
+             period_start = period_start.replace(tzinfo=pytz.UTC)
         period_end = last_check['period_end']
         if period_end.tzinfo is None:  # Garantir timezone
             period_end = period_end.replace(tzinfo=pytz.UTC)
@@ -915,19 +931,20 @@ async def process_member_warnings(member: discord.Member, guild: discord.Guild,
             
         days_remaining = (period_end - now).days
             
-        # Obter último aviso
-        start_time = time.time()
-        last_warning = await bot.db.get_last_warning(member.id, guild.id)
-        perf_metrics.record_db_query(time.time() - start_time)
+        # CORREÇÃO: Usar a nova função e refinar a lógica de verificação
+        # Obter último aviso no período atual
+        # NOTA: Assumimos que bot.db.get_last_warning_in_period(user, guild, period_start) foi implementado em database.py
+        # Esta função deve retornar uma tupla (warning_type, warning_date) ou None.
+        last_warning_in_period = await bot.db.get_last_warning_in_period(member.id, guild.id, period_start)
+        last_warning_type = last_warning_in_period[0] if last_warning_in_period else None
         
-        # Verificar necessidade de avisos
-        if days_remaining <= first_warning_days and (
-            not last_warning or (now - last_warning[1]).days >= 1):
+        # Condição para o primeiro aviso
+        if days_remaining <= first_warning_days and not last_warning_in_period:
             await bot.send_warning(member, 'first')
             warnings_sent['first'] += 1
         
-        elif days_remaining <= second_warning_days and (
-            not last_warning or (now - last_warning[1]).days >= 1):
+        # Condição para o segundo aviso
+        elif days_remaining <= second_warning_days and last_warning_type == 'first':
             await bot.send_warning(member, 'second')
             warnings_sent['second'] += 1
             
@@ -1400,7 +1417,7 @@ async def process_member_missed_periods(member_id: int, guild: discord.Guild,
             return
             
         # Obter todos os períodos não verificados
-        now = datetime.now(pytz.UTC)  # CORRIGIDO
+        now = datetime.now(pytz.UTC)
         last_check = await bot.db.get_last_period_check(member.id, guild.id)
         
         if not last_check:
@@ -1419,7 +1436,10 @@ async def process_member_missed_periods(member_id: int, guild: discord.Guild,
             current_end = min(current_start + period_duration, now)
             missed_periods.append((current_start, current_end))
             current_start = current_end
-            
+        
+        initial_roles_ids = {r.id for r in member.roles}
+        cumulatively_removed_roles_ids = set()
+
         # Processar cada período perdido
         for period_start, period_end in missed_periods:
             # Verificar atividade no período
@@ -1441,6 +1461,7 @@ async def process_member_missed_periods(member_id: int, guild: discord.Guild,
             # Se não cumpriu, remover cargos
             if not meets_requirements and any(role.id in tracked_roles for role in member.roles):
                 roles_to_remove = [role for role in member.roles if role.id in tracked_roles]
+                cumulatively_removed_roles_ids.update(r.id for r in roles_to_remove)
                 
                 try:
                     await member.remove_roles(*roles_to_remove)
@@ -1492,8 +1513,12 @@ async def process_member_missed_periods(member_id: int, guild: discord.Guild,
                 except Exception as e:
                     logger.error(f"Erro ao remover cargos de {member}: {e}")
         
-        # SOLUÇÃO IMPLEMENTADA: Criar novo período atual apenas se ainda tiver cargos monitorados
-        if any(role.id in tracked_roles for role in member.roles):
+        # CORREÇÃO: A lógica para decidir sobre um novo período deve verificar se, APÓS a remoção,
+        # o usuário AINDA possui algum cargo monitorado.
+        remaining_roles_ids = initial_roles_ids - cumulatively_removed_roles_ids
+        still_has_tracked_roles = any(role_id in tracked_roles for role_id in remaining_roles_ids)
+        
+        if still_has_tracked_roles:
             new_period_end = now + timedelta(days=monitoring_period)
             await bot.db.log_period_check(member.id, guild.id, now, new_period_end, False)
             
@@ -1630,7 +1655,7 @@ async def process_member_previous_periods(member: discord.Member, guild: discord
                     AND period_start >= $3  -- Apenas períodos após atribuição do cargo
                     AND period_end <= $4    -- Apenas períodos que já terminaram
                     ORDER BY period_start
-                ''', member.id, guild.id, role_assignment_time, now)  # Adicionado now como parâmetro
+                ''', member.id, guild.id, role_assignment_time, now)
             perf_metrics.record_db_query(time.time() - start_time)
         except Exception as e:
             logger.error(f"Erro ao buscar períodos falhos para {member}: {e}")
@@ -1638,36 +1663,54 @@ async def process_member_previous_periods(member: discord.Member, guild: discord
         
         # Se houver períodos onde não cumpriu os requisitos E QUE JÁ TERMINARAM
         if failed_periods:
-            # Verificar se já teve cargos removidos para esses períodos específicos
-            try:
-                start_time = time.time()
-                async with bot.db.pool.acquire() as conn:
-                    # Verificar se há remoções registradas para os mesmos períodos
-                    already_removed = await conn.fetch('''
-                        SELECT DISTINCT r.role_id 
-                        FROM removed_roles r
-                        JOIN checked_periods c ON 
-                            r.user_id = c.user_id AND 
-                            r.guild_id = c.guild_id AND
-                            r.removal_date BETWEEN c.period_start AND c.period_end
-                        WHERE r.user_id = $1 AND r.guild_id = $2
-                        AND c.period_start = ANY($3::timestamptz[])
-                    ''', member.id, guild.id, [p['period_start'] for p in failed_periods])
-                perf_metrics.record_db_query(time.time() - start_time)
-            except Exception as e:
-                logger.error(f"Erro ao verificar cargos já removidos para {member}: {e}")
-                return result
-            
-            already_removed_ids = {r['role_id'] for r in already_removed}
-            
-            # Verificar quais cargos monitorados ainda não foram removidos
+            # CORREÇÃO: Antes de remover, revalidar a atividade para cada período falho.
             roles_to_remove = [
-                role for role in member.roles 
-                if role.id in tracked_roles and role.id not in already_removed_ids
+                role for role in member.roles if role.id in tracked_roles
             ]
-            
-            if roles_to_remove:
-                logger.info(f"Removendo cargos de {member}: {[r.name for r in roles_to_remove]}")
+
+            if not roles_to_remove:
+                return result # Não há mais cargos monitorados para remover
+
+            should_remove_roles = False
+            first_failed_period = None
+            revalidated_sessions = []
+            revalidated_valid_days = set()
+
+            for period in failed_periods:
+                # REVALIDAÇÃO
+                period_start = period['period_start']
+                if period_start.tzinfo is None: period_start = period_start.replace(tzinfo=pytz.UTC)
+                period_end = period['period_end']
+                if period_end.tzinfo is None: period_end = period_end.replace(tzinfo=pytz.UTC)
+
+                sessions = await bot.db.get_voice_sessions(member.id, guild.id, period_start, period_end)
+                
+                valid_days = set()
+                if sessions:
+                    for session in sessions:
+                        if session['duration'] >= required_minutes * 60:
+                            day = session['join_time'].date()
+                            valid_days.add(day)
+                
+                meets_requirements_on_recheck = len(valid_days) >= required_days
+
+                # Se a revalidação também falhar, então a remoção é justificada.
+                if not meets_requirements_on_recheck:
+                    should_remove_roles = True
+                    first_failed_period = period # Salva o primeiro período confirmado como falho
+                    revalidated_sessions = sessions
+                    revalidated_valid_days = valid_days
+                    # Atualiza o registro no banco para corrigir o status se necessário
+                    await bot.db.log_period_check(member.id, guild.id, period_start, period_end, False)
+                    break # Encontrou um período falho confirmado, pode prosseguir com a remoção
+                else:
+                    # Se a revalidação passou, o registro original estava errado. Corrigi-lo.
+                    logger.info(f"Corrigindo período falho para {member.display_name} após revalidação. Período: {period_start.strftime('%d/%m/%Y')}")
+                    await bot.db.log_period_check(member.id, guild.id, period_start, period_end, True)
+
+            # Só remove os cargos se a revalidação confirmou a falha
+            if should_remove_roles:
+                logger.info(f"Removendo cargos de {member.display_name} após revalidação de período anterior falho.")
                 try:
                     # Verificar permissões
                     if not member.guild.me.guild_permissions.manage_roles:
@@ -1689,8 +1732,8 @@ async def process_member_previous_periods(member: discord.Member, guild: discord
 
                     # Notificar administradores por DM
                     admin_embed = discord.Embed(
-                        title="🚨 Cargos Removidos (Períodos Anteriores)",
-                        description=f"Os cargos de {member.mention} foram removidos por inatividade em períodos de verificação anteriores.",
+                        title="🚨 Cargos Removidos (Períodos Anteriores Revalidados)",
+                        description=f"Os cargos de {member.mention} foram removidos por inatividade em períodos de verificação anteriores, confirmada após revalidação.",
                         color=discord.Color.dark_red(),
                         timestamp=datetime.now(pytz.utc)
                     )
@@ -1709,61 +1752,58 @@ async def process_member_previous_periods(member: discord.Member, guild: discord
                     )
                     perf_metrics.record_db_query(time.time() - start_time)
                     
-                    # SOLUÇÃO IMPLEMENTADA: Só registrar novo período se o usuário ainda tiver cargos monitorados
-                    if any(role.id in tracked_roles for role in member.roles):
+                    # CORREÇÃO: Lógica para decidir sobre um novo período
+                    current_member_roles_ids = {r.id for r in member.roles}
+                    removed_roles_ids = {r.id for r in roles_to_remove}
+                    remaining_roles_ids = current_member_roles_ids - removed_roles_ids
+                    still_has_tracked_roles = any(role_id in tracked_roles for role_id in remaining_roles_ids)
+
+                    if still_has_tracked_roles:
                         # Registrar novo período de verificação
                         new_period_end = now + timedelta(days=monitoring_period)
                         await bot.db.log_period_check(
                             member.id, guild.id,
                             now, new_period_end,
-                            False  # Assume que começa não cumprindo
+                            False
                         )
                     
                     # Gerar relatório
-                    all_sessions = []
-                    for period in failed_periods:
-                        sessions = await bot.db.get_voice_sessions(
-                            member.id, guild.id,
-                            period['period_start'],
-                            period['period_end']
-                        )
-                        if sessions:
-                            all_sessions.extend(sessions)
-                    
-                    report_file = await generate_activity_report(member, all_sessions)
+                    report_file = await generate_activity_report(member, revalidated_sessions)
                     
                     log_message = (
                         f"Cargos removidos: {', '.join([r.name for r in roles_to_remove])}\n"
-                        f"Períodos falhos: {len(failed_periods)}\n"
-                        f"Primeiro período falho: {failed_periods[0]['period_start'].strftime('%d/%m/%Y')}\n"
-                        f"Último período falho: {failed_periods[-1]['period_end'].strftime('%d/%m/%Y')}"
+                        f"Falha confirmada após revalidação do período: "
+                        f"{first_failed_period['period_start'].strftime('%d/%m/%Y')} a "
+                        f"{first_failed_period['period_end'].strftime('%d/%m/%Y')}\n"
+                        f"Sessões no período revalidado: {len(revalidated_sessions)}\n"
+                        f"Dias válidos no período revalidado: {len(revalidated_valid_days)}/{required_days}"
                     )
                     
                     if report_file:
                         await bot.log_action(
-                            "Cargo Removido (Períodos Anteriores)",
+                            "Cargo Removido (Períodos Anteriores Revalidados)",
                             member,
                             log_message,
                             file=report_file
                         )
                     else:
                         await bot.log_action(
-                            "Cargo Removido (Períodos Anteriores)",
+                            "Cargo Removido (Períodos Anteriores Revalidados)",
                             member,
                             log_message
                         )
                     
                     await bot.notify_roles(
-                        f"🚨 Cargos removidos de {member.mention} por inatividade em períodos anteriores: " +
+                        f"🚨 Cargos removidos de {member.mention} por inatividade em períodos anteriores (confirmado): " +
                         ", ".join([f"`{r.name}`" for r in roles_to_remove]))
                     
                     result['removed'] = 1
                     
                 except discord.Forbidden as e:
-                    logger.error(f"Permissões insuficientes para remover cargos de {member}: {e}")
+                    logger.error(f"Permissões insuficientes para remover cargos de {member} após revalidação: {e}")
                     await bot.log_action("Erro ao Remover Cargo", member, f"Permissões insuficientes: {e}")
                 except Exception as e:
-                    logger.error(f"Erro ao remover cargos de {member}: {e}")
+                    logger.error(f"Erro ao remover cargos de {member} após revalidação: {e}")
     
     except Exception as e:
         logger.error(f"Erro ao verificar períodos anteriores para {member}: {e}")
@@ -1929,7 +1969,7 @@ async def detect_missing_voice_leaves():
             active_sessions = await conn.fetch('''
                 SELECT user_id, guild_id, last_voice_join 
                 FROM user_activity 
-                WHERE last_voice_leave IS NULL OR last_voice_leave < last_voice_join
+                WHERE (last_voice_leave IS NULL OR last_voice_leave < last_voice_join)
                 AND last_voice_join < NOW() - INTERVAL '10 minutes'
             ''')
             
@@ -1949,12 +1989,14 @@ async def detect_missing_voice_leaves():
                 if join_time.tzinfo is None:
                     join_time = join_time.replace(tzinfo=pytz.UTC)
                 
-                # Limitar a duração máxima a 10 minutos para sessões estimadas
-                max_duration = timedelta(minutes=10).total_seconds()
-                duration = min(
-                    (datetime.now(pytz.UTC) - join_time).total_seconds(),
-                    max_duration
-                )
+                # CORREÇÃO: Remover o limite de 10 minutos e calcular a duração real.
+                # A duração será o tempo desde a entrada até agora (momento da reinicialização).
+                duration = (datetime.now(pytz.UTC) - join_time).total_seconds()
+
+                # Adicionar um limite razoável para evitar sessões absurdamente longas se o bot
+                # ficar offline por dias. Um limite de 24 horas é uma salvaguarda segura.
+                max_duration = timedelta(hours=24).total_seconds()
+                duration = min(duration, max_duration)
                 
                 # Registrar saída no banco de dados
                 try:
@@ -1965,7 +2007,7 @@ async def detect_missing_voice_leaves():
                     if audio_key in bot.active_sessions:
                         del bot.active_sessions[audio_key]
                         
-                    logger.info(f"Sessão estimada encerrada para {member.display_name} com duração de {duration//60} minutos")
+                    logger.info(f"Sessão que terminou durante a queda do bot foi encerrada para {member.display_name} com duração de {duration//60:.0f} minutos")
                     
                 except Exception as e:
                     logger.error(f"Erro ao registrar saída estimada: {e}")

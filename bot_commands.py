@@ -936,8 +936,9 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
                 )
 
                 if all_warnings:
+                    # CORREÇÃO: Adicionar (UTC) à formatação da data
                     warnings_text = "\n".join(
-                        f"• {warn['warning_type'].capitalize()} - {warn['warning_date'].strftime('%d/%m/%Y %H:%M')}"
+                        f"• {warn['warning_type'].capitalize()} - {warn['warning_date'].strftime('%d/%m/%Y %H:%M')} (UTC)"
                         for warn in all_warnings
                     )
                     embed.add_field(
