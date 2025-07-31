@@ -1,3 +1,5 @@
+# database.py
+
 import os
 import time
 import asyncio
@@ -271,7 +273,7 @@ class Database:
                 logger.info("Heartbeat do banco de dados cancelado.")
                 break
             except Exception as e:
-                logger.error(f"Erro no heartbeat do banco de dados: {e}")
+                logger.error(f"Erro no heartbeat do banco de dados: {e}", exc_info=True)
                 await asyncio.sleep(60)
 
     async def close(self):
@@ -471,7 +473,7 @@ class Database:
                 logger.info("Tabelas criadas/verificadas com sucesso")
                 
             except Exception as e:
-                logger.error(f"Erro ao criar tabelas: {e}")
+                logger.error(f"Erro ao criar tabelas: {e}", exc_info=True)
                 raise
             finally:
                 if conn:
@@ -492,11 +494,11 @@ class Database:
                 return result
                 
             except asyncpg.PostgresSyntaxError as e:
-                logger.error(f"Erro de sintaxe SQL (tentativa {attempt + 1}/{max_retries}): {e}")
+                logger.error(f"Erro de sintaxe SQL (tentativa {attempt + 1}/{max_retries}): {e}", exc_info=True)
                 raise  # Re-raise para que o chamador saiba que é um erro de sintaxe
                 
             except (asyncpg.PostgresError, asyncpg.InterfaceError) as e:
-                logger.error(f"Erro de conexão (tentativa {attempt + 1}/{max_retries}): {e}")
+                logger.error(f"Erro de conexão (tentativa {attempt + 1}/{max_retries}): {e}", exc_info=True)
                 if conn:
                     try:
                         await self.pool.release(conn)
@@ -511,7 +513,7 @@ class Database:
                 raise ConnectionError(f"Falha após {max_retries} tentativas: {e}")
                 
             except asyncio.TimeoutError:
-                logger.error(f"Timeout ao executar query (tentativa {attempt + 1})")
+                logger.error(f"Timeout ao executar query (tentativa {attempt + 1})", exc_info=True)
                 if conn:
                     try:
                         await self.pool.release(conn)
@@ -526,7 +528,7 @@ class Database:
                 raise TimeoutError("Timeout ao executar query no banco de dados")
                 
             except Exception as e:
-                logger.error(f"Erro inesperado ao executar query: {e}")
+                logger.error(f"Erro inesperado ao executar query: {e}", exc_info=True)
                 if conn:
                     try:
                         await self.pool.release(conn)
@@ -567,13 +569,13 @@ class Database:
                 return
             except (asyncpg.PostgresConnectionError, asyncpg.InterfaceError) as e:
                 if attempt == max_retries - 1:
-                    logger.error(f"Falha após {max_retries} tentativas ao salvar evento pendente: {e}")
+                    logger.error(f"Falha após {max_retries} tentativas ao salvar evento pendente: {e}", exc_info=True)
                     raise
                 logger.warning(f"Tentativa {attempt + 1} falhou, tentando novamente em {retry_delay} segundos...")
                 await asyncio.sleep(retry_delay)
                 retry_delay *= 2
             except Exception as e:
-                logger.error(f"Erro ao salvar evento pendente: {e}")
+                logger.error(f"Erro ao salvar evento pendente: {e}", exc_info=True)
                 raise
             finally:
                 if conn:
@@ -606,7 +608,7 @@ class Database:
                 
             return events
         except Exception as e:
-            logger.error(f"Erro ao obter eventos pendentes: {e}")
+            logger.error(f"Erro ao obter eventos pendentes: {e}", exc_info=True)
             return []
         finally:
             if conn:
@@ -629,7 +631,7 @@ class Database:
                 ''', event_ids)
                 return  # Sucesso, sair da função
             except (asyncpg.PostgresConnectionError, asyncpg.InterfaceError) as e:
-                logger.warning(f"Erro de conexão ao marcar eventos (tentativa {attempt + 1}/{max_retries}): {e}")
+                logger.warning(f"Erro de conexão ao marcar eventos (tentativa {attempt + 1}/{max_retries}): {e}", exc_info=True)
                 if attempt == max_retries - 1:
                     logger.error("Falha ao marcar eventos como processados após várias tentativas.", exc_info=True)
                     raise
@@ -664,7 +666,7 @@ class Database:
             logger.info(f"Configuração salva no banco de dados para a guild {guild_id}")
             return True
         except Exception as e:
-            logger.error(f"Erro ao salvar configuração: {e}")
+            logger.error(f"Erro ao salvar configuração: {e}", exc_info=True)
             # Remover do cache em caso de erro
             if guild_id in self._config_cache:
                 del self._config_cache[guild_id]
@@ -708,7 +710,7 @@ class Database:
                 return config
             return None
         except Exception as e:
-            logger.error(f"Erro ao carregar configuração: {e}")
+            logger.error(f"Erro ao carregar configuração: {e}", exc_info=True)
             return None
         finally:
             if conn:
@@ -734,12 +736,12 @@ class Database:
                     # Atualizar cache
                     self._config_cache[row['guild_id']] = configs[row['guild_id']]
                 except json.JSONDecodeError as e:
-                    logger.error(f"Erro ao decodificar JSON para guild {row['guild_id']}: {e}")
+                    logger.error(f"Erro ao decodificar JSON para guild {row['guild_id']}: {e}", exc_info=True)
             
             self._last_config_update = datetime.now(pytz.utc)
             return configs
         except Exception as e:
-            logger.error(f"Erro ao carregar configurações múltiplas: {e}")
+            logger.error(f"Erro ao carregar configurações múltiplas: {e}", exc_info=True)
             return {}
         finally:
             if conn:
@@ -760,7 +762,7 @@ class Database:
                     voice_sessions = user_activity.voice_sessions + 1
             ''', user_id, guild_id, now)
         except Exception as e:
-            logger.error(f"Erro ao registrar entrada em voz: {e}")
+            logger.error(f"Erro ao registrar entrada em voz: {e}", exc_info=True)
             raise
         finally:
             if conn:
@@ -790,7 +792,7 @@ class Database:
                 ''', user_id, guild_id, join_time, now, duration)
                 
         except Exception as e:
-            logger.error(f"Erro ao registrar saída de voz: {e}")
+            logger.error(f"Erro ao registrar saída de voz: {e}", exc_info=True)
             raise
         finally:
             if conn:
@@ -809,7 +811,7 @@ class Database:
             
             return dict(result) if result else {}
         except Exception as e:
-            logger.error(f"Erro ao obter atividade do usuário: {e}")
+            logger.error(f"Erro ao obter atividade do usuário: {e}", exc_info=True)
             return {}
         finally:
             if conn:
@@ -831,7 +833,7 @@ class Database:
             
             return [dict(row) for row in results]
         except Exception as e:
-            logger.error(f"Erro ao obter sessões de voz: {e}")
+            logger.error(f"Erro ao obter sessões de voz: {e}", exc_info=True)
             return []
         finally:
             if conn:
@@ -852,7 +854,7 @@ class Database:
                 SET meets_requirements = EXCLUDED.meets_requirements
             ''', user_id, guild_id, start_date, end_date, meets_requirements)
         except Exception as e:
-            logger.error(f"Erro ao registrar verificação de período: {e}")
+            logger.error(f"Erro ao registrar verificação de período: {e}", exc_info=True)
             raise
         finally:
             if conn:
@@ -873,7 +875,8 @@ class Database:
             
             return dict(result) if result else None
         except Exception as e:
-            logger.error(f"Erro ao obter última verificação de período: {e}")
+            # FIX: Added exc_info=True to log the full traceback
+            logger.error(f"Erro ao obter última verificação de período: {e}", exc_info=True)
             return None
         finally:
             if conn:
@@ -893,7 +896,7 @@ class Database:
                 SET warning_date = EXCLUDED.warning_date
             ''', user_id, guild_id, warning_type, now)
         except Exception as e:
-            logger.error(f"Erro ao registrar aviso: {e}")
+            logger.error(f"Erro ao registrar aviso: {e}", exc_info=True)
             raise
         finally:
             if conn:
@@ -919,7 +922,7 @@ class Database:
                 return result['warning_type'], warning_date
             return None
         except Exception as e:
-            logger.error(f"Erro ao obter último aviso: {e}")
+            logger.error(f"Erro ao obter último aviso: {e}", exc_info=True)
             return None
         finally:
             if conn:
@@ -946,7 +949,7 @@ class Database:
                 return result['warning_type'], warning_date
             return None
         except Exception as e:
-            logger.error(f"Erro ao obter último aviso no período: {e}")
+            logger.error(f"Erro ao obter último aviso no período: {e}", exc_info=True)
             return None
         finally:
             if conn:
@@ -967,7 +970,7 @@ class Database:
                         SET removal_date = EXCLUDED.removal_date
                     ''', user_id, guild_id, role_id, datetime.now(pytz.utc))
         except Exception as e:
-            logger.error(f"Erro ao registrar cargos removidos: {e}")
+            logger.error(f"Erro ao registrar cargos removidos: {e}", exc_info=True)
             raise
         finally:
             if conn:
@@ -993,7 +996,8 @@ class Database:
                 return {'removal_date': removal_date}
             return {'removal_date': None}  # Retorna dict mesmo quando não há resultados
         except Exception as e:
-            logger.error(f"Erro ao obter última remoção de cargo: {e}", exc_info=True) # CORREÇÃO: Adicionado exc_info
+            # FIX: Changed from a commented-out exc_info to an active one.
+            logger.error(f"Erro ao obter última remoção de cargo: {e}", exc_info=True)
             return {'removal_date': None}  # Garante retorno consistente
         finally:
             if conn:
@@ -1020,13 +1024,13 @@ class Database:
                 return
             except (asyncpg.PostgresConnectionError, asyncpg.InterfaceError) as e:
                 if attempt == max_retries - 1:
-                    logger.error(f"Falha após {max_retries} tentativas ao registrar membro expulso: {e}")
+                    logger.error(f"Falha após {max_retries} tentativas ao registrar membro expulso: {e}", exc_info=True)
                     raise
                 logger.warning(f"Tentativa {attempt + 1} falhou, tentando novamente em {retry_delay} segundos...")
                 await asyncio.sleep(retry_delay)
                 retry_delay *= 2
             except Exception as e:
-                logger.error(f"Erro ao registrar membro expulso: {e}")
+                logger.error(f"Erro ao registrar membro expulso: {e}", exc_info=True)
                 raise
             finally:
                 if conn:
@@ -1047,7 +1051,7 @@ class Database:
             
             return dict(result) if result else None
         except Exception as e:
-            logger.error(f"Erro ao obter última expulsão: {e}")
+            logger.error(f"Erro ao obter última expulsão: {e}", exc_info=True)
             return None
         finally:
             if conn:
@@ -1075,7 +1079,7 @@ class Database:
             
             return [r['user_id'] for r in results] if results else []
         except Exception as e:
-            logger.error(f"Erro ao buscar membros com cargos monitorados: {e}")
+            logger.error(f"Erro ao buscar membros com cargos monitorados: {e}", exc_info=True)
             return []
         finally:
             if conn:
@@ -1107,7 +1111,7 @@ class Database:
             
             return last_periods
         except Exception as e:
-            logger.error(f"Erro ao obter últimos períodos em lote: {e}")
+            logger.error(f"Erro ao obter últimos períodos em lote: {e}", exc_info=True)
             return {}
         finally:
             if conn:
@@ -1153,7 +1157,7 @@ class Database:
                 logger.info(log_message)
                 return log_message
         except Exception as e:
-            logger.error(f"Erro ao limpar dados antigos: {e}")
+            logger.error(f"Erro ao limpar dados antigos: {e}", exc_info=True)
             raise
         finally:
             if conn:
@@ -1174,7 +1178,7 @@ class Database:
             
             return [dict(row) for row in results]
         except Exception as e:
-            logger.error(f"Erro ao obter histórico de rate limits: {e}")
+            logger.error(f"Erro ao obter histórico de rate limits: {e}", exc_info=True)
             return []
         finally:
             if conn:
@@ -1191,7 +1195,7 @@ class Database:
             logger.info(f"Removidos {deleted_count} logs de rate limit antigos")
             return deleted_count
         except Exception as e:
-            logger.error(f"Erro ao limpar logs de rate limit: {e}")
+            logger.error(f"Erro ao limpar logs de rate limit: {e}", exc_info=True)
             return 0
         finally:
             if conn:
@@ -1219,7 +1223,7 @@ class Database:
                 return result
             return None
         except Exception as e:
-            logger.error(f"Erro ao obter última execução da task: {e}")
+            logger.error(f"Erro ao obter última execução da task: {e}", exc_info=True)
             return None
         finally:
             if conn:
@@ -1239,7 +1243,7 @@ class Database:
                     monitoring_period = EXCLUDED.monitoring_period
             ''', task_name, datetime.now(pytz.utc), monitoring_period)
         except Exception as e:
-            logger.error(f"Erro ao registrar execução da task: {e}")
+            logger.error(f"Erro ao registrar execução da task: {e}", exc_info=True)
             raise
         finally:
             if conn:
@@ -1260,7 +1264,7 @@ class Database:
             ''', monitoring_period)
             logger.info("Períodos de monitoramento sincronizados nas tasks")
         except Exception as e:
-            logger.error(f"Erro ao sincronizar períodos de monitoramento: {e}")
+            logger.error(f"Erro ao sincronizar períodos de monitoramento: {e}", exc_info=True)
         finally:
             if conn:
                 await self.pool.release(conn)
@@ -1294,7 +1298,7 @@ class Database:
             
             return True
         except Exception as e:
-            logger.error(f"Erro na verificação de saúde do banco de dados: {e}")
+            logger.error(f"Erro na verificação de saúde do banco de dados: {e}", exc_info=True)
             return False
 
     async def log_role_assignment(self, user_id: int, guild_id: int, role_id: int):
@@ -1317,13 +1321,13 @@ class Database:
                 return
             except (asyncio.TimeoutError, asyncpg.PostgresConnectionError) as e:
                 if attempt == max_retries - 1:
-                    logger.error(f"Falha após {max_retries} tentativas ao registrar atribuição de cargo: {e}")
+                    logger.error(f"Falha após {max_retries} tentativas ao registrar atribuição de cargo: {e}", exc_info=True)
                     raise
                 logger.warning(f"Tentativa {attempt + 1} falhou, tentando novamente em {retry_delay} segundos...")
                 await asyncio.sleep(retry_delay)
                 retry_delay *= 2
             except Exception as e:
-                logger.error(f"Erro ao registrar atribuição de cargo: {e}")
+                logger.error(f"Erro ao registrar atribuição de cargo: {e}", exc_info=True)
                 raise
             finally:
                 if conn:
