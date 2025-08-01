@@ -1599,7 +1599,7 @@ async def check_previous_periods():
 async def process_member_previous_periods(member: discord.Member, guild: discord.Guild,
                                         required_minutes: int, required_days: int,
                                         monitoring_period: int, tracked_roles: List[int]):
-    """Processa um membro para verificar períodos anteriores"""
+    """Processa um membro para verificar períodos anteriores com lógica de perdão de dívida."""
     result = {'processed': 0, 'removed': 0}
     
     try:
@@ -1616,197 +1616,116 @@ async def process_member_previous_periods(member: discord.Member, guild: discord
         
         now = datetime.now(pytz.UTC)
         
-        # Obter data de atribuição do cargo mais antigo
-        role_assignment_times = []
-        for role in member.roles:
-            if role.id in tracked_roles:
-                try:
-                    assigned_time = await bot.db.get_role_assigned_time(member.id, guild.id, role.id)
-                    if assigned_time:
-                        role_assignment_times.append(assigned_time)
-                except Exception as e:
-                    logger.error(f"Erro ao obter data de atribuição para cargo {role.id}: {e}")
-                    continue
-        
-        if not role_assignment_times:
-            # Se não encontrou data de atribuição, registrar agora e usar a data atual
-            for role in member.roles:
-                if role.id in tracked_roles:
-                    try:
-                        await bot.db.log_role_assignment(member.id, guild.id, role.id)
-                    except Exception as e:
-                        logger.error(f"Erro ao registrar atribuição de cargo {role.id}: {e}")
-                        continue
-            
-            role_assignment_time = now
-        else:
-            role_assignment_time = min(role_assignment_times)  # Usar a atribuição mais antiga
-        
-        # Obter todos os períodos verificados onde não cumpriu os requisitos
-        # APENAS após a data de atribuição do cargo e que JÁ TERMINARAM
+        # Obter data de atribuição do cargo mais antigo para contexto
+        role_assignment_time = now
         try:
-            start_time = time.time()
+            async with bot.db.pool.acquire() as conn:
+                fetched_time = await conn.fetchval('''
+                    SELECT MIN(assigned_at) FROM role_assignments
+                    WHERE user_id = $1 AND guild_id = $2 AND role_id = ANY($3)
+                ''', member.id, guild.id, tracked_roles)
+            if fetched_time:
+                role_assignment_time = fetched_time
+        except Exception as e:
+            logger.error(f"Erro ao obter data de atribuição inicial para {member.display_name}: {e}")
+
+        # Obter todos os períodos verificados onde não cumpriu os requisitos
+        failed_periods = []
+        try:
             async with bot.db.pool.acquire() as conn:
                 failed_periods = await conn.fetch('''
                     SELECT period_start, period_end 
                     FROM checked_periods
                     WHERE user_id = $1 AND guild_id = $2
                     AND meets_requirements = FALSE
-                    AND period_start >= $3  -- Apenas períodos após atribuição do cargo
-                    AND period_end <= $4    -- Apenas períodos que já terminaram
+                    AND period_end <= $3    -- Apenas períodos que já terminaram
                     ORDER BY period_start
-                ''', member.id, guild.id, role_assignment_time, now)
-            perf_metrics.record_db_query(time.time() - start_time)
+                ''', member.id, guild.id, now)
         except Exception as e:
             logger.error(f"Erro ao buscar períodos falhos para {member}: {e}")
             return result
         
-        # Se houver períodos onde não cumpriu os requisitos E QUE JÁ TERMINARAM
         if failed_periods:
-            # CORREÇÃO: Antes de remover, revalidar a atividade para cada período falho.
             roles_to_remove = [
                 role for role in member.roles if role.id in tracked_roles
             ]
 
             if not roles_to_remove:
-                return result # Não há mais cargos monitorados para remover
+                return result
 
             should_remove_roles = False
             first_failed_period = None
-            revalidated_sessions = []
-            revalidated_valid_days = set()
-
+            
             for period in failed_periods:
-                # REVALIDAÇÃO
-                period_start = period['period_start']
-                if period_start.tzinfo is None: period_start = period_start.replace(tzinfo=pytz.UTC)
-                period_end = period['period_end']
-                if period_end.tzinfo is None: period_end = period_end.replace(tzinfo=pytz.UTC)
+                period_start = period['period_start'].replace(tzinfo=pytz.utc)
+                period_end = period['period_end'].replace(tzinfo=pytz.utc)
 
                 sessions = await bot.db.get_voice_sessions(member.id, guild.id, period_start, period_end)
                 
-                valid_days = set()
-                if sessions:
-                    for session in sessions:
-                        if session['duration'] >= required_minutes * 60:
-                            day = session['join_time'].date()
-                            valid_days.add(day)
+                valid_days = {session['join_time'].date() for session in sessions if session['duration'] >= required_minutes * 60}
                 
                 meets_requirements_on_recheck = len(valid_days) >= required_days
 
-                # Se a revalidação também falhar, então a remoção é justificada.
                 if not meets_requirements_on_recheck:
-                    should_remove_roles = True
-                    first_failed_period = period # Salva o primeiro período confirmado como falho
-                    revalidated_sessions = sessions
-                    revalidated_valid_days = valid_days
-                    # Atualiza o registro no banco para corrigir o status se necessário
-                    await bot.db.log_period_check(member.id, guild.id, period_start, period_end, False)
-                    break # Encontrou um período falho confirmado, pode prosseguir com a remoção
+                    # <<< INÍCIO DA NOVA LÓGICA >>>
+
+                    # Obter a data de atribuição mais RECENTE dos cargos monitorados que o membro possui.
+                    most_recent_assignment_date = None
+                    assignment_dates = []
+                    for role in roles_to_remove:
+                        assigned_at = await bot.db.get_role_assigned_time(member.id, guild.id, role.id)
+                        if assigned_at:
+                            assignment_dates.append(assigned_at)
+                    
+                    if assignment_dates:
+                        most_recent_assignment_date = max(assignment_dates)
+
+                    # A NOVA CONDIÇÃO: A remoção só ocorre se o cargo foi atribuído ANTES do fim do período de falha.
+                    if most_recent_assignment_date and most_recent_assignment_date < period_end:
+                        # JUSTO: O membro tinha o cargo durante o período de falha. A remoção é válida.
+                        should_remove_roles = True
+                        first_failed_period = period
+                        break # Encontrou uma falha válida, pode parar de verificar.
+                    else:
+                        # PERDÃO: O cargo foi atribuído DEPOIS da falha. Perdoar a dívida.
+                        logger.info(f"Dívida de inatividade perdoada para {member.display_name}. Cargo atribuído ({most_recent_assignment_date}) após o fim do período de falha ({period_end}).")
+                        
+                        # Marca o período antigo como "OK" para não ser verificado de novo.
+                        await bot.db.log_period_check(member.id, guild.id, period_start, period_end, True)
+                        
+                        # Inicia um novo ciclo de monitoramento a partir da data de atribuição para ser justo.
+                        new_period_start = most_recent_assignment_date or now
+                        new_period_end = new_period_start + timedelta(days=monitoring_period)
+                        await bot.db.log_period_check(member.id, guild.id, new_period_start, new_period_end, False)
+                        
+                        should_remove_roles = False # Garante que a remoção não ocorra.
+                        # Continue para o próximo período falho, caso haja outro.
+                        continue
+
+                    # <<< FIM DA NOVA LÓGICA >>>
                 else:
                     # Se a revalidação passou, o registro original estava errado. Corrigi-lo.
                     logger.info(f"Corrigindo período falho para {member.display_name} após revalidação. Período: {period_start.strftime('%d/%m/%Y')}")
                     await bot.db.log_period_check(member.id, guild.id, period_start, period_end, True)
 
-            # Só remove os cargos se a revalidação confirmou a falha
             if should_remove_roles:
-                logger.info(f"Removendo cargos de {member.display_name} após revalidação de período anterior falho.")
+                logger.info(f"Removendo cargos de {member.display_name} por falha de atividade confirmada no período de {first_failed_period['period_start'].strftime('%d/%m/%Y')}.")
                 try:
-                    # Verificar permissões
-                    if not member.guild.me.guild_permissions.manage_roles:
-                        raise discord.Forbidden("Bot não tem permissão para gerenciar cargos")
-                        
-                    # Verificar hierarquia de cargos
-                    top_role = member.guild.me.top_role
-                    for role in roles_to_remove:
-                        if role >= top_role:
-                            raise discord.Forbidden(f"Não posso remover cargo {role.name} - acima da minha hierarquia")
-                    
-                    # Remover cargos
-                    start_time = time.time()
-                    await member.remove_roles(*roles_to_remove)
-                    perf_metrics.record_api_call(time.time() - start_time)
-                    
-                    # Enviar mensagem de aviso final via DM
+                    await member.remove_roles(*roles_to_remove, reason="Remoção automática por inatividade em período anterior.")
                     await bot.send_warning(member, 'final')
-
-                    # Notificar administradores por DM
-                    admin_embed = discord.Embed(
-                        title="🚨 Cargos Removidos (Períodos Anteriores Revalidados)",
-                        description=f"Os cargos de {member.mention} foram removidos por inatividade em períodos de verificação anteriores, confirmada após revalidação.",
-                        color=discord.Color.dark_red(),
-                        timestamp=datetime.now(pytz.utc)
-                    )
-                    admin_embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
-                    admin_embed.add_field(name="Usuário", value=f"{member.mention} (`{member.id}`)", inline=False)
-                    admin_embed.add_field(name="Cargos Removidos", value=", ".join([r.mention for r in roles_to_remove]), inline=False)
-                    admin_embed.set_footer(text=f"Servidor: {member.guild.name}")
-                    
-                    await bot.notify_admins_dm(member.guild, embed=admin_embed)
-                    
-                    # Registrar cargos removidos
-                    start_time = time.time()
-                    await bot.db.log_removed_roles(
-                        member.id, guild.id, 
-                        [r.id for r in roles_to_remove]
-                    )
-                    perf_metrics.record_db_query(time.time() - start_time)
-                    
-                    # CORREÇÃO: Lógica para decidir sobre um novo período
-                    current_member_roles_ids = {r.id for r in member.roles}
-                    removed_roles_ids = {r.id for r in roles_to_remove}
-                    remaining_roles_ids = current_member_roles_ids - removed_roles_ids
-                    still_has_tracked_roles = any(role_id in tracked_roles for role_id in remaining_roles_ids)
-
-                    if still_has_tracked_roles:
-                        # Registrar novo período de verificação
-                        new_period_end = now + timedelta(days=monitoring_period)
-                        await bot.db.log_period_check(
-                            member.id, guild.id,
-                            now, new_period_end,
-                            False
-                        )
-                    
-                    # Gerar relatório
-                    report_file = await generate_activity_report(member, revalidated_sessions)
+                    await bot.db.log_removed_roles(member.id, guild.id, [r.id for r in roles_to_remove])
                     
                     log_message = (
                         f"Cargos removidos: {', '.join([r.name for r in roles_to_remove])}\n"
-                        f"Falha confirmada após revalidação do período: "
-                        f"{first_failed_period['period_start'].strftime('%d/%m/%Y')} a "
-                        f"{first_failed_period['period_end'].strftime('%d/%m/%Y')}\n"
-                        f"Sessões no período revalidado: {len(revalidated_sessions)}\n"
-                        f"Dias válidos no período revalidado: {len(revalidated_valid_days)}/{required_days}"
+                        f"Falha confirmada no período: {first_failed_period['period_start'].strftime('%d/%m/%Y')} a {first_failed_period['period_end'].strftime('%d/%m/%Y')}"
                     )
-                    
-                    if report_file:
-                        await bot.log_action(
-                            "Cargo Removido (Períodos Anteriores Revalidados)",
-                            member,
-                            log_message,
-                            file=report_file
-                        )
-                    else:
-                        await bot.log_action(
-                            "Cargo Removido (Períodos Anteriores Revalidados)",
-                            member,
-                            log_message
-                        )
-                    
-                    await bot.notify_roles(
-                        f"🚨 Cargos removidos de {member.mention} por inatividade em períodos anteriores (confirmado): " +
-                        ", ".join([f"`{r.name}`" for r in roles_to_remove]))
-                    
+                    await bot.log_action("Cargo Removido (Inatividade Passada)", member, log_message)
                     result['removed'] = 1
-                    
-                except discord.Forbidden as e:
-                    logger.error(f"Permissões insuficientes para remover cargos de {member} após revalidação: {e}")
-                    await bot.log_action("Erro ao Remover Cargo", member, f"Permissões insuficientes: {e}")
                 except Exception as e:
-                    logger.error(f"Erro ao remover cargos de {member} após revalidação: {e}")
-    
+                    logger.error(f"Erro ao remover cargos de {member} (inatividade passada): {e}")
+
     except Exception as e:
-        logger.error(f"Erro ao verificar períodos anteriores para {member}: {e}")
+        logger.error(f"Erro ao verificar períodos anteriores para {member.display_name}: {e}", exc_info=True)
     
     return result
 
