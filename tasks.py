@@ -1,3 +1,5 @@
+# tasks.py
+
 from datetime import datetime, timedelta
 import asyncio
 import logging
@@ -10,6 +12,8 @@ from utils import generate_activity_graph
 from collections import defaultdict
 import time
 import pytz
+import json
+import os
 
 logger = logging.getLogger('inactivity_bot')
 
@@ -535,6 +539,10 @@ async def on_resumed():
     """Executa ações quando o bot reconecta após uma queda."""
     logger.info("Bot reconectado após queda")
     
+    # Verificar membros em canais de voz imediatamente
+    await check_current_voice_members()
+    await detect_missing_voice_leaves()  # Limpar sessões fantasma
+    
     # Limpar filas e reinicializar contadores
     await bot.clear_queues()
     
@@ -546,6 +554,21 @@ async def on_resumed():
 async def on_disconnect():
     """Executa ações quando o bot é desconectado."""
     logger.warning("Bot desconectado - realizando backup emergencial...")
+
+    # Log members in voice channels
+    try:
+        active_voice_members = []
+        for guild in bot.guilds:
+            for member in guild.members:
+                if member.voice and member.voice.channel:
+                    active_voice_members.append(f"{member.display_name} in {member.voice.channel.name}")
+        if active_voice_members:
+            logger.info(f"Membros em canais de voz no momento da desconexão: {', '.join(active_voice_members)}")
+        else:
+            logger.info("Nenhum membro em canais de voz no momento da desconexão.")
+    except Exception as e:
+        logger.error(f"Erro ao registrar membros em voz na desconexão: {e}")
+
     await emergency_backup()
 
 def handle_exception(loop, context):
@@ -589,10 +612,30 @@ async def load_task_states():
     except Exception as e:
         logger.error(f"Erro ao carregar estados das tasks: {e}")
 
+def serialize_sessions(sessions):
+    """Converte o dicionário de sessões ativas para um formato serializável."""
+    serializable_sessions = {}
+    for key, value in sessions.items():
+        session_copy = value.copy()
+        for time_key in ['start_time', 'last_audio_time', 'max_estimated_time', 'audio_off_time']:
+            if time_key in session_copy and isinstance(session_copy[time_key], datetime):
+                session_copy[time_key] = session_copy[time_key].isoformat()
+        serializable_sessions[str(key)] = session_copy
+    return serializable_sessions
+
 async def emergency_backup():
     """Realiza um backup emergencial dos dados críticos."""
     try:
         logger.info("Iniciando backup emergencial...")
+        # Backup do estado das sessões ativas
+        try:
+            sessions_backup_path = os.path.join('backups', 'active_sessions_backup.json')
+            with open(sessions_backup_path, 'w', encoding='utf-8') as f:
+                json.dump(serialize_sessions(bot.active_sessions), f, indent=4)
+            logger.info(f"Backup das sessões ativas salvo em {sessions_backup_path}")
+        except Exception as e:
+            logger.error(f"Falha ao salvar backup das sessões ativas: {e}")
+
         if not hasattr(bot, 'db_backup') or bot.db_backup is None:
             try:
                 if not hasattr(bot, 'db') or not bot.db:
@@ -1412,7 +1455,7 @@ async def check_missed_periods():
 async def process_member_missed_periods(member_id: int, guild: discord.Guild, 
                                       required_minutes: int, required_days: int,
                                       monitoring_period: int, tracked_roles: List[int]):
-    """Processa períodos perdidos para um único membro"""
+    """Processa períodos perdidos para um único membro, verificando apenas períodos completos."""
     try:
         member = guild.get_member(member_id)
         if not member:
@@ -1423,7 +1466,6 @@ async def process_member_missed_periods(member_id: int, guild: discord.Guild,
            any(role.id in bot.config['whitelist']['roles'] for role in member.roles):
             return
             
-        # Obter todos os períodos não verificados
         now = datetime.now(pytz.UTC)
         last_check = await bot.db.get_last_period_check(member.id, guild.id)
         
@@ -1432,23 +1474,30 @@ async def process_member_missed_periods(member_id: int, guild: discord.Guild,
             new_period_end = now + timedelta(days=monitoring_period)
             await bot.db.log_period_check(member.id, guild.id, now, new_period_end, False)
             return
-            
-        # Calcular quantos períodos completos foram perdidos
+
+        # --- Início da Correção ---
+        
         period_duration = timedelta(days=monitoring_period)
         last_period_end = last_check['period_end']
-        missed_periods = []
+        missed_periods_to_check = []
         
-        current_start = last_period_end
-        while current_start < now:
-            current_end = min(current_start + period_duration, now)
-            missed_periods.append((current_start, current_end))
-            current_start = current_end
-        
+        # Este será o início do novo período atual, após a conclusão do processo.
+        new_current_period_start = last_period_end
+
+        # Itera apenas através de períodos COMPLETOS perdidos
+        while (new_current_period_start + period_duration) <= now:
+            # Este é um período completo que foi perdido enquanto o bot estava offline.
+            current_period_end = new_current_period_start + period_duration
+            missed_periods_to_check.append((new_current_period_start, current_period_end))
+            new_current_period_start = current_period_end # Move para o final do período que acabamos de adicionar
+            
+        # --- Fim da Correção na Geração de Períodos ---
+
         initial_roles_ids = {r.id for r in member.roles}
         cumulatively_removed_roles_ids = set()
 
-        # Processar cada período perdido
-        for period_start, period_end in missed_periods:
+        # Processar cada período perdido COMPLETO
+        for period_start, period_end in missed_periods_to_check:
             # Verificar atividade no período
             sessions = await bot.db.get_voice_sessions(member.id, guild.id, period_start, period_end)
             meets_requirements = False
@@ -1457,7 +1506,7 @@ async def process_member_missed_periods(member_id: int, guild: discord.Guild,
             if sessions:
                 for session in sessions:
                     if session['duration'] >= required_minutes * 60:
-                        day = session['join_time'].date()  # Já está em UTC
+                        day = session['join_time'].date()
                         valid_days.add(day)
                 
                 meets_requirements = len(valid_days) >= required_days
@@ -1520,14 +1569,17 @@ async def process_member_missed_periods(member_id: int, guild: discord.Guild,
                 except Exception as e:
                     logger.error(f"Erro ao remover cargos de {member}: {e}")
         
-        # CORREÇÃO: A lógica para decidir sobre um novo período deve verificar se, APÓS a remoção,
+        # --- Início da Correção na Definição do Novo Período ---
+        # A lógica para decidir sobre um novo período deve verificar se, APÓS a remoção,
         # o usuário AINDA possui algum cargo monitorado.
         remaining_roles_ids = initial_roles_ids - cumulatively_removed_roles_ids
         still_has_tracked_roles = any(role_id in tracked_roles for role_id in remaining_roles_ids)
         
         if still_has_tracked_roles:
-            new_period_end = now + timedelta(days=monitoring_period)
-            await bot.db.log_period_check(member.id, guild.id, now, new_period_end, False)
+            # O novo período começa a partir do final do último período completo verificado.
+            new_period_end = new_current_period_start + period_duration
+            await bot.db.log_period_check(member.id, guild.id, new_current_period_start, new_period_end, False)
+        # --- Fim da Correção na Definição do Novo Período ---
             
     except Exception as e:
         logger.error(f"Erro ao verificar períodos perdidos para {member_id}: {e}")
@@ -1917,12 +1969,29 @@ async def process_pending_voice_events():
 
 @log_task_metrics("check_current_voice_members")
 async def check_current_voice_members():
-    """Verifica todos os canais de voz e atualiza o estado interno"""
+    """Verifica todos os canais de voz e atualiza o estado interno, incluindo a limpeza de sessões fantasma."""
     await bot.wait_until_ready()
-    
+
     try:
         logger.info("Iniciando verificação de membros em canais de voz...")
         
+        # Limpeza de sessões fantasma na memória
+        active_session_keys = list(bot.active_sessions.keys())
+        for key in active_session_keys:
+            user_id, guild_id = key
+            guild = bot.get_guild(guild_id)
+            if not guild:
+                del bot.active_sessions[key]
+                logger.info(f"Removida sessão para guild {guild_id} (não encontrada).")
+                continue
+            
+            member = guild.get_member(user_id)
+            if not member or not member.voice or not member.voice.channel:
+                del bot.active_sessions[key]
+                logger.info(f"Removida sessão fantasma para {user_id} na guild {guild_id}.")
+                continue
+
+        # Verificação de membros atualmente em voz
         for guild in bot.guilds:
             for voice_channel in guild.voice_channels:
                 for member in voice_channel.members:
