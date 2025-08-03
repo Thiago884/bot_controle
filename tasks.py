@@ -619,6 +619,7 @@ def serialize_sessions(sessions):
         session_copy = value.copy()
         for time_key in ['start_time', 'last_audio_time', 'max_estimated_time', 'audio_off_time']:
             if time_key in session_copy and isinstance(session_copy[time_key], datetime):
+                # Converter datetime para string ISO formatada
                 session_copy[time_key] = session_copy[time_key].isoformat()
         serializable_sessions[str(key)] = session_copy
     return serializable_sessions
