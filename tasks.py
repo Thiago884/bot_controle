@@ -442,7 +442,7 @@ async def voice_event_processor():
             await asyncio.sleep(1)
 
 async def execute_task_with_persistent_interval(task_name: str, monitoring_period: int, task_func: callable, force_check: bool = False):
-    """Executa a task mantendo intervalo persistente de 24h"""
+    """Executa a task mantendo intervalo persistente de 24h, de forma mais robusta."""
     await bot.wait_until_ready()
     
     # Esperar até que o banco de dados esteja inicializado
@@ -460,12 +460,13 @@ async def execute_task_with_persistent_interval(task_name: str, monitoring_perio
                 except AttributeError:
                     logger.warning(f"Método get_last_task_execution não disponível no banco de dados")
             
-            now = datetime.now(pytz.UTC)  # Usar UTC
-            
-            # Calcular se deve executar agora
+            now = datetime.now(pytz.UTC)
             should_execute = False
-            
-            if not last_exec:  # Primeira execução
+
+            if force_check:
+                should_execute = True
+                logger.info(f"Execução forçada para a task {task_name}")
+            elif not last_exec:  # Primeira execução
                 should_execute = True
                 logger.info(f"Primeira execução da task {task_name}")
             else:
@@ -474,18 +475,25 @@ async def execute_task_with_persistent_interval(task_name: str, monitoring_perio
                 if last_exec_time.tzinfo is None:
                     last_exec_time = last_exec_time.replace(tzinfo=pytz.UTC)
                 
-                time_since_last = now - last_exec_time
-                if time_since_last >= timedelta(hours=24) or force_check:
+                # *** INÍCIO DA LÓGICA CORRIGIDA ***
+                next_scheduled_run = last_exec_time + timedelta(hours=24)
+                
+                if now >= next_scheduled_run:
                     should_execute = True
-                    logger.info(f"24h passaram - executando task {task_name}")
-            
+                    logger.info(f"Próxima execução agendada ({next_scheduled_run.strftime('%Y-%m-%d %H:%M')}) foi atingida. Executando task {task_name}")
+                else:
+                    # Log para informar por que a task não está rodando
+                    remaining_time = next_scheduled_run - now
+                    logger.info(f"Task '{task_name}' não precisa ser executada ainda. Próxima execução em: {str(remaining_time).split('.')[0]}")
+                # *** FIM DA LÓGICA CORRIGIDA ***
+
             if should_execute:
                 logger.info(f"Executando task {task_name}...")
                 start_time = time.time()
                 await task_func()
                 perf_metrics.record_task_execution(task_name, time.time() - start_time)
 
-                # Registrar execução se o método estiver disponível
+                # Registrar a execução com o tempo atual
                 if hasattr(bot.db, 'log_task_execution'):
                     try:
                         period_to_log = monitoring_period
