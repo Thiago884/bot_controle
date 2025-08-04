@@ -1,5 +1,3 @@
-# tasks.py
-
 from datetime import datetime, timedelta
 import asyncio
 import logging
@@ -617,7 +615,8 @@ def serialize_sessions(sessions):
     serializable_sessions = {}
     for key, value in sessions.items():
         session_copy = value.copy()
-        for time_key in ['start_time', 'last_audio_time', 'max_estimated_time', 'audio_off_time']:
+        # Adicionado 'paused_time' à lista para garantir sua conversão para string
+        for time_key in ['start_time', 'last_audio_time', 'max_estimated_time', 'audio_off_time', 'paused_time']:
             if time_key in session_copy and isinstance(session_copy[time_key], datetime):
                 # Converter datetime para string ISO formatada
                 session_copy[time_key] = session_copy[time_key].isoformat()
