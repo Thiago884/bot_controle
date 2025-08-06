@@ -978,30 +978,39 @@ class Database:
 
     async def get_last_role_removal(self, user_id: int, guild_id: int) -> Optional[Dict]:
         """Obtém a última remoção de cargo para um usuário"""
-        conn = None
-        try:
-            conn = await self.pool.acquire()
-            result = await conn.fetchrow('''
-                SELECT removal_date 
-                FROM removed_roles
-                WHERE user_id = $1 AND guild_id = $2
-                ORDER BY removal_date DESC
-                LIMIT 1
-            ''', user_id, guild_id)
-            
-            if result:
-                removal_date = result['removal_date']
-                if removal_date and removal_date.tzinfo is None:
-                    removal_date = removal_date.replace(tzinfo=pytz.utc)
-                return {'removal_date': removal_date}
-            return {'removal_date': None}  # Retorna dict mesmo quando não há resultados
-        except Exception as e:
-            # FIX: Changed from a commented-out exc_info to an active one.
-            logger.error(f"Erro ao obter última remoção de cargo: {e}", exc_info=True)
-            return {'removal_date': None}  # Garante retorno consistente
-        finally:
-            if conn:
-                await self.pool.release(conn)         
+        max_retries = 3
+        retry_delay = 2
+
+        for attempt in range(max_retries):
+            conn = None
+            try:
+                conn = await self.pool.acquire()
+                result = await conn.fetchrow('''
+                    SELECT removal_date 
+                    FROM removed_roles
+                    WHERE user_id = $1 AND guild_id = $2
+                    ORDER BY removal_date DESC
+                    LIMIT 1
+                ''', user_id, guild_id)
+                
+                if result:
+                    removal_date = result['removal_date']
+                    if removal_date and removal_date.tzinfo is None:
+                        removal_date = removal_date.replace(tzinfo=pytz.utc)
+                    return {'removal_date': removal_date}
+                return {'removal_date': None}  # Retorna dict mesmo quando não há resultados
+            except (asyncio.TimeoutError, asyncpg.PostgresConnectionError, asyncpg.InterfaceError) as e:
+                logger.warning(f"Erro de conexão/timeout em get_last_role_removal (tentativa {attempt + 1}/{max_retries}): {e}")
+                if attempt == max_retries - 1:
+                    logger.error(f"Falha final ao obter última remoção de cargo para {user_id}", exc_info=True)
+                    return {'removal_date': None}
+                await asyncio.sleep(retry_delay * (2 ** attempt)) # Exponential backoff
+            except Exception as e:
+                logger.error(f"Erro inesperado ao obter última remoção de cargo: {e}", exc_info=True)
+                return {'removal_date': None}
+            finally:
+                if conn:
+                    await self.pool.release(conn)
 
     async def log_kicked_member(self, user_id: int, guild_id: int, reason: str):
         """Registra membro expulso por inatividade"""
@@ -1017,15 +1026,15 @@ class Database:
                     INSERT INTO kicked_members 
                     (user_id, guild_id, kick_date, reason) 
                     VALUES ($1, $2, $3, $4)
-                    ON CONFLICT (user_id, guild_id, kick_date) DO UPDATE  -- Especificar todas as colunas da chave primária
+                    ON CONFLICT (user_id, guild_id, kick_date) DO UPDATE
                     SET reason = EXCLUDED.reason
                 ''', user_id, guild_id, now, reason)
                 return
-            except (asyncpg.PostgresConnectionError, asyncpg.InterfaceError) as e:
+            except (asyncio.TimeoutError, asyncpg.PostgresConnectionError, asyncpg.InterfaceError) as e:
                 if attempt == max_retries - 1:
                     logger.error(f"Falha após {max_retries} tentativas ao registrar membro expulso: {e}", exc_info=True)
                     raise
-                logger.warning(f"Tentativa {attempt + 1} falhou, tentando novamente em {retry_delay} segundos...")
+                logger.warning(f"Tentativa {attempt + 1} falhou ao registrar membro expulso, tentando novamente em {retry_delay} segundos...")
                 await asyncio.sleep(retry_delay)
                 retry_delay *= 2
             except Exception as e:
@@ -1037,24 +1046,34 @@ class Database:
 
     async def get_last_kick(self, user_id: int, guild_id: int) -> Optional[Dict]:
         """Obtém última expulsão do usuário"""
-        conn = None
-        try:
-            conn = await self.pool.acquire()
-            result = await conn.fetchrow('''
-                SELECT kick_date 
-                FROM kicked_members
-                WHERE user_id = $1 AND guild_id = $2
-                ORDER BY kick_date DESC
-                LIMIT 1
-            ''', user_id, guild_id)
-            
-            return dict(result) if result else None
-        except Exception as e:
-            logger.error(f"Erro ao obter última expulsão: {e}", exc_info=True)
-            return None
-        finally:
-            if conn:
-                await self.pool.release(conn)
+        max_retries = 3
+        retry_delay = 2
+
+        for attempt in range(max_retries):
+            conn = None
+            try:
+                conn = await self.pool.acquire()
+                result = await conn.fetchrow('''
+                    SELECT kick_date 
+                    FROM kicked_members
+                    WHERE user_id = $1 AND guild_id = $2
+                    ORDER BY kick_date DESC
+                    LIMIT 1
+                ''', user_id, guild_id)
+                
+                return dict(result) if result else None
+            except (asyncio.TimeoutError, asyncpg.PostgresConnectionError, asyncpg.InterfaceError) as e:
+                logger.warning(f"Erro de conexão/timeout em get_last_kick (tentativa {attempt + 1}/{max_retries}): {e}")
+                if attempt == max_retries - 1:
+                    logger.error(f"Falha final ao obter última expulsão para {user_id}", exc_info=True)
+                    return None
+                await asyncio.sleep(retry_delay * (2 ** attempt)) # Exponential backoff
+            except Exception as e:
+                logger.error(f"Erro inesperado ao obter última expulsão: {e}", exc_info=True)
+                return None
+            finally:
+                if conn:
+                    await self.pool.release(conn)
 
     async def get_members_with_tracked_roles(self, guild_id: int, role_ids: List[int]) -> List[int]:
         """Obtém todos os membros que possuem pelo menos um dos cargos monitorados"""
