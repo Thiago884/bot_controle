@@ -819,15 +819,25 @@ class Database:
 
     async def get_voice_sessions(self, user_id: int, guild_id: int, 
                                start_date: datetime, end_date: datetime) -> List[Dict]:
-        """Obtém sessões de voz do usuário em um período"""
+        """Obtém sessões de voz do usuário em um período, calculando a duração efetiva dentro do período."""
         conn = None
         try:
             conn = await self.pool.acquire()
+            # Query corrigida para buscar sessões que se sobrepõem ao período
+            # e calcular a duração efetiva dentro desse mesmo período.
             results = await conn.fetch('''
-                SELECT join_time, leave_time, duration 
+                SELECT 
+                    join_time, 
+                    leave_time,
+                    -- Calcula a duração efetiva da sessão DENTRO do período solicitado
+                    EXTRACT(EPOCH FROM (
+                        LEAST(leave_time, $4) - GREATEST(join_time, $3)
+                    ))::INT AS duration
                 FROM voice_sessions
                 WHERE user_id = $1 AND guild_id = $2
-                AND join_time >= $3 AND leave_time <= $4
+                -- A condição de sobreposição correta: a sessão deve começar antes do fim do período
+                -- e terminar depois do início do período.
+                AND join_time < $4 AND leave_time > $3
                 ORDER BY join_time
             ''', user_id, guild_id, start_date, end_date)
             
