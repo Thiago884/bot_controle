@@ -868,9 +868,7 @@ async def _check_warnings():
         logger.error("Banco de dados não inicializado - pulando verificação de avisos")
         return
     
-    # Log de depuração para configurações
-    logger.debug(f"Configuração atual: {bot.config}")
-    logger.debug(f"Monitoring period: {bot.config.get('monitoring_period')}")
+    logger.info("Iniciando verificação de avisos...")
     
     required_minutes = bot.config['required_minutes']
     required_days = bot.config['required_days']
@@ -889,6 +887,7 @@ async def _check_warnings():
     batch_size = bot._batch_processing_size
     
     for guild in bot.guilds:
+        logger.info(f"Verificando avisos para guilda {guild.name} (ID: {guild.id})")
         members = list(guild.members)
         for i in range(0, len(members), batch_size):
             batch = members[i:i + batch_size]
@@ -898,7 +897,6 @@ async def _check_warnings():
             await asyncio.sleep(bot.rate_limit_delay)
     
     logger.info(f"Verificação de avisos concluída. Avisos enviados: Primeiro={warnings_sent['first']}, Segundo={warnings_sent['second']}")
-
 async def check_warnings():
     """Wrapper para a task com intervalo persistente"""
     monitoring_period = bot.config['monitoring_period']
@@ -989,10 +987,7 @@ async def process_member_warnings(member: discord.Member, guild: discord.Guild,
             
         days_remaining = (period_end - now).days
             
-        # CORREÇÃO: Usar a nova função e refinar a lógica de verificação
         # Obter último aviso no período atual
-        # NOTA: Assumimos que bot.db.get_last_warning_in_period(user, guild, period_start) foi implementado em database.py
-        # Esta função deve retornar uma tupla (warning_type, warning_date) ou None.
         last_warning_in_period = await bot.db.get_last_warning_in_period(member.id, guild.id, period_start)
         last_warning_type = last_warning_in_period[0] if last_warning_in_period else None
         
@@ -1000,11 +995,13 @@ async def process_member_warnings(member: discord.Member, guild: discord.Guild,
         if days_remaining <= first_warning_days and not last_warning_in_period:
             await bot.send_warning(member, 'first')
             warnings_sent['first'] += 1
+            return  # Enviou o primeiro aviso, sair
         
         # Condição para o segundo aviso
-        elif days_remaining <= second_warning_days and last_warning_type == 'first':
+        elif days_remaining <= second_warning_days and (not last_warning_type or last_warning_type == 'first'):
             await bot.send_warning(member, 'second')
             warnings_sent['second'] += 1
+            return  # Enviou o segundo aviso, sair
             
     except Exception as e:
         logger.error(f"Erro ao verificar avisos para {member}: {e}")
