@@ -1033,11 +1033,9 @@ class Database:
                 conn = await self.pool.acquire()
                 now = datetime.now(pytz.utc)
                 await conn.execute('''
-                    INSERT INTO kicked_members 
-                    (user_id, guild_id, kick_date, reason) 
-                    VALUES ($1, $2, $3, $4)
-                    ON CONFLICT (user_id, guild_id, kick_date) DO UPDATE
-                    SET reason = EXCLUDED.reason
+                INSERT INTO kicked_members 
+                (user_id, guild_id, kick_date, reason) 
+                VALUES ($1, $2, $3, $4)
                 ''', user_id, guild_id, now, reason)
                 return
             except (asyncio.TimeoutError, asyncpg.PostgresConnectionError, asyncpg.InterfaceError) as e:
