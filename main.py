@@ -1487,37 +1487,20 @@ async def on_ready():
         if not bot._tasks_started:
             logger.info("Configurações verificadas. Iniciando tarefas de fundo...")
             
-            # CORREÇÃO: Importar a função 'register_role_assignments_wrapper'
+            # Importar as tasks atualizadas
             from tasks import (
-                inactivity_check, check_warnings, cleanup_members,
-                database_backup, cleanup_old_data, monitor_rate_limits,
-                report_metrics, health_check, check_missed_periods,
-                check_previous_periods, process_pending_voice_events,
-                check_current_voice_members, detect_missing_voice_leaves,
-                cleanup_ghost_sessions_wrapper, register_role_assignments_wrapper
+                start_unified_inactivity_manager, start_cleanup_members,
+                start_database_backup, start_cleanup_old_data
             )
             
-            # Primeiro verificar períodos perdidos
-            await check_missed_periods()
+            # Iniciar a nova task unificada de inatividade
+            bot.loop.create_task(start_unified_inactivity_manager(), name='unified_inactivity_manager_wrapper')
             
-            # Registrar datas de atribuição de cargos para membros existentes
-            bot.loop.create_task(register_role_assignments_wrapper(), name='register_role_assignments_wrapper')
-            
-            # Criar tasks com nomes identificáveis
-            bot.loop.create_task(inactivity_check(), name='inactivity_check_wrapper')
-            bot.loop.create_task(check_warnings(), name='check_warnings_wrapper')
-            bot.loop.create_task(cleanup_members(), name='cleanup_members_wrapper')
-            bot.loop.create_task(database_backup(), name='database_backup_wrapper')
-            bot.loop.create_task(cleanup_old_data(), name='cleanup_old_data_wrapper')
-            bot.loop.create_task(monitor_rate_limits(), name='monitor_rate_limits_wrapper')
-            bot.loop.create_task(report_metrics(), name='report_metrics_wrapper')
-            bot.loop.create_task(health_check(), name='health_check_wrapper')
-            bot.loop.create_task(check_previous_periods(), name='check_previous_periods_wrapper')
-            bot.loop.create_task(process_pending_voice_events(), name='process_pending_voice_events')
-            bot.loop.create_task(check_current_voice_members(), name='check_current_voice_members')
-            bot.loop.create_task(detect_missing_voice_leaves(), name='detect_missing_voice_leaves')
-            bot.loop.create_task(cleanup_ghost_sessions_wrapper(), name='cleanup_ghost_sessions_wrapper')
-            
+            # Manter as outras tasks que são independentes e úteis
+            bot.loop.create_task(start_cleanup_members(), name='cleanup_members_wrapper')
+            bot.loop.create_task(start_database_backup(), name='database_backup_wrapper')
+            bot.loop.create_task(start_cleanup_old_data(), name='cleanup_old_data_wrapper')
+
             # Apenas a queue_processor_task é criada aqui, conforme solicitado
             bot.queue_processor_task = bot.loop.create_task(bot.process_queues(), name='queue_processor')
             bot.pool_monitor_task = bot.loop.create_task(bot.monitor_db_pool(), name='db_pool_monitor')
