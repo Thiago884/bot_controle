@@ -18,6 +18,7 @@ from flask import Flask
 import sys
 import traceback
 from io import BytesIO
+import aiohttp
 
 # Importe sua classe Database
 from database import Database
@@ -106,11 +107,6 @@ class RateLimitMonitor:
             'endpoint': str(headers.get('endpoint', 'unknown'))
         })
     
-    def is_cloudflare_blocked(self):
-        """Verifica se estamos bloqueados pelo Cloudflare"""
-        now = time.time()
-        return now < self.cloudflare_blocked_until
-    
     def handle_cloudflare_block(self):
         """Lida com bloqueio do Cloudflare (Error 1015)"""
         now = time.time()
@@ -119,32 +115,32 @@ class RateLimitMonitor:
         logger.warning("Bloqueio do Cloudflare detectado. Entrando em modo de resfriamento por 60 segundos.")
     
     def should_delay(self):
-        """Determina se devemos atrasar requisições"""
         now = time.time()
         
-        # Bloqueio ativo do Cloudflare
-        if self.is_cloudflare_blocked():
+        # Verificar se estamos bloqueados pelo Cloudflare
+        if now < self.cloudflare_blocked_until:
             return True
             
-        # Verificar rate limits globais
-        if self.global_limits['remaining'] < 5:
-            reset_in = max(0, self.global_limits['reset_at'] - now)
-            if reset_in > 0:
-                self.adaptive_delay = min(self.max_delay, reset_in + 1)
-                return True
-                
-        # Verificar outros buckets
+        if now < self.cooldown_until:
+            return True
+        
+        # Verificar rate limit global
+        if self.global_limits['remaining'] < 5 and now < self.global_limits['reset_at']:
+            self.adaptive_delay = min(self.max_delay, self.adaptive_delay * 1.5)
+            self.cooldown_until = now + self.adaptive_delay
+            return True
+        
+        # Verificar outros buckets importantes
         for bucket, data in self.buckets.items():
-            if data['remaining'] < 2:
-                reset_in = max(0, data['reset_at'] - now)
-                if reset_in > 0:
-                    self.adaptive_delay = min(self.max_delay, reset_in + 1)
-                    return True
-                    
-        # Reduzir gradualmente o delay
+            if data['remaining'] < 2 and now < data['reset_at']:
+                self.adaptive_delay = min(self.max_delay, self.adaptive_delay * 1.2)
+                self.cooldown_until = now + self.adaptive_delay
+                return True
+        
+        # Reduzir gradualmente o delay quando não há rate limits
         if self.adaptive_delay > 1.0:
-            self.adaptive_delay = max(1.0, self.adaptive_delay * 0.95)
-            
+            self.adaptive_delay = max(1.0, self.adaptive_delay * 0.9)
+        
         return False
     
     def get_status_report(self):
@@ -344,25 +340,8 @@ class InactivityBot(commands.Bot):
         self.event_counter = 0
         self.last_reconnect_time = None
 
-    async def cleanup_http_sessions(self):
-        """Limpa sessões HTTP antigas para evitar vazamentos"""
-        if hasattr(self, '_connection'):
-            if hasattr(self._connection, '_session'):
-                old_session = getattr(self._connection, '_session', None)
-                if old_session:
-                    await old_session.close()
-                    logger.info("Sessão HTTP antiga fechada")
-
-    async def on_disconnect(self):
-        """Executa ações quando o bot é desconectado"""
-        logger.warning("Bot desconectado - realizando limpeza...")
-        
-        try:
-            await self.cleanup_http_sessions()
-            if hasattr(self, 'db_backup') and self.db_backup:
-                await self.db_backup.emergency_backup()
-        except Exception as e:
-            logger.error(f"Erro durante desconexão: {e}")
+        # Sessão aiohttp
+        self.session = None
 
     def generate_event_id(self):
         """Gera um ID único para cada evento"""
@@ -377,42 +356,41 @@ class InactivityBot(commands.Bot):
         self.last_reconnect_time = datetime.now(pytz.UTC)
         logger.info("Filas de eventos limpas")
 
-    async def start(self, token: str, *, reconnect: bool = True) -> None:
-        """Override do método start para lidar com rate limits de forma robusta."""
-        base_delay = 10  # Começa com 10 segundos
-        max_delay = 300  # Máximo de 5 minutos entre tentativas
-        
-        while self._connection_attempts < self._max_connection_attempts:
+    async def start(self, token: str, *, reconnect: bool = True):
+        """
+        Sobrescreve o método start para um controle de reconexão mais robusto.
+        """
+        self.http.connector = aiohttp.TCPConnector(limit=1)
+
+        for i in range(5):
             try:
                 await super().start(token, reconnect=reconnect)
                 break
-            except discord.HTTPException as e:
-                self._connection_attempts += 1
-                
-                if e.status == 429 or "Cloudflare" in str(e) or "1015" in str(e):
-                    # Calcula o delay exponencial com jitter
-                    delay = min(base_delay * (2 ** (self._connection_attempts - 1)) + random.uniform(0, 5), max_delay)
-                    
+            except discord.errors.HTTPException as e:
+                if e.status == 429:
+                    # O tempo de espera é fornecido pela API do Discord
+                    retry_after = e.retry_after or (2 ** (i + 1))
                     logger.warning(
-                        f"Rate limit/Cloudflare bloqueio (tentativa {self._connection_attempts}/{self._max_connection_attempts}). "
-                        f"Esperando {delay:.2f} segundos..."
+                        f"Rate limit/Cloudflare bloqueio (tentativa {i+1}/5). "
+                        f"Esperando {retry_after:.2f} segundos..."
                     )
-                    
-                    if self._connection_attempts >= self._max_connection_attempts:
-                        logger.critical("Máximo de tentativas de conexão atingido devido a rate limits.")
-                        raise ConnectionError("Não foi possível conectar devido a bloqueios repetidos do Cloudflare")
-                        
-                    await asyncio.sleep(delay)
-                    continue
-                    
-                logger.error(f"Erro HTTP {e.status} ao conectar: {e}")
-                raise
-            except Exception as e:
-                self._connection_attempts += 1
-                logger.error(f"Erro inesperado ao conectar: {e}")
-                if self._connection_attempts >= self._max_connection_attempts:
+                    await asyncio.sleep(retry_after)
+                else:
+                    logger.critical(f"Erro de HTTP não tratado ao conectar: {e}", exc_info=True)
                     raise
-                await asyncio.sleep(base_delay * (2 ** (self._connection_attempts - 1)))
+            except (aiohttp.ClientConnectorError, aiohttp.ClientOSError) as e:
+                wait_time = 2 ** (i + 1)
+                logger.error(f"Erro de conexão na tentativa {i+1}/5: {e}. Tentando novamente em {wait_time} segundos...")
+                await asyncio.sleep(wait_time)
+        else:
+            logger.critical("Máximo de tentativas de conexão atingido devido a rate limits ou problemas de conexão.")
+            raise ConnectionError("Não foi possível conectar devido a bloqueios repetidos do Cloudflare ou falhas de conexão.")
+
+    async def close(self):
+        """Fecha a sessão aiohttp e o bot."""
+        if self.session and not self.session.closed:
+            await self.session.close()
+        await super().close()
 
     async def initialize_db(self):
         """Inicializa a conexão com o banco de dados usando a classe Database."""
@@ -559,6 +537,9 @@ class InactivityBot(commands.Bot):
 
     async def setup_hook(self):
         """Configurações assíncronas antes do bot ficar pronto"""
+        # Inicializa a sessão aiohttp
+        self.session = aiohttp.ClientSession()
+
         if self._setup_complete:
             return
         
@@ -752,13 +733,6 @@ class InactivityBot(commands.Bot):
     async def process_queues(self):
         await self.wait_until_ready()
         while True:
-            # Verificar bloqueio do Cloudflare primeiro
-            if self.rate_limit_monitor.is_cloudflare_blocked():
-                delay = self.rate_limit_monitor.adaptive_delay
-                logger.warning(f"Cloudflare bloqueado - esperando {delay:.2f} segundos")
-                await asyncio.sleep(delay)
-                continue
-                
             try:
                 # Verificar rate limits antes de processar
                 if self.rate_limit_monitor.should_delay():
@@ -1625,6 +1599,10 @@ async def main():
     load_dotenv()
     DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
     
+    if not DISCORD_TOKEN:
+        logger.critical("Token do Discord não encontrado. Verifique seu arquivo .env")
+        return
+
     # Adicionar delay antes de conectar
     await asyncio.sleep(5)  # Espera 5 segundos antes de tentar conectar
     
@@ -1649,4 +1627,7 @@ async def main():
             logger.critical(f"Erro ao iniciar o bot: {e}")
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except (ConnectionError, KeyboardInterrupt) as e:
+        logger.info(f"Bot encerrado: {e}")
