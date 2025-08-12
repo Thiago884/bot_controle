@@ -369,7 +369,7 @@ class InactivityBot(commands.Bot):
             except discord.errors.HTTPException as e:
                 if e.status == 429:
                     # O tempo de espera é fornecido pela API do Discord
-                    retry_after = e.retry_after or (2 ** (i + 1))
+                    retry_after = getattr(e, 'retry_after', None) or (2 ** (i + 1))
                     logger.warning(
                         f"Rate limit/Cloudflare bloqueio (tentativa {i+1}/5). "
                         f"Esperando {retry_after:.2f} segundos..."
