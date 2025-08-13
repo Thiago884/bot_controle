@@ -552,8 +552,12 @@ class InactivityBot(commands.Bot):
         # Prossiga apenas se a conexão com o DB for bem-sucedida
         if self.db and not self.db_connection_failed:
             try:
+                logger.info("Sincronizando comandos slash...")
                 synced = await self.tree.sync()
                 logger.info(f"Comandos slash sincronizados: {len(synced)} comandos.")
+                
+                for cmd in synced:
+                    logger.debug(f"Comando registrado: {cmd.name} (ID: {cmd.id})")
             except Exception as e:
                 logger.error(f"Erro ao sincronizar comandos slash: {e}")
 
@@ -732,8 +736,12 @@ class InactivityBot(commands.Bot):
 
     async def process_queues(self):
         await self.wait_until_ready()
+        logger.info("Iniciando processador de filas...")
+        
         while True:
             try:
+                logger.debug(f"Tamanho das filas - Voz: {self.voice_event_queue.qsize()}, Mensagens: {self.message_queue.qsize()}")
+                
                 # Verificar rate limits antes de processar
                 if self.rate_limit_monitor.should_delay():
                     delay = self.rate_limit_monitor.adaptive_delay
@@ -1154,20 +1162,13 @@ class InactivityBot(commands.Bot):
             try:
                 event = await self.voice_event_queue.get()
                 
-                # Verificar se o evento é válido (tem todos os campos esperados)
-                if len(event) < 6:  # Evento antigo sem timestamp/ID
+                # Se acabamos de reconectar, ignorar eventos muito antigos
+                if self.last_reconnect_time and (datetime.now(pytz.UTC) - self.last_reconnect_time) < timedelta(seconds=10):
+                    logger.debug(f"Ignorando evento pós-reconexão: {event[4]}")
                     self.voice_event_queue.task_done()
                     continue
                     
-                _, member, before, after, event_id, event_time = event
-                
-                # Ignorar eventos muito antigos
-                if (datetime.now(pytz.UTC) - event_time) > timedelta(minutes=5):
-                    logger.debug(f"Ignorando evento antigo: {event_id}")
-                    self.voice_event_queue.task_done()
-                    continue
-                    
-                await self._process_voice_batch([(_, member, before, after)])
+                await self._process_voice_batch([event[:4]])
                 self.voice_event_queue.task_done()
                 await asyncio.sleep(0.1)
             except Exception as e:
@@ -1180,20 +1181,21 @@ class InactivityBot(commands.Bot):
         """Registra uma ação no canal de logs"""
         try:
             if not hasattr(self, 'config') or not self.config.get('log_channel'):
-                if action:
-                    logger.info(f"Ação não logada (canal não configurado): {action}")
+                logger.info(f"Ação não logada (canal não configurado): {action}")
                 return
                 
             log_channel_id = self.config.get('log_channel')
             if not log_channel_id:
-                logger.warning("Canal de logs não configurado")
+                logger.warning("Canal de logs não configurado no config.json")
                 return
                 
-            channel = self.get_channel(log_channel_id)
+            channel = self.get_channel(int(log_channel_id))
             if not channel:
-                logger.warning(f"Canal de logs com ID {log_channel_id} não encontrado")
+                logger.error(f"Canal de logs com ID {log_channel_id} não encontrado - verifique se o ID está correto e o bot tem acesso")
                 return
                 
+            logger.debug(f"Preparando para enviar mensagem para o canal de logs {channel.name} ({channel.id})")
+            
             if embed is not None:
                 await self.message_queue.put((
                     channel,
@@ -1239,7 +1241,7 @@ class InactivityBot(commands.Bot):
                 logger.warning("Canal de notificação não configurado")
                 return
                 
-            channel = self.get_channel(channel_id)
+            channel = self.get_channel(int(channel_id))
             if not channel:
                 logger.warning(f"Canal de notificação {channel_id} não encontrado")
                 return
@@ -1442,9 +1444,32 @@ async def on_ready():
             return
         bot._ready_called = True
         
-        logger.info(f'Bot conectado como {bot.user}')
-        logger.info(f"Latência: {round(bot.latency * 1000)}ms")
+        logger.info(f'Bot conectado como {bot.user} (ID: {bot.user.id})')
+        logger.info(f'Latência: {round(bot.latency * 1000)}ms')
         
+        # Verificar se o canal de logs existe
+        log_channel_id = bot.config.get('log_channel')
+        if log_channel_id:
+            log_channel = bot.get_channel(int(log_channel_id))
+            if log_channel:
+                logger.info(f"Canal de logs encontrado: #{log_channel.name} (ID: {log_channel.id})")
+                try:
+                    embed = discord.Embed(
+                        title="✅ Bot Iniciado",
+                        description=f"O bot {bot.user.name} foi iniciado com sucesso!",
+                        color=discord.Color.green(),
+                        timestamp=datetime.now(bot.timezone))
+                    embed.add_field(name="Versão", value="1.0.0", inline=True)
+                    embed.add_field(name="Latência", value=f"{round(bot.latency * 1000)}ms", inline=True)
+                    await log_channel.send(embed=embed)
+                    logger.info("Mensagem de inicialização enviada para o canal de logs")
+                except Exception as e:
+                    logger.error(f"Falha ao enviar mensagem para o canal de logs: {e}")
+            else:
+                logger.error(f"Canal de logs com ID {log_channel_id} não encontrado!")
+        else:
+            logger.warning("Nenhum canal de logs configurado no config.json")
+            
         # Garantir que o banco de dados está inicializado
         if not hasattr(bot, 'db') or not bot.db or not hasattr(bot.db, 'pool') or not bot.db._is_initialized:
             logger.error("Banco de dados não inicializado - tentando novamente...")
@@ -1545,21 +1570,6 @@ async def on_ready():
 
             except Exception as e:
                 logger.error(f"Erro durante a validação de canais no on_ready para a guilda {guild.name}: {e}", exc_info=True)
-        
-        try:
-            embed = discord.Embed(
-                title="✅ Bot de Controle de Atividades Online",
-                description=f"Conectado como {bot.user.mention}",
-                color=discord.Color.green(),
-                timestamp=datetime.now(bot.timezone))
-            embed.add_field(name="Servidores", value=str(len(bot.guilds)), inline=True)
-            embed.add_field(name="Latência", value=f"{round(bot.latency * 1000)}ms", inline=True)
-            embed.set_thumbnail(url=bot.user.display_avatar.url)
-            embed.set_footer(text="Sistema de Controle de Atividades - Operacional")
-            
-            await bot.log_action(None, None, embed=embed)
-        except Exception as e:
-            logger.error(f"Erro ao enviar embed de inicialização no on_ready: {e}", exc_info=True)
         
     except Exception as e:
         logger.error(f"Erro crítico no on_ready: {e}", exc_info=True)
