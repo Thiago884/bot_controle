@@ -18,7 +18,6 @@ from flask import Flask
 import sys
 import traceback
 from io import BytesIO
-import aiohttp
 
 # Importe sua classe Database
 from database import Database
@@ -340,9 +339,6 @@ class InactivityBot(commands.Bot):
         self.event_counter = 0
         self.last_reconnect_time = None
 
-        # Sessão aiohttp
-        self.session = None
-
     def generate_event_id(self):
         """Gera um ID único para cada evento"""
         self.event_counter += 1
@@ -356,41 +352,49 @@ class InactivityBot(commands.Bot):
         self.last_reconnect_time = datetime.now(pytz.UTC)
         logger.info("Filas de eventos limpas")
 
-    async def start(self, token: str, *, reconnect: bool = True):
-        """
-        Sobrescreve o método start para um controle de reconexão mais robusto.
-        """
-        self.http.connector = aiohttp.TCPConnector(limit=1)
-
-        for i in range(5):
+    async def start(self, token: str, *, reconnect: bool = True) -> None:
+        """Override do método start para lidar com rate limits de forma robusta."""
+        while self._connection_attempts < self._max_connection_attempts:
             try:
                 await super().start(token, reconnect=reconnect)
                 break
-            except discord.errors.HTTPException as e:
-                if e.status == 429:
-                    # O tempo de espera é fornecido pela API do Discord
-                    retry_after = getattr(e, 'retry_after', None) or (2 ** (i + 1))
+            except discord.HTTPException as e:
+                self._connection_attempts += 1
+                if e.status == 429 or "Cloudflare" in str(e) or "1015" in str(e):  # Rate limited ou bloqueio Cloudflare
+                    self.rate_limit_monitor.handle_cloudflare_block()
+                    retry_after = self.rate_limit_monitor.adaptive_delay
                     logger.warning(
-                        f"Rate limit/Cloudflare bloqueio (tentativa {i+1}/5). "
-                        f"Esperando {retry_after:.2f} segundos..."
+                        f"Rate limit da API do Discord/Cloudflare ao conectar. Esperando {retry_after:.2f} segundos. "
+                        f"Tentativa {self._connection_attempts}/{self._max_connection_attempts}"
                     )
+                    
+                    if self._connection_attempts >= self._max_connection_attempts:
+                        logger.critical("Máximo de tentativas de conexão atingido devido a rate limits. Desistindo.")
+                        raise
+                        
                     await asyncio.sleep(retry_after)
                 else:
-                    logger.critical(f"Erro de HTTP não tratado ao conectar: {e}", exc_info=True)
+                    wait_time = self._connection_delay * (2 ** self._connection_attempts)
+                    logger.error(
+                        f"Erro HTTP {e.status} ao conectar. Tentando novamente em {wait_time}s. "
+                        f"Tentativa {self._connection_attempts}/{self._max_connection_attempts}",
+                        exc_info=True
+                    )
+                    if self._connection_attempts >= self._max_connection_attempts:
+                        raise
+                    await asyncio.sleep(wait_time)
+            except Exception as e:
+                self._connection_attempts += 1
+                if self._connection_attempts >= self._max_connection_attempts:
+                    logger.critical("Máximo de tentativas de conexão atingido. Desistindo.", exc_info=True)
                     raise
-            except (aiohttp.ClientConnectorError, aiohttp.ClientOSError) as e:
-                wait_time = 2 ** (i + 1)
-                logger.error(f"Erro de conexão na tentativa {i+1}/5: {e}. Tentando novamente em {wait_time} segundos...")
+                wait_time = self._connection_delay * (2 ** self._connection_attempts)
+                logger.error(
+                    f"Erro inesperado ao conectar. Tentando novamente em {wait_time} segundos. "
+                    f"Tentativa {self._connection_attempts}/{self._max_connection_attempts}",
+                    exc_info=True
+                )
                 await asyncio.sleep(wait_time)
-        else:
-            logger.critical("Máximo de tentativas de conexão atingido devido a rate limits ou problemas de conexão.")
-            raise ConnectionError("Não foi possível conectar devido a bloqueios repetidos do Cloudflare ou falhas de conexão.")
-
-    async def close(self):
-        """Fecha a sessão aiohttp e o bot."""
-        if self.session and not self.session.closed:
-            await self.session.close()
-        await super().close()
 
     async def initialize_db(self):
         """Inicializa a conexão com o banco de dados usando a classe Database."""
@@ -537,9 +541,6 @@ class InactivityBot(commands.Bot):
 
     async def setup_hook(self):
         """Configurações assíncronas antes do bot ficar pronto"""
-        # Inicializa a sessão aiohttp
-        self.session = aiohttp.ClientSession()
-
         if self._setup_complete:
             return
         
@@ -552,12 +553,8 @@ class InactivityBot(commands.Bot):
         # Prossiga apenas se a conexão com o DB for bem-sucedida
         if self.db and not self.db_connection_failed:
             try:
-                logger.info("Sincronizando comandos slash...")
                 synced = await self.tree.sync()
                 logger.info(f"Comandos slash sincronizados: {len(synced)} comandos.")
-                
-                for cmd in synced:
-                    logger.debug(f"Comando registrado: {cmd.name} (ID: {cmd.id})")
             except Exception as e:
                 logger.error(f"Erro ao sincronizar comandos slash: {e}")
 
@@ -603,12 +600,11 @@ class InactivityBot(commands.Bot):
                     await asyncio.sleep(delay)
                     continue
                     
-                logger.error(f"Erro HTTP ao enviar mensagem para {destination}", exc_info=True)
+                logger.error(f"Erro HTTP ao enviar mensagem para {destination}: {e}")
                 raise
                 
             except Exception as e:
-                # FIX: Added exc_info=True for detailed traceback logging.
-                logger.error(f"Erro inesperado ao enviar mensagem para {destination}", exc_info=True)
+                logger.error(f"Erro inesperado ao enviar mensagem para {destination}: {e}")
                 if attempt == max_retries - 1:
                     raise
                 await asyncio.sleep(base_delay * (2 ** attempt))
@@ -737,14 +733,8 @@ class InactivityBot(commands.Bot):
 
     async def process_queues(self):
         await self.wait_until_ready()
-        logger.info("Iniciando processador de filas...")
-        
         while True:
-            item = None
-            priority = None
             try:
-                logger.debug(f"Tamanho das filas - Voz: {self.voice_event_queue.qsize()}, Mensagens: {self.message_queue.qsize()}")
-                
                 # Verificar rate limits antes de processar
                 if self.rate_limit_monitor.should_delay():
                     delay = self.rate_limit_monitor.adaptive_delay
@@ -764,43 +754,41 @@ class InactivityBot(commands.Bot):
                 
                 item, priority = await self.message_queue.get_next_message()
                 if item is None:
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(0.5)  # Aumentado o sleep quando não há mensagens
                     continue
                     
-                if isinstance(item, tuple):
-                    if len(item) == 4:
-                        destination, content, embed, file = item
-                        if isinstance(destination, (discord.TextChannel, discord.User, discord.Member)):
-                            await self.send_with_fallback(destination, content, embed, file)
+                try:
+                    if isinstance(item, tuple):
+                        if len(item) == 4:
+                            destination, content, embed, file = item
+                            if isinstance(destination, (discord.TextChannel, discord.User, discord.Member)):
+                                await self.send_with_fallback(destination, content, embed, file)
+                            else:
+                                logger.warning(f"Destino inválido para mensagem: {type(destination)}")
+                        elif len(item) == 2:
+                            destination, embed = item
+                            if isinstance(destination, (discord.TextChannel, discord.User, discord.Member)):
+                                await self.send_with_fallback(destination, embed=embed)
+                            else:
+                                logger.warning(f"Destino inválido para mensagem: {type(destination)}")
                         else:
-                            logger.warning(f"Destino inválido para mensagem: {type(destination)}")
-                    elif len(item) == 2:
-                        destination, embed = item
-                        if isinstance(destination, (discord.TextChannel, discord.User, discord.Member)):
-                            await self.send_with_fallback(destination, embed=embed)
-                        else:
-                            logger.warning(f"Destino inválido para mensagem: {type(destination)}")
+                            logger.warning(f"Item da fila em formato desconhecido: {item}")
+                    elif isinstance(item, (discord.TextChannel, discord.User, discord.Member)):
+                        logger.warning(f"Item da fila é um destino direto, mas não há conteúdo: {item}")
                     else:
-                        logger.warning(f"Item da fila em formato desconhecido: {item}")
-                elif isinstance(item, (discord.TextChannel, discord.User, discord.Member)):
-                    logger.warning(f"Item da fila é um destino direto, mas não há conteúdo: {item}")
-                else:
-                    logger.warning(f"Item da fila não é um destino válido: {type(item)}")
+                        logger.warning(f"Item da fila não é um destino válido: {type(item)}")
+                except Exception as e:
+                    logger.error(f"Erro ao processar item da fila: {e}")
+                    if "Cloudflare" in str(e) or "1015" in str(e):
+                        self.rate_limit_monitor.handle_cloudflare_block()
+                    
+                self.message_queue.task_done(priority)
                     
             except Exception as e:
-                logger.error(f"Erro ao processar item da fila", exc_info=True)
+                logger.error(f"Erro no processador de filas: {e}")
                 if "Cloudflare" in str(e) or "1015" in str(e):
                     self.rate_limit_monitor.handle_cloudflare_block()
-                await asyncio.sleep(5)
-            finally:
-                # FIX: Check if an item was actually retrieved before calling task_done.
-                if priority:
-                    try:
-                        self.message_queue.task_done(priority)
-                    except ValueError:
-                        logger.warning(f"Tentativa de chamar task_done em uma fila vazia (prioridade: {priority}). Provavelmente devido a uma reconexão.")
-                    except Exception as e:
-                        logger.error(f"Erro ao chamar task_done para prioridade {priority}", exc_info=True)
+                await asyncio.sleep(5)  # Aumentado o tempo de espera em caso de erro
 
     async def _process_voice_batch(self, batch):
         processed = {}
@@ -1167,13 +1155,20 @@ class InactivityBot(commands.Bot):
             try:
                 event = await self.voice_event_queue.get()
                 
-                # Se acabamos de reconectar, ignorar eventos muito antigos
-                if self.last_reconnect_time and (datetime.now(pytz.UTC) - self.last_reconnect_time) < timedelta(seconds=10):
-                    logger.debug(f"Ignorando evento pós-reconexão: {event[4]}")
+                # Verificar se o evento é válido (tem todos os campos esperados)
+                if len(event) < 6:  # Evento antigo sem timestamp/ID
                     self.voice_event_queue.task_done()
                     continue
                     
-                await self._process_voice_batch([event[:4]])
+                _, member, before, after, event_id, event_time = event
+                
+                # Ignorar eventos muito antigos
+                if (datetime.now(pytz.UTC) - event_time) > timedelta(minutes=5):
+                    logger.debug(f"Ignorando evento antigo: {event_id}")
+                    self.voice_event_queue.task_done()
+                    continue
+                    
+                await self._process_voice_batch([(_, member, before, after)])
                 self.voice_event_queue.task_done()
                 await asyncio.sleep(0.1)
             except Exception as e:
@@ -1186,21 +1181,20 @@ class InactivityBot(commands.Bot):
         """Registra uma ação no canal de logs"""
         try:
             if not hasattr(self, 'config') or not self.config.get('log_channel'):
-                logger.info(f"Ação não logada (canal não configurado): {action}")
+                if action:
+                    logger.info(f"Ação não logada (canal não configurado): {action}")
                 return
                 
             log_channel_id = self.config.get('log_channel')
             if not log_channel_id:
-                logger.warning("Canal de logs não configurado no config.json")
+                logger.warning("Canal de logs não configurado")
                 return
                 
-            channel = self.get_channel(int(log_channel_id))
+            channel = self.get_channel(log_channel_id)
             if not channel:
-                logger.error(f"Canal de logs com ID {log_channel_id} não encontrado - verifique se o ID está correto e o bot tem acesso")
+                logger.warning(f"Canal de logs com ID {log_channel_id} não encontrado")
                 return
                 
-            logger.debug(f"Preparando para enviar mensagem para o canal de logs {channel.name} ({channel.id})")
-            
             if embed is not None:
                 await self.message_queue.put((
                     channel,
@@ -1246,7 +1240,7 @@ class InactivityBot(commands.Bot):
                 logger.warning("Canal de notificação não configurado")
                 return
                 
-            channel = self.get_channel(int(channel_id))
+            channel = self.get_channel(channel_id)
             if not channel:
                 logger.warning(f"Canal de notificação {channel_id} não encontrado")
                 return
@@ -1449,32 +1443,9 @@ async def on_ready():
             return
         bot._ready_called = True
         
-        logger.info(f'Bot conectado como {bot.user} (ID: {bot.user.id})')
-        logger.info(f'Latência: {round(bot.latency * 1000)}ms')
+        logger.info(f'Bot conectado como {bot.user}')
+        logger.info(f"Latência: {round(bot.latency * 1000)}ms")
         
-        # Verificar se o canal de logs existe
-        log_channel_id = bot.config.get('log_channel')
-        if log_channel_id:
-            log_channel = bot.get_channel(int(log_channel_id))
-            if log_channel:
-                logger.info(f"Canal de logs encontrado: #{log_channel.name} (ID: {log_channel.id})")
-                try:
-                    embed = discord.Embed(
-                        title="✅ Bot Iniciado",
-                        description=f"O bot {bot.user.name} foi iniciado com sucesso!",
-                        color=discord.Color.green(),
-                        timestamp=datetime.now(bot.timezone))
-                    embed.add_field(name="Versão", value="1.0.0", inline=True)
-                    embed.add_field(name="Latência", value=f"{round(bot.latency * 1000)}ms", inline=True)
-                    await log_channel.send(embed=embed)
-                    logger.info("Mensagem de inicialização enviada para o canal de logs")
-                except Exception as e:
-                    logger.error(f"Falha ao enviar mensagem para o canal de logs: {e}")
-            else:
-                logger.error(f"Canal de logs com ID {log_channel_id} não encontrado!")
-        else:
-            logger.warning("Nenhum canal de logs configurado no config.json")
-            
         # Garantir que o banco de dados está inicializado
         if not hasattr(bot, 'db') or not bot.db or not hasattr(bot.db, 'pool') or not bot.db._is_initialized:
             logger.error("Banco de dados não inicializado - tentando novamente...")
@@ -1516,20 +1487,37 @@ async def on_ready():
         if not bot._tasks_started:
             logger.info("Configurações verificadas. Iniciando tarefas de fundo...")
             
-            # Importar as tasks atualizadas
+            # CORREÇÃO: Importar a função 'register_role_assignments_wrapper'
             from tasks import (
-                start_unified_inactivity_manager, start_cleanup_members,
-                start_database_backup, start_cleanup_old_data
+                inactivity_check, check_warnings, cleanup_members,
+                database_backup, cleanup_old_data, monitor_rate_limits,
+                report_metrics, health_check, check_missed_periods,
+                check_previous_periods, process_pending_voice_events,
+                check_current_voice_members, detect_missing_voice_leaves,
+                cleanup_ghost_sessions_wrapper, register_role_assignments_wrapper
             )
             
-            # Iniciar a nova task unificada de inatividade
-            bot.loop.create_task(start_unified_inactivity_manager(), name='unified_inactivity_manager_wrapper')
+            # Primeiro verificar períodos perdidos
+            await check_missed_periods()
             
-            # Manter as outras tasks que são independentes e úteis
-            bot.loop.create_task(start_cleanup_members(), name='cleanup_members_wrapper')
-            bot.loop.create_task(start_database_backup(), name='database_backup_wrapper')
-            bot.loop.create_task(start_cleanup_old_data(), name='cleanup_old_data_wrapper')
-
+            # Registrar datas de atribuição de cargos para membros existentes
+            bot.loop.create_task(register_role_assignments_wrapper(), name='register_role_assignments_wrapper')
+            
+            # Criar tasks com nomes identificáveis
+            bot.loop.create_task(inactivity_check(), name='inactivity_check_wrapper')
+            bot.loop.create_task(check_warnings(), name='check_warnings_wrapper')
+            bot.loop.create_task(cleanup_members(), name='cleanup_members_wrapper')
+            bot.loop.create_task(database_backup(), name='database_backup_wrapper')
+            bot.loop.create_task(cleanup_old_data(), name='cleanup_old_data_wrapper')
+            bot.loop.create_task(monitor_rate_limits(), name='monitor_rate_limits_wrapper')
+            bot.loop.create_task(report_metrics(), name='report_metrics_wrapper')
+            bot.loop.create_task(health_check(), name='health_check_wrapper')
+            bot.loop.create_task(check_previous_periods(), name='check_previous_periods_wrapper')
+            bot.loop.create_task(process_pending_voice_events(), name='process_pending_voice_events')
+            bot.loop.create_task(check_current_voice_members(), name='check_current_voice_members')
+            bot.loop.create_task(detect_missing_voice_leaves(), name='detect_missing_voice_leaves')
+            bot.loop.create_task(cleanup_ghost_sessions_wrapper(), name='cleanup_ghost_sessions_wrapper')
+            
             # Apenas a queue_processor_task é criada aqui, conforme solicitado
             bot.queue_processor_task = bot.loop.create_task(bot.process_queues(), name='queue_processor')
             bot.pool_monitor_task = bot.loop.create_task(bot.monitor_db_pool(), name='db_pool_monitor')
@@ -1576,6 +1564,21 @@ async def on_ready():
             except Exception as e:
                 logger.error(f"Erro durante a validação de canais no on_ready para a guilda {guild.name}: {e}", exc_info=True)
         
+        try:
+            embed = discord.Embed(
+                title="✅ Bot de Controle de Atividades Online",
+                description=f"Conectado como {bot.user.mention}",
+                color=discord.Color.green(),
+                timestamp=datetime.now(bot.timezone))
+            embed.add_field(name="Servidores", value=str(len(bot.guilds)), inline=True)
+            embed.add_field(name="Latência", value=f"{round(bot.latency * 1000)}ms", inline=True)
+            embed.set_thumbnail(url=bot.user.display_avatar.url)
+            embed.set_footer(text="Sistema de Controle de Atividades - Operacional")
+            
+            await bot.log_action(None, None, embed=embed)
+        except Exception as e:
+            logger.error(f"Erro ao enviar embed de inicialização no on_ready: {e}", exc_info=True)
+        
     except Exception as e:
         logger.error(f"Erro crítico no on_ready: {e}", exc_info=True)
         # Tentar reiniciar após um delay
@@ -1614,10 +1617,6 @@ async def main():
     load_dotenv()
     DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
     
-    if not DISCORD_TOKEN:
-        logger.critical("Token do Discord não encontrado. Verifique seu arquivo .env")
-        return
-
     # Adicionar delay antes de conectar
     await asyncio.sleep(5)  # Espera 5 segundos antes de tentar conectar
     
@@ -1642,7 +1641,4 @@ async def main():
             logger.critical(f"Erro ao iniciar o bot: {e}")
 
 if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except (ConnectionError, KeyboardInterrupt) as e:
-        logger.info(f"Bot encerrado: {e}")
+    asyncio.run(main())
