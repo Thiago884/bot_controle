@@ -603,11 +603,12 @@ class InactivityBot(commands.Bot):
                     await asyncio.sleep(delay)
                     continue
                     
-                logger.error(f"Erro HTTP ao enviar mensagem para {destination}: {e}")
+                logger.error(f"Erro HTTP ao enviar mensagem para {destination}", exc_info=True)
                 raise
                 
             except Exception as e:
-                logger.error(f"Erro inesperado ao enviar mensagem para {destination}: {e}")
+                # FIX: Added exc_info=True for detailed traceback logging.
+                logger.error(f"Erro inesperado ao enviar mensagem para {destination}", exc_info=True)
                 if attempt == max_retries - 1:
                     raise
                 await asyncio.sleep(base_delay * (2 ** attempt))
@@ -739,6 +740,8 @@ class InactivityBot(commands.Bot):
         logger.info("Iniciando processador de filas...")
         
         while True:
+            item = None
+            priority = None
             try:
                 logger.debug(f"Tamanho das filas - Voz: {self.voice_event_queue.qsize()}, Mensagens: {self.message_queue.qsize()}")
                 
@@ -761,41 +764,43 @@ class InactivityBot(commands.Bot):
                 
                 item, priority = await self.message_queue.get_next_message()
                 if item is None:
-                    await asyncio.sleep(0.5)  # Aumentado o sleep quando não há mensagens
+                    await asyncio.sleep(0.5)
                     continue
                     
-                try:
-                    if isinstance(item, tuple):
-                        if len(item) == 4:
-                            destination, content, embed, file = item
-                            if isinstance(destination, (discord.TextChannel, discord.User, discord.Member)):
-                                await self.send_with_fallback(destination, content, embed, file)
-                            else:
-                                logger.warning(f"Destino inválido para mensagem: {type(destination)}")
-                        elif len(item) == 2:
-                            destination, embed = item
-                            if isinstance(destination, (discord.TextChannel, discord.User, discord.Member)):
-                                await self.send_with_fallback(destination, embed=embed)
-                            else:
-                                logger.warning(f"Destino inválido para mensagem: {type(destination)}")
+                if isinstance(item, tuple):
+                    if len(item) == 4:
+                        destination, content, embed, file = item
+                        if isinstance(destination, (discord.TextChannel, discord.User, discord.Member)):
+                            await self.send_with_fallback(destination, content, embed, file)
                         else:
-                            logger.warning(f"Item da fila em formato desconhecido: {item}")
-                    elif isinstance(item, (discord.TextChannel, discord.User, discord.Member)):
-                        logger.warning(f"Item da fila é um destino direto, mas não há conteúdo: {item}")
+                            logger.warning(f"Destino inválido para mensagem: {type(destination)}")
+                    elif len(item) == 2:
+                        destination, embed = item
+                        if isinstance(destination, (discord.TextChannel, discord.User, discord.Member)):
+                            await self.send_with_fallback(destination, embed=embed)
+                        else:
+                            logger.warning(f"Destino inválido para mensagem: {type(destination)}")
                     else:
-                        logger.warning(f"Item da fila não é um destino válido: {type(item)}")
-                except Exception as e:
-                    logger.error(f"Erro ao processar item da fila: {e}")
-                    if "Cloudflare" in str(e) or "1015" in str(e):
-                        self.rate_limit_monitor.handle_cloudflare_block()
-                    
-                self.message_queue.task_done(priority)
+                        logger.warning(f"Item da fila em formato desconhecido: {item}")
+                elif isinstance(item, (discord.TextChannel, discord.User, discord.Member)):
+                    logger.warning(f"Item da fila é um destino direto, mas não há conteúdo: {item}")
+                else:
+                    logger.warning(f"Item da fila não é um destino válido: {type(item)}")
                     
             except Exception as e:
-                logger.error(f"Erro no processador de filas: {e}")
+                logger.error(f"Erro ao processar item da fila", exc_info=True)
                 if "Cloudflare" in str(e) or "1015" in str(e):
                     self.rate_limit_monitor.handle_cloudflare_block()
-                await asyncio.sleep(5)  # Aumentado o tempo de espera em caso de erro
+                await asyncio.sleep(5)
+            finally:
+                # FIX: Check if an item was actually retrieved before calling task_done.
+                if priority:
+                    try:
+                        self.message_queue.task_done(priority)
+                    except ValueError:
+                        logger.warning(f"Tentativa de chamar task_done em uma fila vazia (prioridade: {priority}). Provavelmente devido a uma reconexão.")
+                    except Exception as e:
+                        logger.error(f"Erro ao chamar task_done para prioridade {priority}", exc_info=True)
 
     async def _process_voice_batch(self, batch):
         processed = {}

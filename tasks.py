@@ -328,10 +328,11 @@ async def _remove_inactive_roles(member: discord.Member, roles_to_remove: List[d
         )
 
     except discord.Forbidden:
-        logger.error(f"Insufficient permissions to remove roles from {member.display_name}")
+        logger.error(f"Insufficient permissions to remove roles from {member.display_name}", exc_info=True)
         await bot.log_action("Error Removing Roles", member, "Insufficient permissions")
     except Exception as e:
-        logger.error(f"Error removing roles from {member.display_name}: {e}")
+        # FIX: Added exc_info=True for detailed traceback logging.
+        logger.error(f"Error removing roles from {member.display_name}", exc_info=True)
 
 async def start_unified_inactivity_manager():
     """Wrapper for the unified task with persistent interval."""
@@ -881,11 +882,12 @@ async def emergency_backup():
         logger.info("Starting emergency backup...")
         try:
             sessions_backup_path = os.path.join('backups', 'active_sessions_backup.json')
+            # FIX: Added default=str to handle datetime objects during JSON serialization.
             with open(sessions_backup_path, 'w', encoding='utf-8') as f:
-                json.dump({str(k): v for k, v in bot.active_sessions.items()}, f, indent=4)
+                json.dump({str(k): v for k, v in bot.active_sessions.items()}, f, indent=4, default=str)
             logger.info(f"Active sessions backup saved to {sessions_backup_path}")
         except Exception as e:
-            logger.error(f"Failed to save active sessions backup: {e}")
+            logger.error(f"Failed to save active sessions backup: {e}", exc_info=True)
 
         if not hasattr(bot, 'db_backup') or bot.db_backup is None:
             try:
