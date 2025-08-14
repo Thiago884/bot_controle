@@ -12,6 +12,7 @@ import time
 from tasks import perf_metrics
 import pytz
 import asyncpg  # Importação adicionada para tratamento específico de erros
+from collections import defaultdict
 
 logger = logging.getLogger('inactivity_bot')
 
@@ -1443,3 +1444,132 @@ async def set_log_channel(interaction: discord.Interaction, channel: discord.Tex
             color=discord.Color.red()
         )
         await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="devolver_cargos", description="Devolve cargos removidos por inatividade em um período recente.")
+@app_commands.describe(
+    periodo_horas="Período em horas para buscar remoções (padrão: 24).",
+    dry_run="Apenas simular a devolução sem aplicar as mudanças (padrão: True)."
+)
+@allowed_roles_only()
+@commands.has_permissions(administrator=True)
+async def devolver_cargos(interaction: discord.Interaction, periodo_horas: int = 24, dry_run: bool = True):
+    """
+    Devolve os cargos que foram removidos pelo bot por inatividade
+    dentro de um período de tempo especificado.
+    """
+    await interaction.response.defer(thinking=True, ephemeral=True)
+
+    if not await check_db_connection(interaction):
+        return
+
+    try:
+        guild = interaction.guild
+        now = datetime.now(pytz.utc)
+        start_date = now - timedelta(hours=periodo_horas)
+
+        async with bot.db.pool.acquire() as conn:
+            removals = await conn.fetch('''
+                SELECT user_id, role_id, removal_date
+                FROM removed_roles
+                WHERE guild_id = $1 AND removal_date >= $2
+                ORDER BY removal_date DESC
+            ''', guild.id, start_date)
+
+        if not removals:
+            await interaction.followup.send(
+                f"ℹ️ Nenhuma remoção de cargo encontrada nas últimas {periodo_horas} horas.",
+                ephemeral=True
+            )
+            return
+
+        roles_to_restore = defaultdict(list)
+        for record in removals:
+            member = guild.get_member(record['user_id'])
+            role = guild.get_role(record['role_id'])
+
+            if member and role:
+                # Evitar adicionar um cargo que o membro já possui
+                if role not in member.roles:
+                    roles_to_restore[member].append(role)
+
+        if not roles_to_restore:
+            await interaction.followup.send(
+                "ℹ️ Todos os membros cujos cargos foram removidos já os receberam de volta ou não foram encontrados.",
+                ephemeral=True
+            )
+            return
+
+        # Modo de Simulação (Dry Run)
+        if dry_run:
+            embed = discord.Embed(
+                title="🔍 Simulação: Devolução de Cargos",
+                description=(
+                    f"A simulação encontrou **{len(roles_to_restore)} membro(s)** para ter cargos devolvidos "
+                    f"baseado nas remoções das últimas **{periodo_horas} horas**.\n\n"
+                    "Para aplicar estas mudanças, execute o comando novamente com `dry_run:False`."
+                ),
+                color=discord.Color.blue()
+            )
+            
+            for member, roles in list(roles_to_restore.items())[:10]: # Limitar a 10 para não exceder o limite do embed
+                role_mentions = ", ".join(r.mention for r in roles)
+                embed.add_field(name=f"👤 {member.display_name}", value=f"↳ Cargos: {role_mentions}", inline=False)
+            
+            if len(roles_to_restore) > 10:
+                embed.set_footer(text=f"Mostrando 10 de {len(roles_to_restore)} membros.")
+
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
+        # Execução Real
+        restored_count = 0
+        error_count = 0
+        log_details = []
+
+        for member, roles in roles_to_restore.items():
+            try:
+                await member.add_roles(*roles, reason="Reversão de remoção por inatividade via comando /devolver_cargos.")
+                restored_count += len(roles)
+                role_names = ", ".join(f"`{r.name}`" for r in roles)
+                log_details.append(f"✅ Devolvido(s) {role_names} para {member.mention}.")
+            except discord.Forbidden:
+                error_count += len(roles)
+                log_details.append(f"❌ Falha ao devolver cargos para {member.mention} (Permissão/Hierarquia).")
+            except Exception as e:
+                error_count += len(roles)
+                log_details.append(f"❌ Falha ao devolver cargos para {member.mention} (Erro: {e}).")
+        
+        embed = discord.Embed(
+            title="✅ Operação Concluída: Devolução de Cargos",
+            description=f"A operação de devolução de cargos foi finalizada.",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="Resumo da Operação", value=(
+            f"**Membros afetados:** {len(roles_to_restore)}\n"
+            f"**Total de cargos devolvidos:** {restored_count}\n"
+            f"**Falhas:** {error_count}"
+        ), inline=False)
+        
+        # Limita os detalhes para não exceder o limite de caracteres
+        log_text = "\n".join(log_details)
+        if len(log_text) > 1024:
+            log_text = log_text[:1020] + "\n..."
+            
+        embed.add_field(name="Detalhes", value=log_text, inline=False)
+
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        
+        await bot.log_action(
+            "Reversão de Remoção de Cargos",
+            interaction.user,
+            f"Executou /devolver_cargos para as últimas {periodo_horas} horas.\n"
+            f"Cargos devolvidos: {restored_count}\n"
+            f"Falhas: {error_count}"
+        )
+
+    except Exception as e:
+        logger.error(f"Erro no comando /devolver_cargos: {e}", exc_info=True)
+        await interaction.followup.send(
+            "❌ Ocorreu um erro inesperado ao executar este comando.",
+            ephemeral=True
+        )
