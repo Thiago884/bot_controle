@@ -707,7 +707,8 @@ async def _health_check():
                 
                 time_since_last = datetime.now(pytz.UTC) - last_exec_time
                 if time_since_last > timedelta(hours=26):  # 2 horas de tolerância
-                    logger.warning(f"Task {task_name} não executou nos últimos {time_since_last}")
+                    # CORREÇÃO: Nível do log alterado de WARNING para INFO
+                    logger.info(f"Task {task_name} não executou nos últimos {time_since_last}")
                     await bot.log_action(
                         "Alerta de Task",
                         None,
@@ -1780,7 +1781,8 @@ async def process_member_previous_periods(member: discord.Member, guild: discord
                     break # Encontrou um período falho confirmado, pode prosseguir com a remoção
                 else:
                     # Se a revalidação passou, o registro original estava errado. Corrigi-lo.
-                    logger.info(f"Corrigindo período falho para {member.display_name} após revalidação. Período: {period_start.strftime('%d/%m/%Y')}")
+                    # CORREÇÃO: Nível do log alterado de INFO para DEBUG
+                    logger.debug(f"Corrigindo período falho para {member.display_name} após revalidação. Período: {period_start.strftime('%d/%m/%Y')}")
                     await bot.db.log_period_check(member.id, guild.id, period_start, period_end, True)
 
             # Só remove os cargos se a revalidação confirmou a falha
