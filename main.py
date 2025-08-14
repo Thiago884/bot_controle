@@ -333,7 +333,7 @@ class InactivityBot(commands.Bot):
         # Novos atributos para tratamento de conexão
         self._connection_attempts = 0
         self._max_connection_attempts = 5
-        self._connection_delay = 10  # segundos
+        self._connection_delay = 15.0  # Aumentado para 15 segundos
         
         # Novos atributos para controle de eventos
         self.event_counter = 0
@@ -352,49 +352,66 @@ class InactivityBot(commands.Bot):
         self.last_reconnect_time = datetime.now(pytz.UTC)
         logger.info("Filas de eventos limpas")
 
+    # >>>>> INÍCIO DA CORREÇÃO <<<<<
     async def start(self, token: str, *, reconnect: bool = True) -> None:
         """Override do método start para lidar com rate limits de forma robusta."""
+        
+        # O _connection_delay será o tempo de espera *antes* da próxima tentativa.
+        # Inicializado para 0 para a primeira tentativa ser imediata (após o delay inicial no main).
+        wait_before_next_try = 0
+
         while self._connection_attempts < self._max_connection_attempts:
             try:
-                await super().start(token, reconnect=reconnect)
-                break
-            except discord.HTTPException as e:
+                # Esperar antes de tentar, exceto na primeira vez.
+                if wait_before_next_try > 0:
+                    logger.info(f"Aguardando {wait_before_next_try:.2f} segundos antes da próxima tentativa de conexão.")
+                    await asyncio.sleep(wait_before_next_try)
+
+                # A contagem de tentativas é feita antes da chamada
                 self._connection_attempts += 1
-                if e.status == 429 or "Cloudflare" in str(e) or "1015" in str(e):  # Rate limited ou bloqueio Cloudflare
+                logger.info(f"Tentando conectar ao Discord (Tentativa {self._connection_attempts}/{self._max_connection_attempts})...")
+                await super().start(token, reconnect=reconnect)
+                
+                # Se super().start() retornar, significa que o bot desconectou.
+                # Quebramos o loop para permitir que o processo termine ou seja reiniciado pelo orquestrador.
+                logger.info("O bot foi desconectado. Encerrando o loop de conexão.")
+                break
+
+            except discord.HTTPException as e:
+                # Este bloco lida com erros de conexão HTTP, incluindo rate limits.
+                if "Cloudflare" in str(e) or "1015" in str(e) or e.status == 429:
                     self.rate_limit_monitor.handle_cloudflare_block()
-                    retry_after = self.rate_limit_monitor.adaptive_delay
+                    # Para bloqueios Cloudflare, usar um backoff longo e aleatório.
+                    wait_before_next_try = 60 + random.uniform(10, 25) * self._connection_attempts
                     logger.warning(
-                        f"Rate limit da API do Discord/Cloudflare ao conectar. Esperando {retry_after:.2f} segundos. "
-                        f"Tentativa {self._connection_attempts}/{self._max_connection_attempts}"
+                        f"Bloqueio do Cloudflare/Rate limit severo detectado. "
+                        f"Tentativa {self._connection_attempts}/{self._max_connection_attempts} falhou."
                     )
-                    
-                    if self._connection_attempts >= self._max_connection_attempts:
-                        logger.critical("Máximo de tentativas de conexão atingido devido a rate limits. Desistindo.")
-                        raise
-                        
-                    await asyncio.sleep(retry_after)
                 else:
-                    wait_time = self._connection_delay * (2 ** self._connection_attempts)
+                    # Para outros erros HTTP, usar um backoff exponencial.
+                    wait_before_next_try = (self._connection_delay * (2 ** (self._connection_attempts - 1))) + random.uniform(0, 5)
                     logger.error(
-                        f"Erro HTTP {e.status} ao conectar. Tentando novamente em {wait_time}s. "
-                        f"Tentativa {self._connection_attempts}/{self._max_connection_attempts}",
+                        f"Erro HTTP {e.status} ao conectar. "
+                        f"Tentativa {self._connection_attempts}/{self._max_connection_attempts} falhou.",
                         exc_info=True
                     )
-                    if self._connection_attempts >= self._max_connection_attempts:
-                        raise
-                    await asyncio.sleep(wait_time)
-            except Exception as e:
-                self._connection_attempts += 1
+                
                 if self._connection_attempts >= self._max_connection_attempts:
-                    logger.critical("Máximo de tentativas de conexão atingido. Desistindo.", exc_info=True)
-                    raise
-                wait_time = self._connection_delay * (2 ** self._connection_attempts)
+                    logger.critical("Máximo de tentativas de conexão atingido devido a erro HTTP. Desistindo.")
+                    raise # Re-levanta a exceção para finalizar a thread do bot.
+                    
+            except Exception as e:
+                # Backoff para erros genéricos (ex: problemas de rede, etc.).
+                wait_before_next_try = (self._connection_delay * (2 ** (self._connection_attempts - 1))) + random.uniform(0, 5)
                 logger.error(
-                    f"Erro inesperado ao conectar. Tentando novamente em {wait_time} segundos. "
-                    f"Tentativa {self._connection_attempts}/{self._max_connection_attempts}",
+                    f"Erro inesperado ao conectar. "
+                    f"Tentativa {self._connection_attempts}/{self._max_connection_attempts} falhou.",
                     exc_info=True
                 )
-                await asyncio.sleep(wait_time)
+                if self._connection_attempts >= self._max_connection_attempts:
+                    logger.critical("Máximo de tentativas de conexão atingido devido a erro inesperado. Desistindo.", exc_info=True)
+                    raise
+    # >>>>> FIM DA CORREÇÃO <<<<<
 
     async def initialize_db(self):
         """Inicializa a conexão com o banco de dados usando a classe Database."""
@@ -1618,7 +1635,10 @@ async def main():
     DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
     
     # Adicionar delay antes de conectar
-    await asyncio.sleep(5)  # Espera 5 segundos antes de tentar conectar
+    # >>>>> INÍCIO DA CORREÇÃO <<<<<
+    logger.info("Aguardando 10 segundos antes da primeira tentativa de conexão para estabilização do ambiente...")
+    await asyncio.sleep(10)  # Aumentado para 10 segundos
+    # >>>>> FIM DA CORREÇÃO <<<<<
     
     # Tentar inicializar o banco de dados antes de iniciar o bot
     try:
