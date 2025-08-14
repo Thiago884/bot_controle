@@ -688,8 +688,6 @@ async def set_absence_channel(interaction: discord.Interaction, channel: discord
 @allowed_roles_only()
 async def show_config(interaction: discord.Interaction):
     """Mostra todas as configurações atuais do bot"""
-    # FIX: Defer the interaction to prevent "Unknown Interaction" errors.
-    await interaction.response.defer()
     try:
         # Verificar banco de dados
         if not await check_db_connection(interaction):
@@ -782,22 +780,16 @@ async def show_config(interaction: discord.Interaction):
                 inline=False
             )
         
-        # FIX: Use followup.send after deferring.
-        await interaction.followup.send(embed=embed)
+        await interaction.response.send_message(embed=embed)
         logger.info("Configuração exibida com sucesso")
-    except discord.NotFound:
-        logger.warning(f"Interaction for show_config expired before followup could be sent.")
     except Exception as e:
-        logger.error(f"Erro ao mostrar configuração", exc_info=True)
-        try:
-            embed = discord.Embed(
-                title="❌ Erro",
-                description="Ocorreu um erro ao mostrar a configuração. Por favor, tente novamente.",
-                color=discord.Color.red()
-            )
-            await interaction.followup.send(embed=embed)
-        except discord.NotFound:
-            pass # Interaction is already gone.
+        logger.error(f"Erro ao mostrar configuração: {e}")
+        embed = discord.Embed(
+            title="❌ Erro",
+            description="Ocorreu um erro ao mostrar a configuração. Por favor, tente novamente.",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="user_activity", description="Verifica as estatísticas de atividade de um usuário")
 @app_commands.describe(

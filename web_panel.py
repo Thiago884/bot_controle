@@ -63,18 +63,16 @@ def run_bot_in_thread():
         try:
             web_logger.info("Iniciando o loop de eventos do bot no thread de background.")
             
+            # Não atribua o loop ao bot manualmente
             bot_running = True
             bot_initialized = True
             
-            # bot.start() agora pode lançar ConnectionError se falhar
             loop.run_until_complete(bot.start(DISCORD_TOKEN))
             
         except discord.LoginFailure:
             web_logger.critical("Falha no login: Token do Discord inválido.")
-        except ConnectionError as e:
-            web_logger.critical(f"Erro fatal de conexão ao executar o bot Discord no thread: {e}", exc_info=True)
         except Exception as e:
-            web_logger.critical(f"Uma exceção não tratada ocorreu no thread do bot: {e}", exc_info=True)
+            web_logger.critical(f"Erro fatal ao executar o bot Discord no thread: {e}", exc_info=True)
         finally:
             web_logger.warning("O loop do bot foi finalizado. Fechando o bot.")
             bot_running = False
@@ -188,11 +186,14 @@ def not_found(error):
 @app.route('/health')
 def health_check():
     try:
-        bot_is_ok = bot.is_ready() if hasattr(bot, 'is_ready') else False
-        if bot_is_ok:
-            return jsonify(status='ok', message='Bot está conectado e pronto.'), 200
-        else:
-            return jsonify(status='error', message='Bot não está pronto ou conectado.'), 503
+        bot_status = "running" if bot_running and bot_initialized and is_bot_ready() else "error"
+        return jsonify({
+            'status': 'ok' if bot_status == "running" else 'error',
+            'bot_status': bot_status,
+            'bot_ready': is_bot_ready(),
+            'web_panel': 'running',
+            'database': 'connected' if hasattr(bot, 'db') and bot.db else 'disconnected'
+        }), 200
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
