@@ -913,7 +913,7 @@ async def check_warnings():
 async def process_member_warnings(member: discord.Member, guild: discord.Guild, 
                                 tracked_roles: List[int], first_warning_days: int, 
                                 second_warning_days: int, warnings_sent: Dict):
-    """Process warnings for a single member"""
+    """Process warnings for a single member with improved logic"""
     try:
         # Verificar whitelist
         if member.id in bot.config['whitelist']['users'] or \
@@ -942,63 +942,26 @@ async def process_member_warnings(member: discord.Member, guild: discord.Guild,
                     continue
         
         if not role_assignment_times:
-            # Se não encontrou data de atribuição, registrar agora e usar a data atual
-            for role in member.roles:
-                if role.id in tracked_roles:
-                    try:
-                        await bot.db.log_role_assignment(member.id, guild.id, role.id)
-                        assigned_time = datetime.now(pytz.UTC)
-                        role_assignment_times.append(assigned_time)
-                    except Exception as e:
-                        logger.error(f"Erro ao registrar atribuição de cargo {role.id}: {e}")
-                        continue
-            
-            if not role_assignment_times:
-                return
+            return
         
         role_assignment_time = min(role_assignment_times)  # Usar a atribuição mais antiga
-        
-        # Obter última verificação
-        start_time = time.time()
-        last_check = await bot.db.get_last_period_check(member.id, guild.id)
-        perf_metrics.record_db_query(time.time() - start_time)
-        
-        if not last_check:
-            # Se não tem verificação anterior, criar um novo período
-            monitoring_period = bot.config['monitoring_period']
-            period_end = role_assignment_time + timedelta(days=monitoring_period)
-            await bot.db.log_period_check(
-                member.id, guild.id, 
-                role_assignment_time,
-                period_end, 
-                False
-            )
-            return
-        
-        # Calcular dias restantes e obter datas do período
-        period_start = last_check['period_start']
-        if period_start.tzinfo is None:
-             period_start = period_start.replace(tzinfo=pytz.UTC)
-        period_end = last_check['period_end']
-        if period_end.tzinfo is None:  # Garantir timezone
-            period_end = period_end.replace(tzinfo=pytz.UTC)
-        
+        monitoring_period = bot.config['monitoring_period']
+        period_end = role_assignment_time + timedelta(days=monitoring_period)
         now = datetime.now(pytz.UTC)
-        if period_end < now:
-            # Período já terminou, não enviar avisos
+        
+        # Se o período já terminou, não enviar avisos
+        if now >= period_end:
             return
             
+        # Calcular dias restantes corretamente
         days_remaining = (period_end - now).days
-            
-        # CORREÇÃO: Usar a nova função e refinar a lógica de verificação
+        
         # Obter último aviso no período atual
-        # NOTA: Assumimos que bot.db.get_last_warning_in_period(user, guild, period_start) foi implementado em database.py
-        # Esta função deve retornar uma tupla (warning_type, warning_date) ou None.
-        last_warning_in_period = await bot.db.get_last_warning_in_period(member.id, guild.id, period_start)
+        last_warning_in_period = await bot.db.get_last_warning_in_period(member.id, guild.id, role_assignment_time)
         last_warning_type = last_warning_in_period[0] if last_warning_in_period else None
         
         # Condição para o primeiro aviso
-        if days_remaining <= first_warning_days and not last_warning_in_period:
+        if days_remaining <= first_warning_days and last_warning_type is None:
             await bot.send_warning(member, 'first')
             warnings_sent['first'] += 1
         
