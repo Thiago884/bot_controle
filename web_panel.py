@@ -44,6 +44,7 @@ WEB_AUTH_PASS = os.getenv('WEB_AUTH_PASS', 'admin123')
 # Variáveis globais para controlar o estado do bot
 bot_running = False
 bot_initialized = False
+bot_ready_event = threading.Event() # NOVO: Evento thread-safe para sinalizar prontidão
 
 # Verificar token do Discord antes de iniciar
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
@@ -63,7 +64,9 @@ def run_bot_in_thread():
         try:
             web_logger.info("Iniciando o loop de eventos do bot no thread de background.")
             
-            # Não atribua o loop ao bot manualmente
+            # NOVO: Passa o evento para o objeto do bot ANTES de iniciá-lo
+            bot.ready_event = bot_ready_event
+            
             bot_running = True
             bot_initialized = True
             
@@ -77,6 +80,7 @@ def run_bot_in_thread():
             web_logger.warning("O loop do bot foi finalizado. Fechando o bot.")
             bot_running = False
             bot_initialized = False
+            bot_ready_event.clear() # NOVO: Reseta o evento se o bot parar
             if not bot.is_closed():
                 loop.run_until_complete(bot.close())
             loop.close()
@@ -87,8 +91,9 @@ def run_bot_in_thread():
 # --- Funções Auxiliares ---
 
 def is_bot_ready():
-    """Verifica se o bot está completamente pronto para operar"""
-    return hasattr(bot, 'is_ready') and bot.is_ready() and hasattr(bot, 'db') and bot.db is not None
+    """Verifica se o bot está completamente pronto para operar usando um evento thread-safe"""
+    # MODIFICADO: A verificação principal agora é o evento.
+    return bot_ready_event.is_set() and hasattr(bot, 'is_ready') and bot.is_ready()
 
 def check_bot_initialized():
     """Verifica se a thread do bot foi iniciada e o objeto bot tem um loop."""
@@ -1432,8 +1437,8 @@ def handle_exception(e):
 web_logger.info("Iniciando a thread do bot Discord...")
 run_bot_in_thread()
 
-# Adiciona um pequeno atraso para garantir que o bot tenha tempo de inicializar
-time.sleep(5)
+# REMOVIDO: O atraso fixo é removido pois agora usamos um evento de sinalização.
+# time.sleep(5)
 
 # Este bloco só será usado para testes locais, não quando executado pelo Gunicorn
 if __name__ == '__main__':

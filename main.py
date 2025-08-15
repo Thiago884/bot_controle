@@ -339,6 +339,9 @@ class InactivityBot(commands.Bot):
         self.event_counter = 0
         self.last_reconnect_time = None
 
+        # NOVO: Inicializa o atributo que receberá o evento
+        self.ready_event = None
+
     def generate_event_id(self):
         """Gera um ID único para cada evento"""
         self.event_counter += 1
@@ -1595,6 +1598,12 @@ async def on_ready():
             await bot.log_action(None, None, embed=embed)
         except Exception as e:
             logger.error(f"Erro ao enviar embed de inicialização no on_ready: {e}", exc_info=True)
+            
+        # NOVO: Sinaliza ao painel web que o bot está pronto
+        # Esta é a última etapa do on_ready
+        if bot.ready_event and not bot.ready_event.is_set():
+            bot.ready_event.set()
+            logger.info("Sinal de 'pronto' enviado para o painel web.")
         
     except Exception as e:
         logger.error(f"Erro crítico no on_ready: {e}", exc_info=True)
