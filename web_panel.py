@@ -162,7 +162,7 @@ def get_main_guild():
 # Middleware para verificar se o bot está pronto
 @app.before_request
 def check_bot_ready():
-    if request.path.startswith('/static') or request.path in ['/keepalive', '/health']:
+    if request.path.startswith('/static') or request.path in ['/', '/dashboard', '/keepalive', '/health']:
         return
         
     if not bot_running or not bot_initialized:
