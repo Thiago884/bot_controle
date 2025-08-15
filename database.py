@@ -194,7 +194,7 @@ class Database:
                 self.pool = await create_pool(
                     dsn=db_url,
                     min_size=2,  # Reduzido para diminuir a carga inicial
-                    max_size=20, # Reduzido para um valor mais razoável
+                    max_size=50, # Aumentado de 20 para 50 para mais concorrência
                     command_timeout=90, # Aumentado de 60 para 90
                     max_inactive_connection_lifetime=300,
                     ssl='require',
@@ -249,7 +249,7 @@ class Database:
         self.pool = await create_pool(
             dsn=db_url,
             min_size=2,
-            max_size=20,
+            max_size=50, # Aumentado de 20 para 50
             command_timeout=90,
             max_inactive_connection_lifetime=300,
             ssl='require',
@@ -1335,7 +1335,7 @@ class Database:
         for attempt in range(max_retries):
             conn = None
             try:
-                conn = await asyncio.wait_for(self.pool.acquire(), timeout=10)
+                conn = await asyncio.wait_for(self.pool.acquire(), timeout=30)
                 assigned_at = datetime.now(pytz.UTC)
                 await asyncio.wait_for(conn.execute('''
                     INSERT INTO role_assignments 
@@ -1343,7 +1343,7 @@ class Database:
                     VALUES ($1, $2, $3, $4)
                     ON CONFLICT (user_id, guild_id, role_id) DO UPDATE 
                     SET assigned_at = EXCLUDED.assigned_at
-                ''', user_id, guild_id, role_id, assigned_at), timeout=10)
+                ''', user_id, guild_id, role_id, assigned_at), timeout=30)
                 return
             except (asyncio.TimeoutError, asyncpg.PostgresConnectionError) as e:
                 if attempt == max_retries - 1:
@@ -1360,27 +1360,41 @@ class Database:
                     await self.pool.release(conn)
 
     async def get_role_assigned_time(self, user_id: int, guild_id: int, role_id: int) -> Optional[datetime]:
-        """Obtém quando um cargo foi atribuído a um usuário"""
-        conn = None
-        try:
-            conn = await self.pool.acquire()
-            result = await conn.fetchrow('''
-                SELECT assigned_at 
-                FROM role_assignments
-                WHERE user_id = $1 AND guild_id = $2 AND role_id = $3
-                ORDER BY assigned_at DESC
-                LIMIT 1
-            ''', user_id, guild_id, role_id)
-            
-            if result:
-                assigned_at = result['assigned_at']
-                if assigned_at and assigned_at.tzinfo is None:
-                    assigned_at = assigned_at.replace(tzinfo=pytz.utc)
-                return assigned_at
-            return None
-        except Exception as e:
-            logger.error(f"Erro ao obter data de atribuição de cargo: {e}", exc_info=True)
-            return None
-        finally:
-            if conn:
-                await self.pool.release(conn)
+        """Obtém quando um cargo foi atribuído a um usuário, com retries."""
+        max_retries = 3
+        retry_delay = 2
+
+        for attempt in range(max_retries):
+            conn = None
+            try:
+                conn = await asyncio.wait_for(self.pool.acquire(), timeout=20.0)
+                result = await conn.fetchrow('''
+                    SELECT assigned_at 
+                    FROM role_assignments
+                    WHERE user_id = $1 AND guild_id = $2 AND role_id = $3
+                ''', user_id, guild_id, role_id)
+                
+                if result:
+                    assigned_at = result['assigned_at']
+                    if assigned_at and assigned_at.tzinfo is None:
+                        assigned_at = assigned_at.replace(tzinfo=pytz.utc)
+                    return assigned_at
+                return None
+            except (asyncio.TimeoutError, asyncpg.PostgresConnectionError, asyncpg.InterfaceError) as e:
+                logger.warning(f"Erro de conexão/timeout em get_role_assigned_time (tentativa {attempt + 1}/{max_retries}): {e}")
+                if conn:
+                    try:
+                        await self.pool.release(conn, timeout=5.0)
+                    except Exception as release_err:
+                        logger.warning(f"Erro ao liberar conexão após falha: {release_err}")
+                    conn = None
+                if attempt == max_retries - 1:
+                    logger.error(f"Falha final ao obter data de atribuição para user {user_id}, role {role_id}", exc_info=True)
+                    return None
+                await asyncio.sleep(retry_delay * (2 ** attempt)) # Exponential backoff
+            except Exception as e:
+                logger.error(f"Erro inesperado ao obter data de atribuição de cargo: {e}", exc_info=True)
+                return None
+            finally:
+                if conn:
+                    await self.pool.release(conn)
