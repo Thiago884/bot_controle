@@ -65,7 +65,7 @@ def run_bot_in_thread():
         try:
             web_logger.info("Iniciando o loop de eventos do bot no thread de background.")
             
-            # NOVO: Passa o evento para o objeto do bot ANTES de iniciá-lo
+            # Passa o evento para o objeto do bot ANTES de iniciá-lo
             bot.ready_event = bot_ready_event
             
             bot_running = True
@@ -81,7 +81,8 @@ def run_bot_in_thread():
             web_logger.warning("O loop do bot foi finalizado. Fechando o bot.")
             bot_running = False
             bot_initialized = False
-            bot_ready_event.clear() # NOVO: Reseta o evento se o bot parar
+            if bot_ready_event:
+                bot_ready_event.clear()  # Reseta o evento se o bot parar
             if not bot.is_closed():
                 loop.run_until_complete(bot.close())
             loop.close()
@@ -92,9 +93,15 @@ def run_bot_in_thread():
 # --- Funções Auxiliares ---
 
 def is_bot_ready():
-    """Verifica se o bot está completamente pronto para operar usando um evento thread-safe"""
-    # MODIFICADO: A verificação principal agora é o evento.
-    return bot_ready_event.is_set() and hasattr(bot, 'is_ready') and bot.is_ready()
+    """Verifica se o bot está completamente pronto para operar"""
+    if not bot_running or not bot_initialized:
+        return False
+        
+    # Verifica se o evento de prontidão foi definido e se o bot tem o atributo is_ready
+    ready_by_event = bot_ready_event.is_set() if bot_ready_event else False
+    ready_by_bot = getattr(bot, 'is_ready', lambda: False)()
+    
+    return ready_by_event or ready_by_bot
 
 def check_bot_initialized():
     """Verifica se a thread do bot foi iniciada e o objeto bot tem um loop."""

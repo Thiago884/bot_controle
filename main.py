@@ -303,6 +303,7 @@ class InactivityBot(commands.Bot):
         self.health_check_task = None
         self._tasks_started = False
         self._is_initialized = False  # Nova flag para controle de inicialização
+        self.start_time = None
         
         # Monitor de rate limits
         self.rate_limit_monitor = RateLimitMonitor()
@@ -342,6 +343,11 @@ class InactivityBot(commands.Bot):
         # NOVO: Inicializa o atributo que receberá o evento
         self.ready_event = None
 
+    @property
+    def is_ready(self):
+        """Propriedade para verificar se o bot está pronto"""
+        return self._ready.is_set() if hasattr(self, '_ready') else False
+
     def generate_event_id(self):
         """Gera um ID único para cada evento"""
         self.event_counter += 1
@@ -355,7 +361,6 @@ class InactivityBot(commands.Bot):
         self.last_reconnect_time = datetime.now(pytz.UTC)
         logger.info("Filas de eventos limpas")
 
-    # >>>>> INÍCIO DA CORREÇÃO <<<<<
     async def start(self, token: str, *, reconnect: bool = True) -> None:
         """Override do método start para lidar com rate limits de forma robusta."""
         
@@ -414,7 +419,6 @@ class InactivityBot(commands.Bot):
                 if self._connection_attempts >= self._max_connection_attempts:
                     logger.critical("Máximo de tentativas de conexão atingido devido a erro inesperado. Desistindo.", exc_info=True)
                     raise
-    # >>>>> FIM DA CORREÇÃO <<<<<
 
     async def initialize_db(self):
         """Inicializa a conexão com o banco de dados usando a classe Database."""
@@ -1461,7 +1465,9 @@ async def on_ready():
     try:
         if hasattr(bot, '_ready_called') and bot._ready_called:
             return
+            
         bot._ready_called = True
+        bot.start_time = datetime.now(pytz.UTC)
         
         logger.info(f'Bot conectado como {bot.user}')
         logger.info(f"Latência: {round(bot.latency * 1000)}ms")
@@ -1599,8 +1605,11 @@ async def on_ready():
         except Exception as e:
             logger.error(f"Erro ao enviar embed de inicialização no on_ready: {e}", exc_info=True)
             
-        # NOVO: Sinaliza ao painel web que o bot está pronto
-        # Esta é a última etapa do on_ready
+        # Sinaliza que o bot está pronto
+        if hasattr(bot, '_ready'):
+            bot._ready.set()
+            
+        # Sinaliza ao painel web que o bot está pronto
         if bot.ready_event and not bot.ready_event.is_set():
             bot.ready_event.set()
             logger.info("Sinal de 'pronto' enviado para o painel web.")
