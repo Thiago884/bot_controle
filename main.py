@@ -1658,9 +1658,11 @@ async def main():
     load_dotenv()
     DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
     
-    # Adicionar delay antes de conectar
-    logger.info("Aguardando 10 segundos antes da primeira tentativa de conexão para estabilização do ambiente...")
-    await asyncio.sleep(10)  # Aumentado para 10 segundos
+    # FIX: Increased initial delay to 15 seconds to ensure the Render 
+    # environment is fully stable before the first connection attempt. This helps 
+    # prevent the initial failure that leads to aggressive retries and Cloudflare blocks.
+    logger.info("Aguardando 15 segundos antes da primeira tentativa de conexão para estabilização do ambiente...")
+    await asyncio.sleep(15)
     
     # Tentar inicializar o banco de dados antes de iniciar o bot
     try:
