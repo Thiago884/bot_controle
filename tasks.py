@@ -15,6 +15,18 @@ import os
 
 logger = logging.getLogger('inactivity_bot')
 
+def handle_exception(loop, context):
+    """Captura exceções não tratadas."""
+    logger.error(f"Exceção não tratada: {context['message']}", exc_info=context.get('exception'))
+    
+    # Tenta logar a exceção no canal de logs do Discord
+    # Usar create_task para não bloquear o handler
+    asyncio.create_task(bot.log_action(
+        "Exceção Não Tratada",
+        None,
+        f"Exceção: {context.get('exception')}\nMensagem: {context['message']}"
+    ))
+
 class PerformanceMetrics:
     def __init__(self):
         self.db_query_times = []
@@ -576,15 +588,6 @@ async def on_disconnect():
         logger.error(f"Erro ao registrar membros em voz na desconexão: {e}")
 
     await emergency_backup()
-
-def handle_exception(loop, context):
-    """Captura exceções não tratadas."""
-    logger.error(f"Exceção não tratada: {context['message']}", exc_info=context.get('exception'))
-    asyncio.create_task(bot.log_action(
-        "Exceção Não Tratada",
-        None,
-        f"Exceção: {context.get('exception')}\nMensagem: {context['message']}"
-    ))
 
 async def save_task_states():
     """Salva o estado atual das tasks no banco de dados."""

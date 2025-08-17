@@ -123,7 +123,17 @@ class RateLimitMonitor:
         if now < self.cooldown_until:
             return True
         
-        # Verificar rate limit global
+        # Lógica proativa: se restarem poucas requisições, espere um pouco
+        if self.global_limits['remaining'] < 5:
+            # Calcula um pequeno delay para distribuir as requisições restantes
+            time_to_reset = self.global_limits['reset_at'] - now
+            if time_to_reset > 0:
+                # Espera uma fração do tempo restante
+                proactive_delay = time_to_reset / (self.global_limits['remaining'] + 1)
+                logger.info(f"Rate limit global baixo ({self.global_limits['remaining']}). Ativando delay proativo de {proactive_delay:.2f}s.")
+                time.sleep(proactive_delay)
+        
+        # Lógica reativa (original) - Mantenha para o caso de estourar o limite mesmo assim
         if self.global_limits['remaining'] < 5 and now < self.global_limits['reset_at']:
             self.adaptive_delay = min(self.max_delay, self.adaptive_delay * 1.5)
             self.cooldown_until = now + self.adaptive_delay
@@ -303,7 +313,6 @@ class InactivityBot(commands.Bot):
         self.health_check_task = None
         self._tasks_started = False
         self._is_initialized = False  # Nova flag para controle de inicialização
-        self.start_time = None
         
         # Monitor de rate limits
         self.rate_limit_monitor = RateLimitMonitor()
@@ -342,11 +351,6 @@ class InactivityBot(commands.Bot):
 
         # NOVO: Inicializa o atributo que receberá o evento
         self.ready_event = None
-
-    @property
-    def is_ready(self):
-        """Propriedade para verificar se o bot está pronto"""
-        return self._ready.is_set() if hasattr(self, '_ready') else False
 
     def generate_event_id(self):
         """Gera um ID único para cada evento"""
@@ -1465,9 +1469,7 @@ async def on_ready():
     try:
         if hasattr(bot, '_ready_called') and bot._ready_called:
             return
-            
         bot._ready_called = True
-        bot.start_time = datetime.now(pytz.UTC)
         
         logger.info(f'Bot conectado como {bot.user}')
         logger.info(f"Latência: {round(bot.latency * 1000)}ms")
@@ -1526,25 +1528,32 @@ async def on_ready():
             # Primeiro verificar períodos perdidos
             await check_missed_periods()
             
-            # Registrar datas de atribuição de cargos para membros existentes
-            bot.loop.create_task(register_role_assignments_wrapper(), name='register_role_assignments_wrapper')
+            async def start_task_with_jitter(task_coro, name):
+                # Espera um tempo aleatório entre 1 e 60 segundos
+                delay = random.uniform(1, 60)
+                logger.info(f"Agendando a task '{name}' para iniciar em {delay:.2f} segundos.")
+                await asyncio.sleep(delay)
+                bot.loop.create_task(task_coro, name=name)
+
+            # Agendar tarefas com jitter
+            await start_task_with_jitter(register_role_assignments_wrapper(), 'register_role_assignments_wrapper')
+            await start_task_with_jitter(inactivity_check(), 'inactivity_check_wrapper')
+            await start_task_with_jitter(check_warnings(), 'check_warnings_wrapper')
+            await start_task_with_jitter(cleanup_members(), 'cleanup_members_wrapper')
+            await start_task_with_jitter(database_backup(), 'database_backup_wrapper')
+            await start_task_with_jitter(cleanup_old_data(), 'cleanup_old_data_wrapper')
+            await start_task_with_jitter(monitor_rate_limits(), 'monitor_rate_limits_wrapper')
+            await start_task_with_jitter(report_metrics(), 'report_metrics_wrapper')
+            await start_task_with_jitter(health_check(), 'health_check_wrapper')
+            await start_task_with_jitter(check_previous_periods(), 'check_previous_periods_wrapper')
             
-            # Criar tasks com nomes identificáveis
-            bot.loop.create_task(inactivity_check(), name='inactivity_check_wrapper')
-            bot.loop.create_task(check_warnings(), name='check_warnings_wrapper')
-            bot.loop.create_task(cleanup_members(), name='cleanup_members_wrapper')
-            bot.loop.create_task(database_backup(), name='database_backup_wrapper')
-            bot.loop.create_task(cleanup_old_data(), name='cleanup_old_data_wrapper')
-            bot.loop.create_task(monitor_rate_limits(), name='monitor_rate_limits_wrapper')
-            bot.loop.create_task(report_metrics(), name='report_metrics_wrapper')
-            bot.loop.create_task(health_check(), name='health_check_wrapper')
-            bot.loop.create_task(check_previous_periods(), name='check_previous_periods_wrapper')
+            # Tarefas que podem iniciar mais rapidamente
             bot.loop.create_task(process_pending_voice_events(), name='process_pending_voice_events')
             bot.loop.create_task(check_current_voice_members(), name='check_current_voice_members')
             bot.loop.create_task(detect_missing_voice_leaves(), name='detect_missing_voice_leaves')
             bot.loop.create_task(cleanup_ghost_sessions_wrapper(), name='cleanup_ghost_sessions_wrapper')
             
-            # Apenas a queue_processor_task é criada aqui, conforme solicitado
+            # Tarefas de processamento principal podem iniciar sem delay
             bot.queue_processor_task = bot.loop.create_task(bot.process_queues(), name='queue_processor')
             bot.pool_monitor_task = bot.loop.create_task(bot.monitor_db_pool(), name='db_pool_monitor')
             bot.health_check_task = bot.loop.create_task(bot.periodic_health_check(), name='periodic_health_check')
@@ -1605,11 +1614,8 @@ async def on_ready():
         except Exception as e:
             logger.error(f"Erro ao enviar embed de inicialização no on_ready: {e}", exc_info=True)
             
-        # Sinaliza que o bot está pronto
-        if hasattr(bot, '_ready'):
-            bot._ready.set()
-            
-        # Sinaliza ao painel web que o bot está pronto
+        # NOVO: Sinaliza ao painel web que o bot está pronto
+        # Esta é a última etapa do on_ready
         if bot.ready_event and not bot.ready_event.is_set():
             bot.ready_event.set()
             logger.info("Sinal de 'pronto' enviado para o painel web.")
@@ -1653,10 +1659,8 @@ async def main():
     DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
     
     # Adicionar delay antes de conectar
-    # >>>>> INÍCIO DA CORREÇÃO <<<<<
     logger.info("Aguardando 10 segundos antes da primeira tentativa de conexão para estabilização do ambiente...")
     await asyncio.sleep(10)  # Aumentado para 10 segundos
-    # >>>>> FIM DA CORREÇÃO <<<<<
     
     # Tentar inicializar o banco de dados antes de iniciar o bot
     try:
