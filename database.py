@@ -823,8 +823,7 @@ class Database:
         conn = None
         try:
             conn = await self.pool.acquire()
-            # Query corrigida para buscar sessões que se sobrepõem ao período
-            # e calcular a duração efetiva dentro desse mesmo período.
+            # Query aprimorada para buscar apenas sessões que se sobrepõem ao período
             results = await conn.fetch('''
                 SELECT 
                     join_time, 
@@ -835,8 +834,7 @@ class Database:
                     ))::INT AS duration
                 FROM voice_sessions
                 WHERE user_id = $1 AND guild_id = $2
-                -- A condição de sobreposição correta: a sessão deve começar antes do fim do período
-                -- e terminar depois do início do período.
+                -- A sessão deve começar ANTES do fim do período E terminar DEPOIS do início do período
                 AND join_time < $4 AND leave_time > $3
                 ORDER BY join_time
             ''', user_id, guild_id, start_date, end_date)
