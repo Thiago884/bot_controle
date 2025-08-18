@@ -83,7 +83,7 @@ WEB_AUTH_PASS = os.getenv('WEB_AUTH_PASS', 'admin123')
 # Variáveis globais para controlar o estado do bot
 bot_running = False
 bot_initialized = False
-bot_ready_event = threading.Event() # NOVO: Evento thread-safe para sinalizar prontidão
+bot_ready_event = threading.Event() # Evento thread-safe para sinalizar prontidão
 
 # Verificar token do Discord antes de iniciar
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
@@ -103,7 +103,7 @@ def run_bot_in_thread():
         try:
             web_logger.info("Iniciando o loop de eventos do bot no thread de background.")
             
-            # NOVO: Passa o evento para o objeto do bot ANTES de iniciá-lo
+            # Passa o evento para o objeto do bot ANTES de iniciá-lo
             bot.ready_event = bot_ready_event
             
             bot_running = True
@@ -119,7 +119,7 @@ def run_bot_in_thread():
             web_logger.warning("O loop do bot foi finalizado. Fechando o bot.")
             bot_running = False
             bot_initialized = False
-            bot_ready_event.clear() # NOVO: Reseta o evento se o bot parar
+            bot_ready_event.clear() # Reseta o evento se o bot parar
             if not bot.is_closed():
                 loop.run_until_complete(bot.close())
             loop.close()
@@ -131,7 +131,6 @@ def run_bot_in_thread():
 
 def is_bot_ready():
     """Verifica se o bot está completamente pronto para operar usando um evento thread-safe"""
-    # MODIFICADO: A verificação principal agora é o evento.
     return bot_ready_event.is_set() and hasattr(bot, 'is_ready') and bot.is_ready()
 
 def check_bot_initialized():
@@ -140,7 +139,6 @@ def check_bot_initialized():
         web_logger.error("Bot não inicializado corretamente ou seu loop não está rodando.")
         return False
     
-    # Verificar se o banco de dados está acessível
     if not hasattr(bot, 'db') or not bot.db or not hasattr(bot.db, 'pool') or not bot.db.pool:
         web_logger.error("Pool de conexões do banco de dados não está disponível.")
         return False
@@ -175,7 +173,7 @@ def run_coroutine_in_bot_loop(coro):
     
     future = asyncio.run_coroutine_threadsafe(coro, bot.loop)
     try:
-        return future.result(timeout=30)  # Aumentado timeout para 30 segundos
+        return future.result(timeout=30)
     except asyncio.TimeoutError:
         web_logger.error("Timeout ao executar corrotina no loop do bot.")
         raise TimeoutError("Coroutine execution timed out.")
@@ -196,19 +194,29 @@ def get_main_guild():
     if not hasattr(bot, 'guilds') or not bot.guilds:
         web_logger.warning("Nenhuma guilda disponível no cache do bot.")
         return None
-    return bot.guilds[0]  # Assumindo que o bot está em apenas uma guilda
+    return bot.guilds[0]
+
+# ====================================================================
+# CORREÇÃO INICIA AQUI
+# ====================================================================
 
 # Middleware para verificar se o bot está pronto
 @app.before_request
 def check_bot_ready():
-    if request.path.startswith('/static') or request.path in ['/', '/dashboard', '/keepalive', '/health']:
+    # Ignorar verificação para rotas que não dependem do bot (arquivos estáticos e health checks)
+    if request.path.startswith('/static') or request.path in ['/keepalive', '/health']:
         return
         
+    # Para todas as outras rotas, verificar se o bot está pronto
     if not bot_running or not bot_initialized:
-        return jsonify({'status': 'error', 'message': 'O processo do bot não está rodando ou inicializado.'}), 503
+        return render_template('error.html', error_message="O processo do bot não está rodando ou não foi inicializado."), 503
         
     if not is_bot_ready():
-        return jsonify({'status': 'error', 'message': 'O bot está inicializando, mas ainda não está pronto.'}), 503
+        return render_template('error.html', error_message="O bot está inicializando, mas ainda não está pronto. Por favor, aguarde."), 503
+
+# ====================================================================
+# CORREÇÃO TERMINA AQUI
+# ====================================================================
 
 # Rota para servir arquivos estáticos
 @app.route('/static/<path:filename>')
@@ -244,15 +252,9 @@ def health_check():
 @app.route('/')
 @basic_auth_required
 def home():
-    try:
-        if not bot_running or not bot_initialized:
-            return render_template('error.html', error_message="Bot não está rodando ou não foi inicializado"), 503
-            
-        web_logger.info("Redirecionando para /dashboard")
-        return redirect(url_for('dashboard'))
-    except Exception as e:
-        web_logger.error(f"Erro na rota principal: {e}", exc_info=True)
-        return render_template('error.html', error_message="Erro interno do servidor"), 500
+    # Com a correção no middleware, esta verificação não é mais necessária.
+    # A função agora apenas redireciona.
+    return redirect(url_for('dashboard'))
 
 @app.route('/dashboard')
 @basic_auth_required
@@ -342,6 +344,9 @@ def dashboard():
         web_logger.error(f"Erro fatal na rota dashboard: {e}", exc_info=True)
         return render_template('error.html', error_message=f"Erro ao carregar o dashboard: {e}"), 500
 
+# (O restante do arquivo 'web_panel.py' permanece o mesmo)
+
+# ... (cole o restante do seu arquivo web_panel.py aqui) ...
 @app.route('/monitor')
 @basic_auth_required
 def monitor():
