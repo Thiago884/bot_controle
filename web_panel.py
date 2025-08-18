@@ -17,7 +17,7 @@ import psutil
 from werkzeug.middleware.proxy_fix import ProxyFix
 import time
 import sys
-import idna # <-- FIX: This import registers the necessary encoding
+import idna
 
 # Configuração básica do logger para o web panel
 web_logger = logging.getLogger('web_panel')
