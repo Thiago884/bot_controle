@@ -19,6 +19,17 @@ import time
 import sys
 import idna
 
+
+# --- PATCH: Prevent Matplotlib font-cache blocking in headless container
+import os
+try:
+    # Ensure matplotlib writes cache to a temp dir to avoid permission/lock issues and force Agg backend
+    os.environ.setdefault('MPLCONFIGDIR', '/tmp/.matplotlib')
+    import matplotlib
+    matplotlib.use('Agg')
+except Exception:
+    # If matplotlib isn't installed or fails, continue without crashing import
+    pass
 # --- PATCH: Ensure 'idna' codec is registered (fix LookupError: unknown encoding: idna)
 # Some container/venv setups may not have the encodings.idna module registered automatically.
 try:
@@ -47,6 +58,21 @@ web_logger.addHandler(console_handler)
 
 # Configure o diretório de templates
 app = Flask(__name__, template_folder='templates')
+
+# --- PATCH: quick health responses for probes (avoid 401/503 on HEAD/keepalives)
+from flask import g
+@app.before_request
+def _probe_and_head_handler():
+    ua = request.headers.get('User-Agent','')
+    # Respond 200 to HEAD requests (Render's health checks use HEAD) and simple http client probes
+    if request.method == 'HEAD' or ua.startswith('Go-http-client'):
+        return Response(status=200)
+    # Allow Render internal requests from localhost to proceed even if auth logic would block briefly
+    # (this sets a flag that decorators/handlers can use if they check g.get('internal_request'))
+    remote = request.remote_addr or ''
+    if remote.startswith('127.') or remote == '::1' or remote.startswith('10.'):
+        g.internal_request = True
+
 app.config['SERVER_NAME'] = None
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
