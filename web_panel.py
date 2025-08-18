@@ -19,6 +19,18 @@ import time
 import sys
 import idna
 
+# --- PATCH: Ensure 'idna' codec is registered (fix LookupError: unknown encoding: idna)
+# Some container/venv setups may not have the encodings.idna module registered automatically.
+try:
+    import encodings.idna  # forces registration of the 'idna' codec used by werkzeug/flask
+except Exception as _e:
+    # If import fails, avoid crashing at import time — log a warning later when logger is available.
+    # Use a print as a fallback to ensure visibility during early startup.
+    try:
+        print(f"[WARN] could not import encodings.idna: {_e}")
+    except Exception:
+        pass
+
 # Configuração básica do logger para o web panel
 web_logger = logging.getLogger('web_panel')
 web_logger.setLevel(logging.INFO)
