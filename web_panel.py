@@ -1474,9 +1474,15 @@ def handle_exception(e):
 
 # Inicia o bot em uma thread separada assim que o módulo é carregado
 web_logger.info("Iniciando a thread do bot Discord...")
-run_bot_in_thread()
+# run_bot_in_thread() # <- COMMENT OUT OR DELETE THIS LINE
 
-# REMOVIDO: O atraso fixo é removido pois agora usamos um evento de sinalização.
+# Schedule the bot to start after a 5-second delay. This allows the web server
+# to boot and respond to health checks before the bot's lengthy initialization begins.
+web_logger.info("Scheduling the bot thread to start in 5 seconds.")
+threading.Timer(5.0, run_bot_in_thread).start()
+
+
+# REMOVED: O atraso fixo é removido pois agora usamos um evento de sinalização.
 # time.sleep(5)
 
 # Este bloco só será usado para testes locais, não quando executado pelo Gunicorn
