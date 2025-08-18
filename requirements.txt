@@ -14,3 +14,4 @@ gunicorn>=23.0.0
 nest-asyncio>=1.5.8
 pycares>=3.0.0
 idna>=2.10
+Werkzeug==2.2.3
