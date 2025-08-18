@@ -1468,54 +1468,49 @@ async def on_member_update(before: discord.Member, after: discord.Member):
 async def on_ready():
     try:
         if hasattr(bot, '_ready_called') and bot._ready_called:
+            logger.info("on_ready chamado novamente, mas já foi processado. Ignorando.")
             return
         bot._ready_called = True
-        
+
         logger.info(f'Bot conectado como {bot.user}')
         logger.info(f"Latência: {round(bot.latency * 1000)}ms")
-        
-        # Garantir que o banco de dados está inicializado
-        if not hasattr(bot, 'db') or not bot.db or not hasattr(bot.db, 'pool') or not bot.db._is_initialized:
-            logger.error("Banco de dados não inicializado - tentando novamente...")
-            await bot.initialize_db()
-            if not bot.db._is_initialized:
-                logger.critical("Falha na inicialização do banco de dados")
-                return
-                
-        # Desative o chunking automático se estiver causando problemas
-        bot._connection._chunk_guilds = False
-        
-        # Carregar configurações e garantir que estão corretas
-        config_loaded = await bot.load_config()
-        if not config_loaded:
-            logger.error("Falha ao carregar configurações - usando padrão")
-        
-        # Verificar consistência das configurações
-        required_keys = ['required_minutes', 'required_days', 'monitoring_period', 
-                        'kick_after_days', 'tracked_roles', 'warnings']
-        for key in required_keys:
-            if key not in bot.config:
-                logger.error(f"Configuração essencial faltando: {key}")
-                bot.config[key] = DEFAULT_CONFIG[key]
-        
-        # Garantir que as configurações estão salvas no banco
-        await bot.save_config()
 
-        # Verificar se o método sync_task_periods existe antes de chamá-lo
+        # --- ETAPA 1: INICIALIZAÇÃO CRÍTICA ---
+        # Garante que o banco de dados e a configuração estão prontos.
+        # Estas são as dependências essenciais para o painel de controle funcionar.
+
+        if not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
+            logger.error("Banco de dados não foi inicializado corretamente. Tentando novamente...")
+            if not await bot.initialize_db():
+                logger.critical("Falha crítica na inicialização do banco de dados no on_ready. O bot não pode continuar.")
+                # Sinaliza que o bot falhou para o painel não ficar esperando para sempre.
+                if bot.ready_event and not bot.ready_event.is_set():
+                    bot.ready_event.set() # Libera o painel, mesmo que com um bot não funcional.
+                return
+
+        logger.info("Carregando e validando configurações...")
+        await bot.load_config()
+        await bot.save_config() # Garante que a configuração está sincronizada com o DB.
+
         if hasattr(bot.db, 'sync_task_periods'):
             monitoring_period = bot.config.get('monitoring_period')
             if monitoring_period:
                 await bot.db.sync_task_periods(monitoring_period)
         
-        if hasattr(bot, '_ready_set') and bot._ready_set:
-            return
-            
-        bot._ready_set = True
-        
+        logger.info("Inicialização crítica concluída.")
+
+        # --- ETAPA 2: SINALIZAR PRONTIDÃO PARA O PAINEL WEB ---
+        # O bot agora tem DB e config, então a API pode ser liberada.
+        if bot.ready_event and not bot.ready_event.is_set():
+            bot.ready_event.set()
+            logger.info("SINAL DE PRONTO ENVIADO! O painel de controle agora está operacional.")
+
+        # --- ETAPA 3: INICIAR TAREFAS DE FUNDO E PROCESSOS NÃO CRÍTICOS ---
+        # Estas tarefas podem levar tempo e rodarão em segundo plano.
+
         if not bot._tasks_started:
-            logger.info("Configurações verificadas. Iniciando tarefas de fundo...")
+            logger.info("Iniciando tarefas de fundo...")
             
-            # CORREÇÃO: Importar a função 'register_role_assignments_wrapper'
             from tasks import (
                 inactivity_check, check_warnings, cleanup_members,
                 database_backup, cleanup_old_data, monitor_rate_limits,
@@ -1525,17 +1520,16 @@ async def on_ready():
                 cleanup_ghost_sessions_wrapper, register_role_assignments_wrapper
             )
             
-            # Primeiro verificar períodos perdidos
-            await check_missed_periods()
+            # Primeiro verificar períodos perdidos de forma assíncrona
+            bot.loop.create_task(check_missed_periods(), name='check_missed_periods_task')
             
             async def start_task_with_jitter(task_coro, name):
-                # Espera um tempo aleatório entre 1 e 60 segundos
-                delay = random.uniform(1, 60)
+                delay = random.uniform(1, 30)
                 logger.info(f"Agendando a task '{name}' para iniciar em {delay:.2f} segundos.")
                 await asyncio.sleep(delay)
                 bot.loop.create_task(task_coro, name=name)
 
-            # Agendar tarefas com jitter
+            # Agendar tarefas principais com um pequeno atraso para não sobrecarregar a inicialização
             await start_task_with_jitter(register_role_assignments_wrapper(), 'register_role_assignments_wrapper')
             await start_task_with_jitter(inactivity_check(), 'inactivity_check_wrapper')
             await start_task_with_jitter(check_warnings(), 'check_warnings_wrapper')
@@ -1546,13 +1540,11 @@ async def on_ready():
             await start_task_with_jitter(report_metrics(), 'report_metrics_wrapper')
             await start_task_with_jitter(health_check(), 'health_check_wrapper')
             
-            # Tarefas que podem iniciar mais rapidamente
+            # Tarefas de processamento contínuo
             bot.loop.create_task(process_pending_voice_events(), name='process_pending_voice_events')
             bot.loop.create_task(check_current_voice_members(), name='check_current_voice_members')
             bot.loop.create_task(detect_missing_voice_leaves(), name='detect_missing_voice_leaves')
             bot.loop.create_task(cleanup_ghost_sessions_wrapper(), name='cleanup_ghost_sessions_wrapper')
-            
-            # Tarefas de processamento principal podem iniciar sem delay
             bot.queue_processor_task = bot.loop.create_task(bot.process_queues(), name='queue_processor')
             bot.pool_monitor_task = bot.loop.create_task(bot.monitor_db_pool(), name='db_pool_monitor')
             bot.health_check_task = bot.loop.create_task(bot.periodic_health_check(), name='periodic_health_check')
@@ -1562,42 +1554,7 @@ async def on_ready():
             bot._tasks_started = True
             logger.info("Todas as tarefas de fundo foram agendadas com sucesso.")
 
-        # Alteração 4: Verificar membros ativos e canais
-        for guild in bot.guilds:
-            try:
-                # Forçar fetch de todos os membros
-                logger.info(f"Carregando membros para a guilda {guild.name}...")
-                await guild.chunk()
-                logger.info(f"{len(guild.members)} membros carregados para {guild.name}")
-                
-                # Verificar canais de log e notificação
-                log_channel_id = bot.config.get('log_channel')
-                if log_channel_id:
-                    log_channel = bot.get_channel(int(log_channel_id))
-                    if not log_channel:
-                        logger.error(f"Canal de logs (ID: {log_channel_id}) não encontrado - criando fallback")
-                        # Tentar encontrar um canal padrão
-                        for channel in guild.text_channels:
-                            if 'log' in channel.name.lower():
-                                bot.config['log_channel'] = channel.id
-                                await bot.save_config(guild.id)
-                                break
-                
-                notification_channel_id = bot.config.get('notification_channel')
-                if notification_channel_id:
-                    notify_channel = bot.get_channel(int(notification_channel_id))
-                    if not notify_channel:
-                        logger.error(f"Canal de notificações (ID: {notification_channel_id}) não encontrado - criando fallback")
-                        # Tentar encontrar um canal padrão
-                        for channel in guild.text_channels:
-                            if 'geral' in channel.name.lower() or 'notif' in channel.name.lower():
-                                bot.config['notification_channel'] = channel.id
-                                await bot.save_config(guild.id)
-                                break
-
-            except Exception as e:
-                logger.error(f"Erro durante a validação de canais no on_ready para a guilda {guild.name}: {e}", exc_info=True)
-        
+        # Enviar log de inicialização
         try:
             embed = discord.Embed(
                 title="✅ Bot de Controle de Atividades Online",
@@ -1612,17 +1569,12 @@ async def on_ready():
             await bot.log_action(None, None, embed=embed)
         except Exception as e:
             logger.error(f"Erro ao enviar embed de inicialização no on_ready: {e}", exc_info=True)
-            
-        # NOVO: Sinaliza ao painel web que o bot está pronto
-        # Esta é a última etapa do on_ready
+
+    except Exception as e:
+        logger.critical(f"Erro crítico irrecuperável no on_ready: {e}", exc_info=True)
+        # Se algo crítico falhar, sinalize o evento mesmo assim para que o painel não trave
         if bot.ready_event and not bot.ready_event.is_set():
             bot.ready_event.set()
-            logger.info("Sinal de 'pronto' enviado para o painel web.")
-        
-    except Exception as e:
-        logger.error(f"Erro crítico no on_ready: {e}", exc_info=True)
-        # Tentar reiniciar após um delay
-        await asyncio.sleep(60)
         await bot.close()
 
 @bot.event
