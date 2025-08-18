@@ -1520,7 +1520,7 @@ async def on_ready():
                 inactivity_check, check_warnings, cleanup_members,
                 database_backup, cleanup_old_data, monitor_rate_limits,
                 report_metrics, health_check, check_missed_periods,
-                check_previous_periods, process_pending_voice_events,
+                process_pending_voice_events,
                 check_current_voice_members, detect_missing_voice_leaves,
                 cleanup_ghost_sessions_wrapper, register_role_assignments_wrapper
             )
@@ -1545,7 +1545,6 @@ async def on_ready():
             await start_task_with_jitter(monitor_rate_limits(), 'monitor_rate_limits_wrapper')
             await start_task_with_jitter(report_metrics(), 'report_metrics_wrapper')
             await start_task_with_jitter(health_check(), 'health_check_wrapper')
-            await start_task_with_jitter(check_previous_periods(), 'check_previous_periods_wrapper')
             
             # Tarefas que podem iniciar mais rapidamente
             bot.loop.create_task(process_pending_voice_events(), name='process_pending_voice_events')

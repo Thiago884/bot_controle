@@ -963,6 +963,25 @@ class Database:
             if conn:
                 await self.pool.release(conn)
 
+    async def get_warnings_in_period(self, user_id: int, guild_id: int, period_start: datetime) -> List[str]:
+        """Obtém todos os tipos de avisos enviados a um usuário dentro do período de verificação atual."""
+        conn = None
+        try:
+            conn = await self.pool.acquire()
+            results = await conn.fetch('''
+                SELECT DISTINCT warning_type 
+                FROM user_warnings 
+                WHERE user_id = $1 AND guild_id = $2 AND warning_date >= $3
+            ''', user_id, guild_id, period_start)
+            
+            return [row['warning_type'] for row in results] if results else []
+        except Exception as e:
+            logger.error(f"Erro ao obter todos os avisos no período para user {user_id}: {e}", exc_info=True)
+            return []
+        finally:
+            if conn:
+                await self.pool.release(conn)
+
     async def log_removed_roles(self, user_id: int, guild_id: int, role_ids: List[int]):
         """Registra cargos removidos por inatividade (COM transação)."""
         conn = None
