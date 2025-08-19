@@ -19,7 +19,6 @@ import time
 import sys
 import idna
 
-
 # --- PATCH: Prevent Matplotlib font-cache blocking in headless container
 import os
 try:
@@ -30,8 +29,8 @@ try:
 except Exception:
     # If matplotlib isn't installed or fails, continue without crashing import
     pass
+
 # --- PATCH: Ensure 'idna' codec is registered (fix LookupError: unknown encoding: idna)
-# Some container/venv setups may not have the encodings.idna module registered automatically.
 try:
     import encodings.idna  # forces registration of the 'idna' codec used by werkzeug/flask
 except Exception as _e:
@@ -103,7 +102,7 @@ def run_bot_in_thread():
         try:
             web_logger.info("Iniciando o loop de eventos do bot no thread de background.")
             
-            # Passa o evento para o objeto do bot ANTES de iniciá-lo
+            # Configura o evento de prontidão
             bot.ready_event = bot_ready_event
             
             bot_running = True
@@ -111,18 +110,13 @@ def run_bot_in_thread():
             
             loop.run_until_complete(bot.start(DISCORD_TOKEN))
             
-        except discord.LoginFailure:
-            web_logger.critical("Falha no login: Token do Discord inválido.")
         except Exception as e:
-            web_logger.critical(f"Erro fatal ao executar o bot Discord no thread: {e}", exc_info=True)
+            web_logger.critical(f"Erro fatal ao executar o bot Discord: {e}", exc_info=True)
+            # Sinaliza o evento mesmo em caso de falha para evitar deadlock
+            bot_ready_event.set()
         finally:
-            web_logger.warning("O loop do bot foi finalizado. Fechando o bot.")
             bot_running = False
             bot_initialized = False
-            bot_ready_event.clear() # Reseta o evento se o bot parar
-            if not bot.is_closed():
-                loop.run_until_complete(bot.close())
-            loop.close()
 
     bot_thread = threading.Thread(target=bot_runner, daemon=True)
     bot_thread.start()
@@ -130,8 +124,19 @@ def run_bot_in_thread():
 # --- Funções Auxiliares ---
 
 def is_bot_ready():
-    """Verifica se o bot está completamente pronto para operar usando um evento thread-safe"""
-    return bot_ready_event.is_set() and hasattr(bot, 'is_ready') and bot.is_ready()
+    """Verifica se o bot está completamente pronto para operar"""
+    try:
+        return (bot_running and 
+                bot_initialized and 
+                hasattr(bot, 'is_ready') and 
+                bot.is_ready() and 
+                hasattr(bot, 'db') and 
+                bot.db and 
+                hasattr(bot.db, 'pool') and 
+                bot.db.pool)
+    except Exception as e:
+        web_logger.error(f"Erro ao verificar prontidão do bot: {e}")
+        return False
 
 def check_bot_initialized():
     """Verifica se a thread do bot foi iniciada e o objeto bot tem um loop."""
@@ -196,27 +201,24 @@ def get_main_guild():
         return None
     return bot.guilds[0]
 
-# ====================================================================
-# CORREÇÃO INICIA AQUI
-# ====================================================================
-
 # Middleware para verificar se o bot está pronto
 @app.before_request
 def check_bot_ready():
-    # Ignorar verificação para rotas que não dependem do bot (arquivos estáticos e health checks)
-    if request.path.startswith('/static') or request.path in ['/keepalive', '/health']:
+    # Ignorar verificação para rotas que não dependem do bot
+    if request.path.startswith('/static') or request.path in ['/keepalive', '/health', '/is_ready']:
         return
         
-    # Para todas as outras rotas, verificar se o bot está pronto
-    if not bot_running or not bot_initialized:
-        return render_template('error.html', error_message="O processo do bot não está rodando ou não foi inicializado."), 503
+    # Verificar se o bot está completamente pronto
+    if not hasattr(bot, 'is_ready') or not bot.is_ready():
+        return render_template('error.html',
+                        error_message="O bot está conectando ao Discord, aguarde...",
+                        status_code=503), 503
         
-    if not is_bot_ready():
-        return render_template('error.html', error_message="O bot está inicializando, mas ainda não está pronto. Por favor, aguarde."), 503
-
-# ====================================================================
-# CORREÇÃO TERMINA AQUI
-# ====================================================================
+    # Verificar se o banco de dados está disponível
+    if not hasattr(bot, 'db') or not bot.db or not hasattr(bot.db, 'pool') or not bot.db.pool:
+        return render_template('error.html',
+                        error_message="Banco de dados não está disponível.",
+                        status_code=503), 503
 
 # Rota para servir arquivos estáticos
 @app.route('/static/<path:filename>')
@@ -227,6 +229,20 @@ def static_files(filename):
 @app.route('/keepalive')
 def keepalive():
     return jsonify({'status': 'alive'})
+
+# Novo endpoint de verificação de prontidão
+@app.route('/is_ready')
+def is_ready():
+    try:
+        return jsonify({
+            'bot_running': bot_running,
+            'bot_initialized': bot_initialized,
+            'bot_ready': is_bot_ready(),
+            'db_ready': hasattr(bot, 'db') and bot.db and hasattr(bot.db, 'pool') and bot.db.pool,
+            'status': 'ready' if (bot_running and bot_initialized and is_bot_ready()) else 'initializing'
+        })
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 # Tratamento de erro para rotas não encontradas
 @app.errorhandler(404)
@@ -252,8 +268,6 @@ def health_check():
 @app.route('/')
 @basic_auth_required
 def home():
-    # Com a correção no middleware, esta verificação não é mais necessária.
-    # A função agora apenas redireciona.
     return redirect(url_for('dashboard'))
 
 @app.route('/dashboard')
@@ -344,9 +358,6 @@ def dashboard():
         web_logger.error(f"Erro fatal na rota dashboard: {e}", exc_info=True)
         return render_template('error.html', error_message=f"Erro ao carregar o dashboard: {e}"), 500
 
-# (O restante do arquivo 'web_panel.py' permanece o mesmo)
-
-# ... (cole o restante do seu arquivo web_panel.py aqui) ...
 @app.route('/monitor')
 @basic_auth_required
 def monitor():
@@ -1327,7 +1338,6 @@ def get_ranking():
         web_logger.error(f"Erro em /api/get_ranking: {e}", exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-# Nova rota para cargos monitorados
 @app.route('/api/tracked_roles', methods=['GET', 'POST'])
 @basic_auth_required
 def manage_tracked_roles():
@@ -1416,7 +1426,6 @@ def manage_tracked_roles():
         web_logger.error(f"Erro em /api/tracked_roles: {e}", exc_info=True)
         return jsonify({'status': 'error', 'message': f"Erro ao gerenciar tracked roles: {str(e)}"}), 500
 
-# Nova rota para configurações de aviso
 @app.route('/api/warning_settings', methods=['GET', 'POST'])
 @basic_auth_required
 def manage_warning_settings():
@@ -1479,16 +1488,11 @@ def handle_exception(e):
 
 # Inicia o bot em uma thread separada assim que o módulo é carregado
 web_logger.info("Iniciando a thread do bot Discord...")
-# run_bot_in_thread() # <- COMMENT OUT OR DELETE THIS LINE
 
-# Schedule the bot to start after a 5-second delay. This allows the web server
+# Schedule the bot to start after a 10-second delay. This allows the web server
 # to boot and respond to health checks before the bot's lengthy initialization begins.
-web_logger.info("Scheduling the bot thread to start in 5 seconds.")
-threading.Timer(5.0, run_bot_in_thread).start()
-
-
-# REMOVED: O atraso fixo é removido pois agora usamos um evento de sinalização.
-# time.sleep(5)
+web_logger.info("Scheduling the bot thread to start in 10 seconds.")
+threading.Timer(10.0, run_bot_in_thread).start()
 
 # Este bloco só será usado para testes locais, não quando executado pelo Gunicorn
 if __name__ == '__main__':
