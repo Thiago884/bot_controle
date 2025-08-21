@@ -25,7 +25,7 @@ from database import Database
 # Configuração do logger
 def setup_logger():
     logger = logging.getLogger('inactivity_bot')
-    if logger.handlers:  # Se já tem handlers, não adicione novos
+    if logger.handlers:  # Se já existem handlers, não adicione novos
         return logger
         
     logger.setLevel(logging.INFO)
@@ -319,7 +319,7 @@ class InactivityBot(commands.Bot):
         self.last_rate_limit_report = 0
         self.rate_limit_report_interval = 300
         
-        # Rate limit improvements
+        # Melhorias no tratamento de rate limit
         self.rate_limit_buckets = {
             'global': {
                 'limit': 50,
@@ -366,7 +366,7 @@ class InactivityBot(commands.Bot):
         logger.info("Filas de eventos limpas")
 
     async def start(self, token: str, *, reconnect: bool = True) -> None:
-        """Override do método start para lidar com rate limits de forma robusta."""
+        """Sobrescreve o método start para lidar com rate limits de forma robusta."""
         
         # O _connection_delay será o tempo de espera *antes* da próxima tentativa.
         # Inicializado para 0 para a primeira tentativa ser imediata (após o delay inicial no main).
@@ -614,7 +614,7 @@ class InactivityBot(commands.Bot):
                 return  # Se enviou com sucesso, sai do loop
                 
             except discord.HTTPException as e:
-                if e.status == 429:  # Rate limited
+                if e.status == 429:  # Rate limited (limite de requisições atingido)
                     # Usar delay exponencial com jitter
                     delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
                     logger.warning(f"Rate limit atingido (tentativa {attempt + 1}/{max_retries}). Tentando novamente em {delay:.2f} segundos")
@@ -1340,7 +1340,7 @@ class InactivityBot(commands.Bot):
                 "O usuário provavelmente desabilitou DMs de membros do servidor."
             )
         except discord.HTTPException as e:
-            if e.code == 50007:  # Cannot send messages to this user
+            if e.code == 50007:  # Não é possível enviar mensagens para este usuário
                 logger.warning(f"Não foi possível enviar DM para {member.display_name}. (DMs desabilitadas)")
             else:
                 logger.error(f"Erro ao enviar DM para {member}: {e}")
@@ -1609,9 +1609,9 @@ async def main():
     load_dotenv()
     DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
     
-    # FIX: Increased initial delay to 15 seconds to ensure the Render 
-    # environment is fully stable before the first connection attempt. This helps 
-    # prevent the initial failure that leads to aggressive retries and Cloudflare blocks.
+    # CORREÇÃO: Aumentado o delay inicial para 15 segundos para garantir que o ambiente
+    # Render esteja totalmente estável antes da primeira tentativa de conexão. Isso ajuda
+    # a prevenir a falha inicial que leva a retentativas agressivas e bloqueios do Cloudflare.
     logger.info("Aguardando 15 segundos antes da primeira tentativa de conexão para estabilização do ambiente...")
     await asyncio.sleep(15)
     

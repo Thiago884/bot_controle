@@ -1384,7 +1384,8 @@ class Database:
         for attempt in range(max_retries):
             conn = None
             try:
-                conn = await asyncio.wait_for(self.pool.acquire(), timeout=20.0)
+                # FIX: Increased timeout from 20.0 to 45.0 to handle high DB load during startup.
+                conn = await asyncio.wait_for(self.pool.acquire(), timeout=45.0)
                 result = await conn.fetchrow('''
                     SELECT assigned_at 
                     FROM role_assignments
