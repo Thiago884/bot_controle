@@ -49,25 +49,33 @@ class DatabaseBackup:
             logger.error(f"Erro ao criar backup: {e}", exc_info=True)
             return False
 
+    
     async def _create_backup_manual(self):
-        """Método manual de backup"""
+        """Método manual de backup com melhor tratamento de erro"""
+        backup_file = None
+        zip_file = None
+
         try:
             timestamp = datetime.now(pytz.utc).strftime('%Y%m%d_%H%M%S')
             backup_file = os.path.join(self.backup_dir, f'backup_{timestamp}.sql')
             zip_file = f'{backup_file}.zip'
-            
+
             # Garantir que o diretório existe
             os.makedirs(self.backup_dir, exist_ok=True)
-            
+
             async with self.db.pool.acquire() as conn:
-                tables = await conn.fetch("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'")
-                
+                # Usar timeout para evitar operações muito longas
+                tables = await asyncio.wait_for(
+                    conn.fetch("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'"),
+                    timeout=30
+                )
+
                 with open(backup_file, 'w', encoding='utf-8') as f:
                     for table in tables:
                         table_name = table['table_name']
                         try:
-                            # Usar apenas a query alternativa, removendo a tentativa com pg_get_tabledef
-                            create_table = await conn.fetchval('''
+                            # Query simplificada para evitar timeouts
+                            create_table = await asyncio.wait_for(conn.fetchval("""
                                 SELECT 'CREATE TABLE ' || quote_ident(table_name) || ' (' || 
                                        string_agg(column_definition, ', ') || ');'
                                 FROM (
@@ -82,24 +90,38 @@ class DatabaseBackup:
                                     ORDER by ordinal_position
                                 ) AS cols
                                 GROUP BY table_name;
-                            ''', table_name)
-                            
+                            """, table_name), timeout=10)
+
                             if create_table:
-                                f.write(f"{create_table};\n\n")
+                                f.write(f"{create_table};\\n\\n")
                             else:
                                 logger.warning(f"Não foi possível obter definição da tabela {table_name}")
                                 continue
-                                
+
+                        except asyncio.TimeoutError:
+                            logger.warning(f"Timeout ao obter definição da tabela {table_name}")
+                            continue
                         except Exception as e:
                             logger.warning(f"Erro ao obter definição da tabela {table_name}: {e}")
                             continue
-                        
-                        # Escrever dados da tabela
-                        rows = await conn.fetch(f"SELECT * FROM {table_name}")
+
+                        # Limitar a quantidade de dados por tabela para backups grandes
+                        try:
+                            rows = await asyncio.wait_for(
+                                conn.fetch(f"SELECT * FROM {table_name} LIMIT 1000"),
+                                timeout=15
+                            )
+                        except asyncio.TimeoutError:
+                            logger.warning(f"Timeout ao obter dados da tabela {table_name}")
+                            rows = []
+                        except Exception as e:
+                            logger.warning(f"Erro ao obter dados da tabela {table_name}: {e}")
+                            rows = []
+
                         if rows:
                             columns = list(rows[0].keys())
-                            f.write(f"INSERT INTO {table_name} ({','.join(columns)}) VALUES\n")
-                            
+                            f.write(f"INSERT INTO {table_name} ({','.join(columns)}) VALUES\\n")
+
                             for i, row in enumerate(rows):
                                 values = []
                                 for value in row.values():
@@ -113,43 +135,43 @@ class DatabaseBackup:
                                         values.append("'" + value.replace("'", "''") + "'")
                                     else:
                                         values.append("'" + str(value).replace("'", "''") + "'")
-                                
+
                                 f.write(f"({','.join(values)})")
                                 if i < len(rows) - 1:
-                                    f.write(",\n")
+                                    f.write(",\\n")
                                 else:
-                                    f.write(";\n\n")
-            
+                                    f.write(";\\n\\n")
+
             # Criar arquivo ZIP antes de remover o SQL
             with zipfile.ZipFile(zip_file, 'w', zipfile.ZIP_DEFLATED) as zipf:
                 zipf.write(backup_file, os.path.basename(backup_file))
-            
+
             # Verificar se o ZIP foi criado antes de remover o SQL
             if os.path.exists(zip_file):
                 try:
                     os.remove(backup_file)
                 except Exception as e:
                     logger.warning(f"Erro ao remover arquivo SQL temporário: {e}")
-            
+
             # Limpar backups antigos
             self._cleanup_old_backups(keep=5)
-            
+
             logger.info(f"Backup criado com sucesso: {zip_file}")
             return True
+        except asyncio.TimeoutError:
+            logger.error("Timeout durante a criação do backup manual")
+            return False
         except Exception as e:
             logger.error(f"Erro no método manual de backup: {e}")
-            # Remover arquivos temporários em caso de erro
-            if 'backup_file' in locals() and os.path.exists(backup_file):
+            return False
+        finally:
+            # Limpeza de arquivos temporários
+            if backup_file and os.path.exists(backup_file):
                 try:
                     os.remove(backup_file)
                 except:
                     pass
-            if 'zip_file' in locals() and os.path.exists(zip_file):
-                try:
-                    os.remove(zip_file)
-                except:
-                    pass
-            return False
+
 
     def _cleanup_old_backups(self, keep=5):
         """Remove backups antigos, mantendo apenas os 'keep' mais recentes"""
@@ -260,21 +282,47 @@ class Database:
             }
         )
 
+    async def check_pool_health(self):
+        """Verifica a saúde do pool de conexões de forma mais robusta"""
+        if not self.pool:
+            return False
+
+        try:
+            # Testar com timeout reduzido
+            async with self.pool.acquire() as conn:
+                await asyncio.wait_for(conn.execute("SELECT 1"), timeout=5)
+            return True
+        except Exception as e:
+            logger.error(f"Pool health check failed: {e}")
+            try:
+                await self.restart_pool()
+                return True
+            except Exception as restart_error:
+                logger.error(f"Falha ao reiniciar pool: {restart_error}")
+                return False
+
+
+    
     async def _db_heartbeat(self, interval: int = 300):
-        """Envia um ping periódico para manter conexões ativas"""
+        """Envia um ping periódico para manter conexões ativas com melhor tratamento de erro"""
         while True:
             try:
                 if self.pool:
-                    async with self.pool.acquire() as conn:
-                        await asyncio.wait_for(conn.execute("SELECT 1"), timeout=10)
-                    logger.debug("Heartbeat do banco de dados executado com sucesso")
+                    try:
+                        async with self.pool.acquire() as conn:
+                            await asyncio.wait_for(conn.execute("SELECT 1"), timeout=10)
+                        logger.debug("Heartbeat do banco de dados executado com sucesso")
+                    except (asyncio.TimeoutError, asyncpg.PostgresConnectionError) as e:
+                        logger.warning(f"Heartbeat falhou: {e}. Tentando reiniciar o pool...")
+                        await self.restart_pool()
                 await asyncio.sleep(interval)
             except asyncio.CancelledError:
                 logger.info("Heartbeat do banco de dados cancelado.")
                 break
             except Exception as e:
-                logger.error(f"Erro no heartbeat do banco de dados: {e}", exc_info=True)
-                await asyncio.sleep(60)
+                logger.error(f"Erro no heartbeat do banco de dados: {e}")
+                await asyncio.sleep(60)  # Esperar mais tempo em caso de erro
+
 
     async def close(self):
         """Fecha o pool de conexões de forma segura"""
@@ -1344,15 +1392,17 @@ class Database:
             logger.error(f"Erro na verificação de saúde do banco de dados: {e}", exc_info=True)
             return False
 
+    
     async def log_role_assignment(self, user_id: int, guild_id: int, role_id: int):
-        """Registra quando um cargo foi atribuído a um usuário"""
+        """Registra quando um cargo foi atribuído a um usuário com melhor tratamento de timeout"""
         max_retries = 3
-        retry_delay = 1
-        
+        retry_delay = 2  # Aumentado para 2 segundos
+
         for attempt in range(max_retries):
             conn = None
             try:
-                conn = await asyncio.wait_for(self.pool.acquire(), timeout=30)
+                # REDUZIDO: timeout de 30 para 20 segundos para evitar bloqueios prolongados
+                conn = await asyncio.wait_for(self.pool.acquire(), timeout=20.0)
                 assigned_at = datetime.now(pytz.UTC)
                 await asyncio.wait_for(conn.execute('''
                     INSERT INTO role_assignments 
@@ -1360,38 +1410,45 @@ class Database:
                     VALUES ($1, $2, $3, $4)
                     ON CONFLICT (user_id, guild_id, role_id) DO UPDATE 
                     SET assigned_at = EXCLUDED.assigned_at
-                ''', user_id, guild_id, role_id, assigned_at), timeout=30)
+                ''', user_id, guild_id, role_id, assigned_at), timeout=15.0)
                 return
             except (asyncio.TimeoutError, asyncpg.PostgresConnectionError) as e:
                 if attempt == max_retries - 1:
-                    logger.error(f"Falha após {max_retries} tentativas ao registrar atribuição de cargo: {e}", exc_info=True)
-                    raise
+                    logger.error(f"Falha após {max_retries} tentativas ao registrar atribuição de cargo: {e}")
+                    # Não levantar exceção, apenas logar o erro para não quebrar o fluxo
+                    return
                 logger.warning(f"Tentativa {attempt + 1} falhou, tentando novamente em {retry_delay} segundos...")
                 await asyncio.sleep(retry_delay)
-                retry_delay *= 2
+                retry_delay *= 2  # Backoff exponencial
             except Exception as e:
-                logger.error(f"Erro ao registrar atribuição de cargo: {e}", exc_info=True)
-                raise
+                logger.error(f"Erro ao registrar atribuição de cargo: {e}")
+                # Não levantar exceção para não interromper o processamento
+                return
             finally:
                 if conn:
-                    await self.pool.release(conn)
+                    try:
+                        await self.pool.release(conn)
+                    except Exception as release_error:
+                        logger.warning(f"Erro ao liberar conexão: {release_error}")
 
+
+    
     async def get_role_assigned_time(self, user_id: int, guild_id: int, role_id: int) -> Optional[datetime]:
-        """Obtém quando um cargo foi atribuído a um usuário, com retries."""
+        """Obtém quando um cargo foi atribuído a um usuário, com retries melhorados."""
         max_retries = 3
         retry_delay = 2
 
         for attempt in range(max_retries):
             conn = None
             try:
-                # FIX: Increased timeout from 20.0 to 45.0 to handle high DB load during startup.
-                conn = await asyncio.wait_for(self.pool.acquire(), timeout=45.0)
+                # REDUZIDO: timeout de 45.0 para 25.0 segundos
+                conn = await asyncio.wait_for(self.pool.acquire(), timeout=25.0)
                 result = await conn.fetchrow('''
                     SELECT assigned_at 
                     FROM role_assignments
                     WHERE user_id = $1 AND guild_id = $2 AND role_id = $3
                 ''', user_id, guild_id, role_id)
-                
+
                 if result:
                     assigned_at = result['assigned_at']
                     if assigned_at and assigned_at.tzinfo is None:
@@ -1402,17 +1459,21 @@ class Database:
                 logger.warning(f"Erro de conexão/timeout em get_role_assigned_time (tentativa {attempt + 1}/{max_retries}): {e}")
                 if conn:
                     try:
-                        await self.pool.release(conn, timeout=5.0)
+                        # Tentativa segura de liberar conexão com timeout
+                        await asyncio.wait_for(self.pool.release(conn), timeout=5.0)
                     except Exception as release_err:
                         logger.warning(f"Erro ao liberar conexão após falha: {release_err}")
                     conn = None
                 if attempt == max_retries - 1:
-                    logger.error(f"Falha final ao obter data de atribuição para user {user_id}, role {role_id}", exc_info=True)
+                    logger.error(f"Falha final ao obter data de atribuição para user {user_id}, role {role_id}")
                     return None
                 await asyncio.sleep(retry_delay * (2 ** attempt)) # Exponential backoff
             except Exception as e:
-                logger.error(f"Erro inesperado ao obter data de atribuição de cargo: {e}", exc_info=True)
+                logger.error(f"Erro inesperado ao obter data de atribuição de cargo: {e}")
                 return None
             finally:
                 if conn:
-                    await self.pool.release(conn)
+                    try:
+                        await self.pool.release(conn)
+                    except Exception as release_error:
+                        logger.warning(f"Erro ao liberar conexão no finally: {release_error}")

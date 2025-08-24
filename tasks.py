@@ -172,7 +172,7 @@ class BatchProcessor:
         return results
 
 async def _process_member_optimized(self, member, last_check):
-    """Versão otimizada do process_member_inactivity."""
+    """Versão otimizada do process_member_inactivity com fallback para datas de atribuição"""
     result = {'processed': 0, 'removed': 0}
     
     try:
@@ -190,37 +190,36 @@ async def _process_member_optimized(self, member, last_check):
         
         now = datetime.now(pytz.UTC)
         
-        # Obter a data em que o usuário recebeu o cargo monitorado mais recente
+        # Obter a data em que o usuário recebeu o(s) cargo(s) monitorado(s)
         role_assignment_times = []
         for role in member.roles:
             if role.id in tracked_roles:
                 try:
                     assigned_time = await self.bot.db.get_role_assigned_time(member.id, member.guild.id, role.id)
                     if assigned_time:
+                        # Garantir que a data tem timezone
+                        if assigned_time.tzinfo is None:
+                            assigned_time = assigned_time.replace(tzinfo=pytz.UTC)
                         role_assignment_times.append(assigned_time)
                     else:
-                        # Se não tem registro, criar um com a data atual
-                        await self.bot.db.log_role_assignment(member.id, member.guild.id, role.id)
-                        role_assignment_times.append(now)
-                        logger.info(f"Criado registro de atribuição para cargo {role.id} do usuário {member.id}")
+                        # Se não tem registro, usar fallback: data de entrada no servidor ou data atual
+                        fallback_date = member.joined_at or now
+                        if fallback_date and getattr(fallback_date, 'tzinfo', None) is None:
+                            fallback_date = fallback_date.replace(tzinfo=pytz.UTC)
+                        role_assignment_times.append(fallback_date)
+                        logger.info(f"Usando fallback para data de atribuição do cargo {role.id} do usuário {member.id}")
                 except Exception as e:
                     logger.error(f"Erro ao obter data de atribuição para cargo {role.id}: {e}")
+                    # Fallback para data de entrada no servidor ou agora
+                    fallback_date = member.joined_at or now
+                    if fallback_date and getattr(fallback_date, 'tzinfo', None) is None:
+                        fallback_date = fallback_date.replace(tzinfo=pytz.UTC)
+                    role_assignment_times.append(fallback_date)
                     continue
         
         if not role_assignment_times:
-            # Se não encontrou data de atribuição, registrar agora e usar a data atual
-            for role in member.roles:
-                if role.id in tracked_roles:
-                    try:
-                        await self.bot.db.log_role_assignment(member.id, member.guild.id, role.id)
-                        assigned_time = datetime.now(pytz.UTC)
-                        role_assignment_times.append(assigned_time)
-                    except Exception as e:
-                        logger.error(f"Erro ao registrar atribuição de cargo {role.id}: {e}")
-                        continue
-            
-            if not role_assignment_times:
-                return result
+            # Fallback final: usar data atual
+            role_assignment_times.append(now)
         
         role_assignment_time = min(role_assignment_times)  # Usar a atribuição mais antiga
         
@@ -379,7 +378,7 @@ async def _process_member_optimized(self, member, last_check):
         logger.error(f"Erro ao verificar inatividade para {member}: {e}")
     
     return result
-    
+
 class DynamicBatcher:
     def __init__(self):
         self.batch_size = 10  # Valor inicial
