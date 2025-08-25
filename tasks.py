@@ -913,7 +913,7 @@ async def check_warnings():
 async def process_member_warnings(member: discord.Member, guild: discord.Guild, 
                                 tracked_roles: List[int], first_warning_days: int, 
                                 second_warning_days: int, warnings_sent: Dict):
-    """Process warnings for a single member with improved logic"""
+    """Process warnings for a single member with CORRECTED logic"""
     try:
         # Verificar whitelist
         if member.id in bot.config['whitelist']['users'] or \
@@ -924,49 +924,38 @@ async def process_member_warnings(member: discord.Member, guild: discord.Guild,
         if not any(role.id in tracked_roles for role in member.roles):
             return
         
-        # Obter data de atribuição do cargo mais antigo
-        role_assignment_times = []
-        for role in member.roles:
-            if role.id in tracked_roles:
-                try:
-                    assigned_time = await bot.db.get_role_assigned_time(member.id, guild.id, role.id)
-                    if assigned_time:
-                        role_assignment_times.append(assigned_time)
-                    else:
-                        # Se não tem registro, criar um com a data atual
-                        await bot.db.log_role_assignment(member.id, guild.id, role.id)
-                        assigned_time = datetime.now(pytz.UTC)
-                        role_assignment_times.append(assigned_time)
-                except Exception as e:
-                    logger.error(f"Erro ao obter data de atribuição para cargo {role.id}: {e}")
-                    continue
+        # Obter o período de verificação ATUAL
+        last_check = await bot.db.get_last_period_check(member.id, guild.id)
         
-        if not role_assignment_times:
+        if not last_check:
+            # Se nunca foi verificado, não enviar avisos ainda
             return
         
-        role_assignment_time = min(role_assignment_times)  # Usar a atribuição mais antiga
-        monitoring_period = bot.config['monitoring_period']
-        period_end = role_assignment_time + timedelta(days=monitoring_period)
+        # Usar o período atual para cálculo correto
+        period_end = last_check['period_end']
         now = datetime.now(pytz.UTC)
         
-        # Se o período já terminou, não enviar avisos
-        if now >= period_end:
-            return
-            
         # Calcular dias restantes corretamente
         days_remaining = (period_end - now).days
         
-        # MELHORIA: Obter todos os avisos no período atual para evitar envios duplicados e permitir catch-up
-        warnings_in_period = await bot.db.get_warnings_in_period(member.id, guild.id, role_assignment_time)
+        # Obter avisos já enviados neste período
+        warnings_in_period = await bot.db.get_warnings_in_period(
+            member.id, guild.id, last_check['period_start']
+        )
         
-        # Condição para o primeiro aviso (catch-up)
-        if days_remaining <= first_warning_days and 'first' not in warnings_in_period:
+        # Primeiro aviso: dias_restantes <= primeiro_aviso_dias E primeiro aviso não enviado
+        if (days_remaining <= first_warning_days and 
+            days_remaining > second_warning_days and  # Garantir que não é hora do segundo aviso
+            'first' not in warnings_in_period):
+            
             await bot.send_warning(member, 'first')
             warnings_sent['first'] += 1
-            warnings_in_period.append('first') # Adiciona à lista local para a próxima verificação
         
-        # Condição para o segundo aviso (catch-up)
-        if days_remaining <= second_warning_days and 'first' in warnings_in_period and 'second' not in warnings_in_period:
+        # Segundo aviso: dias_restantes <= segundo_aviso_dias E primeiro aviso já enviado E segundo não enviado
+        elif (days_remaining <= second_warning_days and 
+              'first' in warnings_in_period and 
+              'second' not in warnings_in_period):
+            
             await bot.send_warning(member, 'second')
             warnings_sent['second'] += 1
             
