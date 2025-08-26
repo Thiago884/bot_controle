@@ -195,7 +195,7 @@ DEFAULT_CONFIG = {
         "second_warning": 1,
         "messages": {
             "first": "⚠️ **Aviso de Inatividade** ⚠️\nVocê está prestes a perder seus cargos por inatividade. Entre em um canal de voz por pelo menos {required_minutes} minutos em {required_days} dias diferentes nos próximos {days} dias para evitar isso.",
-            "second": "🔴 **Último Aviso** 🔴\nVocê perderá seus cargos AMANHÃ por inatividade se não cumprir os requisitos de atividade em voz ({required_minutes} minutos em {required_days} dias diferentes).",
+            "second": "🔴 **Último Aviso** 🔴\nVocê perderá seus cargos {days_remaining} por inatividade se não cumprir os requisitos de atividade em voz ({required_minutes} minutos em {required_days} dias diferentes).",
             "final": "❌ **Cargos Removidos** ❌\nVocê perdeu seus cargos no servidor {guild} por inatividade. Você não cumpriu os requisitos de atividade de voz ({required_minutes} minutos em {required_days} dias diferentes dentro de {monitoring_period} dias)."
         }
     }
@@ -1357,13 +1357,55 @@ class InactivityBot(commands.Bot):
                 logger.warning(f"Template de mensagem de aviso para '{warning_type}' não encontrado.")
                 return
 
+            # Obter informações do período atual
+            last_check = None
+            try:
+                if hasattr(self, 'db') and self.db:
+                    last_check = await self.db.get_last_period_check(member.id, member.guild.id)
+            except Exception:
+                last_check = None
+            
             format_args = {
                 'days': warnings_config.get('first_warning', 'N/A'),
                 'monitoring_period': self.config.get('monitoring_period', 'N/A'),
                 'required_minutes': self.config.get('required_minutes', 'N/A'),
                 'required_days': self.config.get('required_days', 'N/A'),
-                'guild': member.guild.name
+                'guild': member.guild.name,
+                'days_remaining': 'N/A'  # Valor padrão
             }
+            
+            # Calcular dias restantes para todos os avisos
+            if last_check:
+                # last_check pode ser um dict ou um objeto; tente acessar de forma segura
+                period_end = None
+                if isinstance(last_check, dict):
+                    period_end = last_check.get('period_end')
+                else:
+                    period_end = getattr(last_check, 'period_end', None)
+                
+                if period_end:
+                    now = datetime.now(pytz.UTC)
+                    
+                    # Garantir timezone
+                    if getattr(period_end, 'tzinfo', None) is None:
+                        try:
+                            period_end = period_end.replace(tzinfo=pytz.UTC)
+                        except Exception:
+                            pass
+                    
+                    try:
+                        days_remaining = max(0, (period_end - now).days)
+                    except Exception:
+                        days_remaining = 0
+                    
+                    # Formatar para mensagem amigável
+                    if days_remaining == 0:
+                        format_args['days_remaining'] = "HOJE"
+                    elif days_remaining == 1:
+                        format_args['days_remaining'] = "AMANHÃ"
+                    else:
+                        format_args['days_remaining'] = f"{days_remaining} dias"
+            
             message = message_template.format(**format_args)
             
             if warning_type == 'first':
@@ -1388,7 +1430,11 @@ class InactivityBot(commands.Bot):
             await self.send_dm(member, message, embed)
             
             # Registrar aviso no banco de dados
-            await self.db.log_warning(member.id, member.guild.id, warning_type)
+            try:
+                if hasattr(self, 'db') and self.db:
+                    await self.db.log_warning(member.id, member.guild.id, warning_type)
+            except Exception as e:
+                logger.error(f"Erro ao registrar aviso no DB para {member}: {e}")
             
             await self.log_action(f"Aviso Enviado ({warning_type})", member)
             
@@ -1398,7 +1444,7 @@ class InactivityBot(commands.Bot):
                     title=f"🔔 Relatório de Aviso: {warning_type.capitalize()}",
                     description=f"Um aviso de inatividade foi enviado para {member.mention}.",
                     color=discord.Color.blue(),
-                    timestamp=datetime.now(pytz.utc)
+                    timestamp=datetime.now(pytz.UTC)
                 )
                 admin_embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
                 admin_embed.add_field(name="Usuário", value=f"{member.mention} (`{member.id}`)", inline=False)

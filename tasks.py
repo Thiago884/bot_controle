@@ -928,15 +928,17 @@ async def process_member_warnings(member: discord.Member, guild: discord.Guild,
         last_check = await bot.db.get_last_period_check(member.id, guild.id)
         
         if not last_check:
-            # Se nunca foi verificado, não enviar avisos ainda
             return
         
-        # Usar o período atual para cálculo correto
+        # Garantir timezone UTC
         period_end = last_check['period_end']
+        if period_end.tzinfo is None:
+            period_end = period_end.replace(tzinfo=pytz.UTC)
+        
         now = datetime.now(pytz.UTC)
         
-        # Calcular dias restantes corretamente
-        days_remaining = (period_end - now).days
+        # CORREÇÃO: Calcular dias restantes corretamente, não permitindo negativo
+        days_remaining = max(0, (period_end - now).days)
         
         # Obter avisos já enviados neste período
         warnings_in_period = await bot.db.get_warnings_in_period(
@@ -944,8 +946,9 @@ async def process_member_warnings(member: discord.Member, guild: discord.Guild,
         )
         
         # Primeiro aviso: dias_restantes <= primeiro_aviso_dias E primeiro aviso não enviado
+        # E ainda há tempo suficiente para o segundo aviso depois
         if (days_remaining <= first_warning_days and 
-            days_remaining > second_warning_days and  # Garantir que não é hora do segundo aviso
+            days_remaining > second_warning_days and
             'first' not in warnings_in_period):
             
             await bot.send_warning(member, 'first')
@@ -953,6 +956,7 @@ async def process_member_warnings(member: discord.Member, guild: discord.Guild,
         
         # Segundo aviso: dias_restantes <= segundo_aviso_dias E primeiro aviso já enviado E segundo não enviado
         elif (days_remaining <= second_warning_days and 
+              days_remaining >= 0 and  # Garantir que ainda não passou do período
               'first' in warnings_in_period and 
               'second' not in warnings_in_period):
             
