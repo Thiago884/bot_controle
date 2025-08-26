@@ -1475,60 +1475,82 @@ async def process_member_missed_periods(member_id: int, guild: discord.Guild,
             # Registrar verificação do período
             await bot.db.log_period_check(member.id, guild.id, period_start, period_end, meets_requirements)
             
-            # Se não cumpriu, remover cargos
-            if not meets_requirements and any(role.id in tracked_roles for role in member.roles):
-                roles_to_remove = [role for role in member.roles if role.id in tracked_roles]
-                cumulatively_removed_roles_ids.update(r.id for r in roles_to_remove)
-                
-                try:
-                    await member.remove_roles(*roles_to_remove)
-                    await bot.send_warning(member, 'final')
-                    await bot.db.log_removed_roles(member.id, guild.id, [r.id for r in roles_to_remove])
-                    
-                    # Notificar administradores por DM
-                    admin_embed = discord.Embed(
-                        title="🚨 Cargos Removidos (Período Perdido)",
-                        description=f"Os cargos de {member.mention} foram removidos por inatividade durante um período em que o bot esteve offline.",
-                        color=discord.Color.dark_red(),
-                        timestamp=datetime.now(pytz.utc)
-                    )
-                    admin_embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
-                    admin_embed.add_field(name="Usuário", value=f"{member.mention} (`{member.id}`)", inline=False)
-                    admin_embed.add_field(name="Cargos Removidos", value=", ".join([r.mention for r in roles_to_remove]), inline=False)
-                    admin_embed.set_footer(text=f"Servidor: {guild.name}")
-                    
-                    await bot.notify_admins_dm(guild, embed=admin_embed)
+            # --- INÍCIO DA LÓGICA CORRIGIDA ---
+            # Se não cumpriu os requisitos, verificar quais cargos devem ser removidos
+            if not meets_requirements:
+                roles_to_remove = []
+                # Iterar sobre os cargos monitorados que o membro possui atualmente
+                for role in member.roles:
+                    if role.id in tracked_roles:
+                        # Obter a data em que este cargo específico foi atribuído
+                        assigned_at = await bot.db.get_role_assigned_time(member.id, guild.id, role.id)
 
-                    report_file = await generate_activity_report(member, sessions)
-                    log_message = (
-                        f"Cargos removidos: {', '.join([r.name for r in roles_to_remove])}\n"
-                        f"Sessões no período: {len(sessions)}\n"
-                        f"Dias válidos: {len(valid_days)}/{required_days}\n"
-                        f"Período: {period_start.strftime('%d/%m/%Y')} a {period_end.strftime('%d/%m/%Y')}"
-                    )
+                        # Se não há data de atribuição ou se a atribuição foi ANTES do fim do período de inatividade,
+                        # o cargo é um candidato à remoção.
+                        if not assigned_at or (assigned_at and assigned_at.replace(tzinfo=pytz.UTC) < period_end):
+                            roles_to_remove.append(role)
+                        else:
+                            # O cargo foi atribuído DEPOIS do período de inatividade, então não deve ser removido.
+                            logger.info(
+                                f"Ignorando remoção do cargo '{role.name}' para {member.display_name}, "
+                                f"pois foi atribuído em {assigned_at.strftime('%Y-%m-%d %H:%M')} "
+                                f"após o fim do período de inatividade ({period_end.strftime('%Y-%m-%d %H:%M')})."
+                            )
+
+                # Apenas continuar se houver cargos que realmente precisam ser removidos
+                if roles_to_remove:
+                    cumulatively_removed_roles_ids.update(r.id for r in roles_to_remove)
                     
-                    if report_file:
-                        await bot.log_action(
-                            "Cargo Removido (Período Perdido)",
-                            member,
-                            log_message,
-                            file=report_file
+                    try:
+                        await member.remove_roles(*roles_to_remove, reason="Inatividade durante período em que o bot esteve offline.")
+                        await bot.send_warning(member, 'final')
+                        await bot.db.log_removed_roles(member.id, guild.id, [r.id for r in roles_to_remove])
+                        
+                        # Notificar administradores por DM
+                        admin_embed = discord.Embed(
+                            title="🚨 Cargos Removidos (Período Perdido)",
+                            description=f"Os cargos de {member.mention} foram removidos por inatividade durante um período em que o bot esteve offline.",
+                            color=discord.Color.dark_red(),
+                            timestamp=datetime.now(pytz.utc)
                         )
-                    else:
-                        await bot.log_action(
-                            "Cargo Removido (Período Perdido)",
-                            member,
-                            log_message
+                        admin_embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
+                        admin_embed.add_field(name="Usuário", value=f"{member.mention} (`{member.id}`)", inline=False)
+                        admin_embed.add_field(name="Cargos Removidos", value=", ".join([r.mention for r in roles_to_remove]), inline=False)
+                        admin_embed.set_footer(text=f"Servidor: {guild.name}")
+                        
+                        await bot.notify_admins_dm(guild, embed=admin_embed)
+
+                        report_file = await generate_activity_report(member, sessions)
+                        log_message = (
+                            f"Cargos removidos: {', '.join([r.name for r in roles_to_remove])}\n"
+                            f"Sessões no período: {len(sessions)}\n"
+                            f"Dias válidos: {len(valid_days)}/{required_days}\n"
+                            f"Período: {period_start.strftime('%d/%m/%Y')} a {period_end.strftime('%d/%m/%Y')}"
                         )
-                    
-                    await bot.notify_roles(
-                        f"🚨 Cargos removidos de {member.mention} por inatividade no período perdido: " +
-                        ", ".join([f"`{r.name}`" for r in roles_to_remove]))
-                    
-                except discord.Forbidden:
-                    await bot.log_action("Erro ao Remover Cargo", member, "Permissões insuficientes")
-                except Exception as e:
-                    logger.error(f"Erro ao remover cargos de {member}: {e}")
+                        
+                        if report_file:
+                            await bot.log_action(
+                                "Cargo Removido (Período Perdido)",
+                                member,
+                                log_message,
+                                file=report_file
+                            )
+                        else:
+                            await bot.log_action(
+                                "Cargo Removido (Período Perdido)",
+                                member,
+                                log_message
+                            )
+                        
+                        await bot.notify_roles(
+                            f"🚨 Cargos removidos de {member.mention} por inatividade no período perdido: " +
+                            ", ".join([f"`{r.name}`" for r in roles_to_remove]))
+                        
+                    except discord.Forbidden:
+                        await bot.log_action("Erro ao Remover Cargo", member, "Permissões insuficientes")
+                    except Exception as e:
+                        logger.error(f"Erro ao remover cargos de {member}: {e}")
+            # --- FIM DA LÓGICA CORRIGIDA ---
         
         # --- Início da Correção na Definição do Novo Período ---
         # A lógica para decidir sobre um novo período deve verificar se, APÓS a remoção,
