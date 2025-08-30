@@ -235,13 +235,17 @@ class Database:
                 )
 
                 # Testar a conexão com timeout
+                conn_test = None
                 try:
-                    async with self.pool.acquire() as conn:
-                        await asyncio.wait_for(conn.execute("SELECT 1"), timeout=45)
+                    conn_test = await self.acquire_connection(timeout=45)
+                    await asyncio.wait_for(conn_test.execute("SELECT 1"), timeout=45)
                 except asyncio.TimeoutError:
                     logger.error("Timeout ao testar a nova conexão com o banco.")
                     await self.pool.close()
                     raise
+                finally:
+                    if conn_test:
+                        await self.pool.release(conn_test)
                     
                 await self.create_tables()
                 self._is_initialized = True
@@ -325,10 +329,11 @@ class Database:
         """Verifica a saúde do pool de conexões de forma mais robusta"""
         if not self.pool or self.pool.is_closing():
             return False
-
+        
+        conn = None
         try:
-            async with self.acquire_connection(timeout=5) as conn:
-                await asyncio.wait_for(conn.execute("SELECT 1"), timeout=5)
+            conn = await self.acquire_connection(timeout=5)
+            await asyncio.wait_for(conn.execute("SELECT 1"), timeout=5)
             return True
         except Exception as e:
             logger.error(f"Falha na verificação de saúde do pool: {e}")
@@ -338,28 +343,34 @@ class Database:
             except Exception as restart_error:
                 logger.error(f"Falha ao reiniciar pool: {restart_error}")
                 return False
-
+        finally:
+            if conn:
+                await self.pool.release(conn)
 
     
     async def _db_heartbeat(self, interval: int = 300):
         """Envia um ping periódico para manter conexões ativas com melhor tratamento de erro"""
         while True:
+            await asyncio.sleep(interval)
+            conn = None
             try:
                 if self.pool and not self.pool.is_closing():
                     try:
-                        async with self.acquire_connection(timeout=10) as conn:
-                            await asyncio.wait_for(conn.execute("SELECT 1"), timeout=10)
+                        conn = await self.acquire_connection(timeout=10)
+                        await asyncio.wait_for(conn.execute("SELECT 1"), timeout=10)
                         logger.debug("Heartbeat do banco de dados executado com sucesso")
                     except (asyncio.TimeoutError, asyncpg.PostgresConnectionError, ConnectionError) as e:
                         logger.warning(f"Heartbeat falhou: {e}. Tentando reiniciar o pool...")
                         await self.restart_pool()
-                await asyncio.sleep(interval)
             except asyncio.CancelledError:
                 logger.info("Heartbeat do banco de dados cancelado.")
                 break
             except Exception as e:
                 logger.error(f"Erro no heartbeat do banco de dados: {e}")
                 await asyncio.sleep(60)  # Esperar mais tempo em caso de erro
+            finally:
+                if conn:
+                    await self.pool.release(conn)
 
 
     async def close(self):
@@ -1412,10 +1423,11 @@ class Database:
         """Verifica a saúde do banco de dados e reinicia tasks se necessário"""
         if not self.pool:
             return False
-            
+        
+        conn = None
         try:
-            async with self.acquire_connection() as conn:
-                await conn.execute("SELECT 1")
+            conn = await self.acquire_connection()
+            await conn.execute("SELECT 1")
             
             active_tasks = {t.get_name() for t in asyncio.all_tasks() if t.get_name()}
             expected_tasks = {'database_heartbeat'}
@@ -1436,6 +1448,9 @@ class Database:
         except Exception as e:
             logger.error(f"Erro na verificação de saúde do banco de dados: {e}", exc_info=True)
             return False
+        finally:
+            if conn:
+                await self.pool.release(conn)
 
     
     async def log_role_assignment(self, user_id: int, guild_id: int, role_id: int):
