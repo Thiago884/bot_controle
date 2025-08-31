@@ -568,7 +568,7 @@ class InactivityBot(commands.Bot):
             logger.error(f"Erro ao salvar configuração: {e}")
 
     async def setup_hook(self):
-        """Configurações assíncronas antes do bot ficar pronto"""
+        """Configurações assíncronas antes do bot ficre pronto"""
         if self._setup_complete:
             return
         
@@ -596,7 +596,7 @@ class InactivityBot(commands.Bot):
             self.db_connection_failed = True
 
     async def send_with_fallback(self, destination, content=None, embed=None, file=None):
-        """Envia mensagens com tratamento de erros e fallback para rate limits."""
+        """Envia mensagens com tratamento de erros và fallback para rate limits."""
         max_retries = 3
         base_delay = 2.0
         
@@ -648,7 +648,7 @@ class InactivityBot(commands.Bot):
             f"**Exceção Não Tratada no Evento: `{event}`**\n"
             f"**Args:** `{args}`\n"
             f"**Kwargs:** `{kwargs}`\n"
-            f"```python\n{tb_details[:1800]}\n```"
+            f"**Detalhes:**\n```python\n{tb_details[:1800]}\n```"
         )
         await self.log_action("Erro Crítico de Evento", details=log_message)
 
@@ -1184,7 +1184,7 @@ class InactivityBot(commands.Bot):
                 event = await self.voice_event_queue.get()
                 
                 # Verificar se o evento é válido (tem todos os campos esperados)
-                if len(event) < 6:  # Evento antigo sem timestamp/ID
+                if len(event) < 6:  # Evento antigo não timestamp/ID
                     self.voice_event_queue.task_done()
                     continue
                     
@@ -1488,27 +1488,134 @@ bot = InactivityBot(
 
 @bot.event
 async def on_member_update(before: discord.Member, after: discord.Member):
-    """Evento que detecta quando membros recebem cargos"""
+    """Evento que detecta quando membros recebem cargos e verifica se são devoluções por inatividade"""
     if before.roles == after.roles:
         return
-    
+
     # Verificar se há cargos monitorados na configuração
     if not hasattr(bot, 'config') or not bot.config.get('tracked_roles'):
         return
-    
+
     tracked_roles = set(bot.config['tracked_roles'])
-    
+
     # Encontrar cargos adicionados
     added_roles = [role for role in after.roles if role not in before.roles and role.id in tracked_roles]
-    
+
     if added_roles:
         try:
+            # Verificar se algum desses cargos foi previamente removido por inatividade
+            for role in added_roles:
+                try:
+                    last_removal = None
+                    if hasattr(bot, 'db') and bot.db:
+                        last_removal = await bot.db.get_last_role_removal(after.id, after.guild.id)
+                except Exception as e:
+                    logger.error(f"Erro ao obter histórico de remoções do DB: {e}")
+                    last_removal = None
+
+                if last_removal and last_removal.get('removal_date'):
+                    removal_date = last_removal['removal_date']
+                    # Caso a data venha como string, tentar parsear; caso contrário assume-se datetime
+                    try:
+                        if isinstance(removal_date, str):
+                            from dateutil import parser
+                            removal_date = parser.parse(removal_date)
+                    except Exception:
+                        pass
+
+                    if removal_date.tzinfo is None:
+                        removal_date = removal_date.replace(tzinfo=pytz.UTC)
+
+                    time_since_removal = datetime.now(pytz.UTC) - removal_date
+
+                    if time_since_removal <= timedelta(days=30):
+                        await send_forgiveness_message(after, role)
+                        # Não enviar múltiplas mensagens se vários cargos forem devolvidos ao mesmo tempo
+                        break
+
             # Registrar a atribuição de cada cargo novo
             for role in added_roles:
-                await bot.db.log_role_assignment(after.id, after.guild.id, role.id)
-                logger.info(f"Registrada atribuição de cargo {role.name} para {after.display_name}")
+                try:
+                    if hasattr(bot, 'db') and bot.db:
+                        await bot.db.log_role_assignment(after.id, after.guild.id, role.id)
+                    logger.info(f"Registrada atribuição de cargo {role.name} para {after.display_name}")
+                except Exception as e:
+                    logger.error(f"Erro ao registrar atribuição de cargo: {e}")
         except Exception as e:
-            logger.error(f"Erro ao registrar atribuição de cargo: {e}")
+            logger.error(f"Erro ao processar atualização de membro: {e}")
+
+
+async def send_forgiveness_message(member: discord.Member, role: discord.Role):
+    """Envia mensagem de perdão quando um cargo é devolvido"""
+    try:
+        # Verificar se já foi enviada uma mensagem recentemente para este cargo
+        last_message = None
+        try:
+            if hasattr(bot, 'db') and bot.db:
+                last_message = await bot.db.get_last_forgiveness_message(member.id, member.guild.id, role.id)
+        except Exception as e:
+            logger.error(f"Erro ao obter último registro de mensagem de perdão do DB: {e}")
+            last_message = None
+
+        if last_message:
+            # last_message pode ser datetime ou string
+            try:
+                lm = last_message
+                if isinstance(lm, str):
+                    from dateutil import parser
+                    lm = parser.parse(lm)
+                if lm.tzinfo is None:
+                    lm = lm.replace(tzinfo=pytz.UTC)
+            except Exception:
+                lm = None
+
+            if lm and (datetime.now(pytz.UTC) - lm) < timedelta(days=7):
+                logger.info(f"Mensagem de perdão já enviada recentemente para {member.display_name} sobre o cargo {role.name}")
+                return
+
+        # Obter configurações atuais
+        required_minutes = bot.config.get('required_minutes', 15)
+        required_days = bot.config.get('required_days', 2)
+        monitoring_period = bot.config.get('monitoring_period', 14)
+
+        message = (
+            f"🎉 **Seu cargo foi devolvido!** 🎉\n\n"
+            f"O cargo **{role.name}** foi devolvido e você foi perdoado pelo seu período de inatividade. "
+            f"Para mantê-lo, volte a ficar ativo nos canais de voz do servidor **{member.guild.name}**.\n\n"
+            f"**Requisitos Atuais:**\n"
+            f"• Período de Análise: **{monitoring_period} dias**\n"
+            f"• Tempo Mínimo por Dia: **{required_minutes} minutos**\n"
+            f"• Total de Dias Ativos: Pelo menos **{required_days} dias diferentes** dentro do período."
+        )
+
+        embed = discord.Embed(
+            title="🎉 Cargo Devolvido!",
+            description=message,
+            color=discord.Color.green(),
+            timestamp=datetime.now(pytz.UTC)
+        )
+        embed.set_author(name=member.guild.name, icon_url=member.guild.icon.url if member.guild.icon else None)
+        embed.set_footer(text="Sistema de Controle de Atividades")
+
+        await bot.send_dm(member, None, embed)
+        logger.info(f"Mensagem de perdão enviada para {member.display_name} pelo cargo {role.name}")
+
+        # Registrar o envio da mensagem de perdão
+        try:
+            if hasattr(bot, 'db') and bot.db:
+                await bot.db.log_forgiveness_message(member.id, member.guild.id, role.id)
+        except Exception as e:
+            logger.error(f"Erro ao registrar mensagem de perdão no DB: {e}")
+
+        await bot.log_action(
+            "Mensagem de Perdão Enviada",
+            member,
+            f"Cargo devolvido: {role.name}"
+        )
+
+    except Exception as e:
+        logger.error(f"Erro ao enviar mensagem de perdão para {member}: {e}")
+
 
 @bot.event
 async def on_ready():
@@ -1546,7 +1653,7 @@ async def on_ready():
         logger.info("Inicialização crítica concluída.")
 
         # --- ETAPA 2: SINALIZAR PRONTIDÃO PARA O PAINEL WEB ---
-        # O bot agora tem DB e config, então a API pode ser liberada.
+        # O bot agora tem DB and config, então a API pode ser liberada.
         if bot.ready_event and not bot.ready_event.is_set():
             bot.ready_event.set()
             logger.info("SINAL DE PRONTO ENVIADO! O painel de controle agora está operacional.")

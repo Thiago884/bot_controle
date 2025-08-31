@@ -94,7 +94,7 @@ class DatabaseBackup:
                         """, table_name), timeout=10)
 
                         if create_table:
-                            f.write(f"{create_table};\\n\\n")
+                            f.write(f"{create_table};\n\n")
                         else:
                             logger.warning(f"Não foi possível obter definição da tabela {table_name}")
                             continue
@@ -121,7 +121,7 @@ class DatabaseBackup:
 
                     if rows:
                         columns = list(rows[0].keys())
-                        f.write(f"INSERT INTO {table_name} ({','.join(columns)}) VALUES\\n")
+                        f.write(f"INSERT INTO {table_name} ({','.join(columns)}) VALUES\n")
 
                         for i, row in enumerate(rows):
                             values = []
@@ -139,9 +139,9 @@ class DatabaseBackup:
 
                             f.write(f"({','.join(values)})")
                             if i < len(rows) - 1:
-                                f.write(",\\n")
+                                f.write(",\n")
                             else:
-                                f.write(";\\n\\n")
+                                f.write(";\n\n")
 
             # Criar arquivo ZIP antes de remover o SQL
             with zipfile.ZipFile(zip_file, 'w', zipfile.ZIP_DEFLATED) as zipf:
@@ -568,6 +568,17 @@ class Database:
                 
                 await conn.execute('CREATE INDEX IF NOT EXISTS idx_role_assignment ON role_assignments (user_id, guild_id, role_id, assigned_at)')
                 await conn.execute('CREATE INDEX IF NOT EXISTS idx_role_assignment_lookup ON role_assignments (guild_id, role_id, user_id)')
+                                # Tabela de mensagens de perdão sent
+                await conn.execute("""
+                CREATE TABLE IF NOT EXISTS forgiveness_messages (
+                    user_id BIGINT,
+                    guild_id BIGINT,
+                    role_id BIGINT,
+                    message_date TIMESTAMPTZ,
+                    PRIMARY KEY (user_id, guild_id, role_id)
+                )""")
+
+                await conn.execute('CREATE INDEX IF NOT EXISTS idx_forgiveness_date ON forgiveness_messages (message_date)')
                 logger.info("Tabelas criadas/verificadas com sucesso")
                 
             except Exception as e:
@@ -578,7 +589,7 @@ class Database:
                     await self.pool.release(conn)
 
     async def execute_query(self, query: str, params: tuple = None, timeout: int = 60):
-        """Executa uma query com tratamento de timeout e retry melhorado"""
+        """Executa uma query com tratamento de timeout and retry melhorado"""
         if not self.pool:
             raise RuntimeError("Pool de conexões não está disponível")
             
@@ -1118,7 +1129,7 @@ class Database:
                 await self.pool.release(conn)
 
     async def get_last_role_removal(self, user_id: int, guild_id: int) -> Optional[Dict]:
-        """Obtém a última remoção de cargo para um usuário"""
+        """Obtém a última remoção de cargo para um usuário com informações completas"""
         max_retries = 3
         retry_delay = 2
 
@@ -1127,27 +1138,32 @@ class Database:
             try:
                 conn = await self.acquire_connection()
                 result = await conn.fetchrow('''
-                    SELECT removal_date 
+                    SELECT removal_date, role_id
                     FROM removed_roles
                     WHERE user_id = $1 AND guild_id = $2
                     ORDER BY removal_date DESC
                     LIMIT 1
                 ''', user_id, guild_id)
                 
-                return {'removal_date': result['removal_date'] if result else None}
+                if result:
+                    return {
+                        'removal_date': result['removal_date'],
+                        'role_id': result['role_id']
+                    }
+                return None
             except (asyncio.TimeoutError, asyncpg.PostgresConnectionError, asyncpg.InterfaceError, ConnectionError) as e:
                 logger.warning(f"Erro de conexão/timeout em get_last_role_removal (tentativa {attempt + 1}/{max_retries}): {e}")
                 if attempt == max_retries - 1:
                     logger.error(f"Falha final ao obter última remoção de cargo para {user_id}", exc_info=True)
-                    return {'removal_date': None}
+                    return None
                 await asyncio.sleep(retry_delay * (2 ** attempt))
             except Exception as e:
                 logger.error(f"Erro inesperado ao obter última remoção de cargo: {e}", exc_info=True)
-                return {'removal_date': None}
+                return None
             finally:
                 if conn:
                     await self.pool.release(conn)
-        return {'removal_date': None} # Fallback
+        return None
 
     async def log_kicked_member(self, user_id: int, guild_id: int, reason: str):
         """Registra membro expulso por inatividade"""
@@ -1420,7 +1436,7 @@ class Database:
                 await self.pool.release(conn)
 
     async def health_check(self):
-        """Verifica a saúde do banco de dados e reinicia tasks se necessário"""
+        """Verifica a saúde do banco de dados e reinicia tasks if necessário"""
         if not self.pool:
             return False
         
@@ -1488,8 +1504,6 @@ class Database:
                     except Exception as release_error:
                         logger.warning(f"Erro ao liberar conexão: {release_error}")
 
-
-    
     async def get_role_assigned_time(self, user_id: int, guild_id: int, role_id: int) -> Optional[datetime]:
         """Obtém quando um cargo foi atribuído a um usuário, com retries melhorados."""
         max_retries = 3
@@ -1530,3 +1544,40 @@ class Database:
                     except Exception as release_error:
                         logger.warning(f"Erro ao liberar conexão no finally: {release_error}")
         return None # Fallback
+
+    async def log_forgiveness_message(self, user_id: int, guild_id: int, role_id: int):
+        """Registra mensagem de perdão enviada"""
+        conn = None
+        try:
+            conn = await self.acquire_connection()
+            await conn.execute('''
+                INSERT INTO forgiveness_messages 
+                (user_id, guild_id, role_id, message_date) 
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (user_id, guild_id, role_id) DO UPDATE 
+                SET message_date = EXCLUDED.message_date
+            ''', user_id, guild_id, role_id, datetime.now(pytz.utc))
+        except Exception as e:
+            logger.error(f"Erro ao registrar mensagem de perdão: {e}", exc_info=True)
+        finally:
+            if conn:
+                await self.pool.release(conn)
+
+    async def get_last_forgiveness_message(self, user_id: int, guild_id: int, role_id: int) -> Optional[datetime]:
+        """Obtém a última mensagem de perdão enviada para um usuário e cargo específico"""
+        conn = None
+        try:
+            conn = await self.acquire_connection()
+            result = await conn.fetchrow('''
+                SELECT message_date 
+                FROM forgiveness_messages
+                WHERE user_id = $1 AND guild_id = $2 AND role_id = $3
+            ''', user_id, guild_id, role_id)
+            
+            return result['message_date'] if result else None
+        except Exception as e:
+            logger.error(f"Erro ao obter última mensagem de perdão: {e}", exc_info=True)
+            return None
+        finally:
+            if conn:
+                await self.pool.release(conn)
