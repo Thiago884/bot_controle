@@ -214,7 +214,7 @@ async def set_kick_days(interaction: discord.Interaction, days: int):
         )
         await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="whitelist_manage", description="Gerencia a whitelist de usuários e cargos")
+@bot.tree.command(name="whitelist_manage", description="Gerencia la whitelist de usuários e cargos")
 @app_commands.describe(
     action="Ação a ser realizada (adicionar ou remover)",
     target_type="Tipo de alvo (usuário ou cargo)",
@@ -287,7 +287,7 @@ async def whitelist_manage(
         logger.error(f"Erro ao gerenciar whitelist: {e}")
         embed = discord.Embed(
             title="❌ Erro",
-            description="Ocorreu um erro ao atualizar a whitelist. Por favor, tente novamente.",
+            description="Ocorreu um erro ao atualizar la whitelist. Por favor, tente novamente.",
             color=discord.Color.red()
         )
         await interaction.response.send_message(embed=embed)
@@ -557,7 +557,7 @@ async def set_warning_days(interaction: discord.Interaction, first: int, second:
 @allowed_roles_only()
 @commands.has_permissions(administrator=True)
 async def set_warning_message(interaction: discord.Interaction, warning_type: str, message: str):
-    """Define a mensagem personalizada para um tipo específico de aviso"""
+    """Define la mensagem personalizada para um tipo específico de aviso"""
     try:
         logger.info(f"Comando set_warning_message acionado por {interaction.user} para o tipo {warning_type}")
 
@@ -581,7 +581,7 @@ async def set_warning_message(interaction: discord.Interaction, warning_type: st
         if missing:
             embed = discord.Embed(
                 title="❌ Placeholders Faltando",
-                description=f"A mensagem deve conter os seguintes placeholders: {', '.join(missing)}",
+                description=f"La mensagem deve conter os seguintes placeholders: {', '.join(missing)}",
                 color=discord.Color.red()
             )
             await interaction.response.send_message(embed=embed)
@@ -607,7 +607,7 @@ async def set_warning_message(interaction: discord.Interaction, warning_type: st
         logger.error(f"Erro ao definir mensagem de aviso: {e}")
         embed = discord.Embed(
             title="❌ Erro",
-            description="Ocorreu um erro ao atualizar a mensagem. Por favor, tente novamente.",
+            description="Ocorreu um erro ao atualizar la mensagem. Por favor, tente novamente.",
             color=discord.Color.red()
         )
         await interaction.response.send_message(embed=embed)
@@ -1318,7 +1318,7 @@ async def force_check(interaction: discord.Interaction, member: discord.Member):
     except Exception as e:
         logger.error(f"Erro no force_check: {e}")
         await interaction.followup.send(
-            "❌ Ocorreu um erro ao executar a verificação.",
+            "❌ Ocorreu um erro ao executar la verificação.",
             ephemeral=True)
 
 @force_check.error
@@ -1445,19 +1445,18 @@ async def set_log_channel(interaction: discord.Interaction, channel: discord.Tex
         )
         await interaction.response.send_message(embed=embed)
 
-# NOVA CLASSE VIEW PARA CONFIRMAÇÃO
+
+# NOVA CLASSE VIEW PARA CONFIRMAÇÃO (ATUALIZADA)
 class ConfirmRestoreView(discord.ui.View):
-    """
-    View com botões de confirmação e cancelamento para a devolução de cargos.
-    """
-    def __init__(self, author: discord.User, roles_to_restore: Dict[discord.Member, List[discord.Role]]):
-        super().__init__(timeout=180)  # Timeout de 3 minutos
+    """View com botões de confirmação e cancelamento para a devolução de cargos."""
+    def __init__(self, author: discord.User, roles_to_restore: Dict[discord.Member, List[discord.Role]], periodo_horas: int):
+        super().__init__(timeout=180)  # 3 minutos
         self.author = author
         self.roles_to_restore = roles_to_restore
-        self.message: Optional[discord.WebhookMessage] = None
+        self.periodo_horas = periodo_horas
+        self.message: Optional[discord.Message] = None
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        """Garante que apenas o autor do comando possa interagir."""
         if interaction.user.id != self.author.id:
             await interaction.response.send_message(
                 "❌ Apenas quem executou o comando pode usar estes botões.",
@@ -1467,73 +1466,94 @@ class ConfirmRestoreView(discord.ui.View):
         return True
 
     async def disable_buttons(self):
-        """Desabilita todos os botões na view."""
         for item in self.children:
             item.disabled = True
         if self.message:
             try:
                 await self.message.edit(view=self)
-            except discord.NotFound:
-                pass  # A mensagem pode ter sido deletada
+            except (discord.NotFound, discord.HTTPException):
+                pass
         self.stop()
 
     @discord.ui.button(label="Confirmar Devolução", style=discord.ButtonStyle.green, custom_id="confirm_restore")
     async def confirm_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(thinking=True, ephemeral=True)
-
         restored_count = 0
         error_count = 0
-        log_details = []
+        log_lines = []
 
-        for member, roles in self.roles_to_restore.items():
+        # iterate over a copy to avoid mutation issues
+        for member, roles in list(self.roles_to_restore.items()):
             try:
+                # Add roles (respecting hierarchy will raise Forbidden if not allowed)
+                start = time.time()
                 await member.add_roles(*roles, reason="Reversão de remoção por inatividade via comando /devolver_cargos.")
-                restored_count += len(roles)
-                role_names = ", ".join(f"`{r.name}`" for r in roles)
-                log_details.append(f"✅ Devolvido(s) {role_names} para {member.mention}.")
+                perf_metrics.record_api_call(time.time() - start)
 
-                # Enviar mensagem de perdão para cada cargo devolvido
+                restored_count += len(roles)
+                log_lines.append(f"✅ Devolvido(s) {', '.join(r.name for r in roles)} para {member}")
+
+                # Send forgiveness messages (best-effort)
                 for role in roles:
-                    await send_forgiveness_message(member, role)
+                    try:
+                        await send_forgiveness_message(member, role)
+                    except Exception as e:
+                        logger.debug(f"Falha ao enviar mensagem de perdão para {member}: {e}")
+
+                # Try to log to DB (best-effort)
+                try:
+                    start = time.time()
+                    await bot.db.log_restored_roles(member.id, member.guild.id, [r.id for r in roles])
+                    perf_metrics.record_db_query(time.time() - start)
+                except Exception:
+                    logger.debug("Falha ao registrar devolução no DB, ignorando.")
 
             except discord.Forbidden:
                 error_count += len(roles)
-                log_details.append(f"❌ Falha ao devolver cargos para {member.mention} (Permissão/Hierarquia).")
+                log_lines.append(f"❌ Falha ao devolver cargos para {member} (Permissão/Hierarquia).")
             except Exception as e:
                 error_count += len(roles)
-                log_details.append(f"❌ Falha ao devolver cargos para {member.mention} (Erro: {e}).")
+                log_lines.append(f"❌ Falha ao devolver cargos para {member} (Erro: {e}).")
 
         embed = discord.Embed(
             title="✅ Operação Concluída: Devolução de Cargos",
             description="A devolução de cargos foi finalizada.",
             color=discord.Color.green()
         )
-        embed.add_field(name="Resumo da Operação", value=(
-            f"**Membros afetados:** {len(self.roles_to_restore)}\n"
-            f"**Total de cargos devolvidos:** {restored_count}\n"
-            f"**Falhas:** {error_count}"
-        ), inline=False)
+        embed.add_field(
+            name="Resumo da Operação",
+            value=(
+                f"**Membros afetados:** {len(self.roles_to_restore)}\n"
+                f"**Total de cargos devolvidos:** {restored_count}\n"
+                f"**Falhas:** {error_count}"
+            ),
+            inline=False
+        )
+
+        if log_lines:
+            embed.add_field(name="Detalhes (amostra)", value="\n".join(log_lines[:10]), inline=False)
 
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-        # Logar a ação no canal de logs
-        await bot.log_action(
-            "Reversão de Remoção de Cargos",
-            interaction.user,
-            f"Executou /devolver_cargos para as últimas {interaction.data['options'][0]['value']} horas.\n"
-            f"Cargos devolvidos: {restored_count}\n"
-            f"Falhas: {error_count}"
-        )
+        # Log the action to bot logs (best-effort)
+        try:
+            await bot.log_action(
+                "Reversão de Remoção de Cargos",
+                interaction.user,
+                f"Executou /devolver_cargos para as últimas {self.periodo_horas} horas. Cargos devolvidos: {restored_count}. Falhas: {error_count}"
+            )
+        except Exception as e:
+            logger.debug(f"Falha ao logar ação: {e}")
 
         await self.disable_buttons()
 
     @discord.ui.button(label="Cancelar", style=discord.ButtonStyle.red, custom_id="cancel_restore")
     async def cancel_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
+        await interaction.response.defer(thinking=True, ephemeral=True)
         embed = discord.Embed(
             title="❌ Operação Cancelada",
-            description="A devolução de cargos foi cancelada por você.",
-            color=discord.Color.red
+            description="A devolução de cargos foi cancelada.",
+            color=discord.Color.red()
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
         await self.disable_buttons()
@@ -1546,17 +1566,20 @@ class ConfirmRestoreView(discord.ui.View):
 )
 @allowed_roles_only()
 @commands.has_permissions(administrator=True)
+@app_commands.checks.cooldown(1, 300.0, key=lambda i: (i.guild_id, i.user.id))  # 5 minutes cooldown
 async def devolver_cargos(interaction: discord.Interaction, periodo_horas: int = 24):
-    """
-    Devolve os cargos que foram removidos pelo bot por inatividade
-    dentro de um período de tempo especificado.
-    """
+    """Devolve cargos removidos pelo bot por inatividade dentro de um período especificado."""
     await interaction.response.defer(thinking=True, ephemeral=True)
 
     if not await check_db_connection(interaction):
         return
 
     try:
+        # Validate period
+        if periodo_horas < 1 or periodo_horas > 168:
+            await interaction.followup.send("⚠️ O período deve ser entre 1 e 168 horas (1 semana).", ephemeral=True)
+            return
+
         guild = interaction.guild
         now = datetime.now(pytz.utc)
         start_date = now - timedelta(hours=periodo_horas)
@@ -1570,60 +1593,120 @@ async def devolver_cargos(interaction: discord.Interaction, periodo_horas: int =
             ''', guild.id, start_date)
 
         if not removals:
-            await interaction.followup.send(
-                f"ℹ️ Nenhuma remoção de cargo encontrada nas últimas {periodo_horas} horas.",
-                ephemeral=True
-            )
+            await interaction.followup.send(f"ℹ️ Nenhuma remoção de cargo encontrada nas últimas {periodo_horas} horas.", ephemeral=True)
             return
 
-        roles_to_restore = defaultdict(list)
-        for record in removals:
-            member = guild.get_member(record['user_id'])
-            role = guild.get_role(record['role_id'])
+        roles_to_restore: Dict[discord.Member, List[discord.Role]] = defaultdict(list)
+        member_cache: Dict[int, Optional[discord.Member]] = {}
 
-            if member and role:
-                if role not in member.roles:
-                    roles_to_restore[member].append(role)
+        for record in removals:
+            uid = record['user_id']
+            rid = record['role_id']
+
+            if uid not in member_cache:
+                try:
+                    member = guild.get_member(uid)
+                    if not member:
+                        try:
+                            member = await guild.fetch_member(uid)
+                        except discord.NotFound:
+                            member = None
+                    member_cache[uid] = member
+                except discord.HTTPException as e:
+                    logger.warning(f"Erro ao buscar membro {uid}: {e}")
+                    member_cache[uid] = None
+                    continue
+
+            member = member_cache[uid]
+            if not member:
+                continue
+
+            role = guild.get_role(rid)
+            if not role:
+                continue
+
+            # only restore if member doesn't already have role
+            if role not in member.roles:
+                roles_to_restore[member].append(role)
 
         if not roles_to_restore:
-            await interaction.followup.send(
-                "ℹ️ Todos os membros cujos cargos foram removidos já os receberam de volta ou não foram encontrados no servidor.",
-                ephemeral=True
-            )
+            await interaction.followup.send("ℹ️ Todos os membros cujos cargos foram removidos já os receberam de volta ou não foram encontrados no servidor.", ephemeral=True)
             return
 
-        # Criar a mensagem de confirmação
+        # Build confirmation embed (limit content)
         embed = discord.Embed(
             title="⚠️ Confirmação de Devolução de Cargos",
             description=(
-                f"Encontrei **{len(roles_to_restore)} membro(s)** para ter cargos devolvidos "
-                f"com base nas remoções das últimas **{periodo_horas} horas**.\n\n"
+                f"Encontrei **{len(roles_to_restore)} membro(s)** para ter cargos devolvidos com base nas remoções das últimas **{periodo_horas} horas**.\n\n"
                 "**Você confirma a devolução dos seguintes cargos?**"
             ),
             color=discord.Color.orange()
         )
 
         member_list = []
-        for member, roles in roles_to_restore.items():
-            role_mentions = ", ".join(r.mention for r in roles)
+        for member, roles in list(roles_to_restore.items())[:10]:
+            role_mentions = ", ".join(r.mention for r in roles[:5])
+            if len(roles) > 5:
+                role_mentions += f" e mais {len(roles) - 5} cargos"
             member_list.append(f"**{member.display_name}** receberá: {role_mentions}")
 
-        # Limita a lista para não exceder o limite de caracteres do embed
         description_text = "\n".join(member_list)
-        if len(description_text) > 4000:
-            description_text = description_text[:3990] + "\n..."
+        if len(roles_to_restore) > 10:
+            description_text += f"\n\n...e mais {len(roles_to_restore) - 10} membros."
 
         embed.add_field(name="Membros e Cargos a Restaurar", value=description_text, inline=False)
         embed.set_footer(text="Esta ação não pode ser desfeita. A operação irá expirar em 3 minutos.")
 
-        # Criar e enviar a view com os botões
-        view = ConfirmRestoreView(author=interaction.user, roles_to_restore=roles_to_restore)
-        message = await interaction.followup.send(embed=embed, view=view, ephemeral=True)
-        view.message = message
+        view = ConfirmRestoreView(author=interaction.user, roles_to_restore=roles_to_restore, periodo_horas=periodo_horas)
+
+        try:
+            # send via followup (ephemeral)
+            message = await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+            # followup.send returns a Message for non-ephemeral; some gateways return None for ephemeral in older libs.
+            # We'll try to get the original response as fallback.
+            view.message = message if message is not None else await interaction.original_response()
+        except discord.HTTPException as e:
+            if getattr(e, 'status', None) == 429:
+                retry_after = getattr(e, 'retry_after', 60)
+                logger.warning(f"Rate limit ao enviar confirmação. Tentando novamente em {retry_after}s")
+                await asyncio.sleep(retry_after)
+                message = await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+                view.message = message if message is not None else await interaction.original_response()
+            else:
+                logger.error(f"Erro ao enviar confirmação: {e}")
+                raise
 
     except Exception as e:
         logger.error(f"Erro no comando /devolver_cargos: {e}", exc_info=True)
-        await interaction.followup.send(
-            "❌ Ocorreu um erro inesperado ao executar este comando.",
-            ephemeral=True
-        )
+        try:
+            await interaction.followup.send("❌ Ocorreu um erro inesperado ao executar este comando.", ephemeral=True)
+        except Exception:
+            pass
+
+
+@devolver_cargos.error
+async def devolver_cargos_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    """Trata erros do comando devolver_cargos"""
+    try:
+        if isinstance(error, app_commands.CommandOnCooldown):
+            retry = getattr(error, 'retry_after', None)
+            msg = f"⏳ Este comando está em cooldown. Tente novamente em {retry:.1f} segundos." if retry else "⏳ Este comando está em cooldown. Tente novamente mais tarde."
+            if not interaction.response.is_done():
+                await interaction.response.send_message(msg, ephemeral=True)
+            else:
+                await interaction.followup.send(msg, ephemeral=True)
+        elif isinstance(error, discord.errors.HTTPException) and getattr(error, 'status', None) == 429:
+            retry_after = getattr(error, 'retry_after', 60)
+            msg = f"⚠️ O bot está sendo limitado pelo Discord. Por favor, tente novamente em {retry_after:.1f} segundos."
+            if not interaction.response.is_done():
+                await interaction.response.send_message(msg, ephemeral=True)
+            else:
+                await interaction.followup.send(msg, ephemeral=True)
+        else:
+            logger.error(f"Erro no devolver_cargos: {error}")
+            if not interaction.response.is_done():
+                await interaction.response.send_message("❌ Ocorreu um erro ao executar este comando.", ephemeral=True)
+            else:
+                await interaction.followup.send("❌ Ocorreu um erro ao executar este comando.", ephemeral=True)
+    except Exception as e:
+        logger.error(f"Erro ao tratar erro do comando devolver_cargos: {e}")
