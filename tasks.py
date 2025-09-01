@@ -2028,3 +2028,76 @@ async def register_role_assignments_wrapper():
         register_role_assignments
     ), name='register_role_assignments_wrapper')
     return task
+
+# --- NOVA TAREFA PARA LIMPEZA DE MENSAGENS ANTIGAS ---
+@log_task_metrics("cleanup_old_bot_messages")
+async def _cleanup_old_bot_messages():
+    """Verifica os canais de log e notificação e apaga mensagens do bot mais antigas que 7 dias."""
+    await bot.wait_until_ready()
+
+    # Pega os IDs dos canais a partir da configuração do bot
+    log_channel_id = bot.config.get('log_channel')
+    notification_channel_id = bot.config.get('notification_channel')
+    
+    channels_to_clean = []
+    if log_channel_id:
+        channels_to_clean.append(log_channel_id)
+    if notification_channel_id:
+        channels_to_clean.append(notification_channel_id)
+
+    if not channels_to_clean:
+        logger.info("Nenhum canal de log ou notificação configurado para limpeza de mensagens.")
+        return
+
+    # Define o ponto de corte: qualquer mensagem antes desta data será apagada
+    cutoff_date = datetime.now(pytz.utc) - timedelta(days=7)
+    
+    deleted_count_total = 0
+
+    for channel_id in channels_to_clean:
+        try:
+            channel = bot.get_channel(channel_id)
+            if not channel or not isinstance(channel, discord.TextChannel):
+                logger.warning(f"Não foi possível encontrar o canal de texto com ID {channel_id} para limpeza.")
+                continue
+
+            # A função purge é muito eficiente para apagar múltiplas mensagens
+            # Ela apaga mensagens que são ANTERIORES à data de corte (`before`)
+            # e que passam na verificação (`check`), que no nosso caso é se o autor é o próprio bot.
+            deleted_messages = await channel.purge(
+                limit=None,  # Sem limite, apaga todas que corresponderem
+                before=cutoff_date,
+                check=lambda m: m.author == bot.user
+            )
+            
+            if deleted_messages:
+                count = len(deleted_messages)
+                deleted_count_total += count
+                logger.info(f"Limpeza concluída para o canal #{channel.name}: {count} mensagens antigas do bot foram apagadas.")
+
+        except discord.Forbidden:
+            logger.error(f"Não tenho permissão para apagar mensagens no canal com ID {channel_id}.")
+        except Exception as e:
+            logger.error(f"Ocorreu um erro ao limpar mensagens no canal ID {channel_id}: {e}", exc_info=True)
+        
+        # Adiciona um pequeno delay para não sobrecarregar a API do Discord
+        await asyncio.sleep(5)
+
+    if deleted_count_total > 0:
+        logger.info(f"Limpeza periódica de mensagens concluída. Total de {deleted_count_total} mensagens apagadas.")
+
+async def cleanup_old_bot_messages():
+    """Wrapper para a task de limpeza de mensagens com intervalo de 6 horas."""
+    # A lógica de intervalo persistente não é necessária aqui, pois a tarefa é de limpeza
+    # e pode rodar a cada X horas sem problemas, mesmo que atrase um pouco.
+    @tasks.loop(hours=6)
+    async def loop():
+        await _cleanup_old_bot_messages()
+
+    # Adiciona um before_loop para garantir que a task só comece quando o bot estiver pronto
+    @loop.before_loop
+    async def before_cleanup_loop():
+        await bot.wait_until_ready()
+
+    # Inicia a task
+    loop.start()

@@ -1670,7 +1670,8 @@ async def on_ready():
                 report_metrics, health_check, check_missed_periods,
                 process_pending_voice_events,
                 check_current_voice_members, detect_missing_voice_leaves,
-                cleanup_ghost_sessions_wrapper, register_role_assignments_wrapper
+                cleanup_ghost_sessions_wrapper, register_role_assignments_wrapper,
+                cleanup_old_bot_messages  # <--- LINHA ADICIONADA
             )
             
             # Primeiro verificar períodos perdidos de forma assíncrona
@@ -1698,6 +1699,11 @@ async def on_ready():
             bot.loop.create_task(check_current_voice_members(), name='check_current_voice_members')
             bot.loop.create_task(detect_missing_voice_leaves(), name='detect_missing_voice_leaves')
             bot.loop.create_task(cleanup_ghost_sessions_wrapper(), name='cleanup_ghost_sessions_wrapper')
+            
+            # --- LINHA ADICIONADA ---
+            bot.loop.create_task(cleanup_old_bot_messages(), name='cleanup_old_bot_messages_task')
+            # -------------------------
+
             bot.queue_processor_task = bot.loop.create_task(bot.process_queues(), name='queue_processor')
             bot.pool_monitor_task = bot.loop.create_task(bot.monitor_db_pool(), name='db_pool_monitor')
             bot.health_check_task = bot.loop.create_task(bot.periodic_health_check(), name='periodic_health_check')
