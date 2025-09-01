@@ -1,3 +1,4 @@
+# main.py
 import discord
 from discord.ext import commands
 import pytz
@@ -257,13 +258,19 @@ class SmartPriorityQueue:
 
 class InactivityBot(commands.Bot):
     def __init__(self, *args, **kwargs):
-        # Configuração do cache de membros
-        member_cache_flags = discord.MemberCacheFlags.all()
+        # --- INÍCIO DA CORREÇÃO ---
+        # Configuração do cache de membros otimizada para reduzir o uso de RAM.
+        # Em vez de carregar todos os membros (`discord.MemberCacheFlags.all()`),
+        # esta abordagem armazena em cache apenas os membros que interagem ou estão em canais de voz.
+        member_cache_flags = discord.MemberCacheFlags.from_intents(kwargs.get('intents'))
+        member_cache_flags.voice = True  # Garante que estados de voz sejam sempre cacheados.
+        member_cache_flags.joined = True # Garante que a data de entrada seja sempre cacheada.
+        # --- FIM DA CORREÇÃO ---
         
         kwargs.update({
             'max_messages': 100,
             'chunk_guilds_at_startup': True,
-            'member_cache_flags': member_cache_flags,
+            'member_cache_flags': member_cache_flags, # Utiliza a flag otimizada
             'enable_debug_events': False,
             'heartbeat_timeout': 120.0,
             'guild_ready_timeout': 30.0,
@@ -1671,7 +1678,7 @@ async def on_ready():
                 process_pending_voice_events,
                 check_current_voice_members, detect_missing_voice_leaves,
                 cleanup_ghost_sessions_wrapper, register_role_assignments_wrapper,
-                cleanup_old_bot_messages  # <--- LINHA ADICIONADA
+                cleanup_old_bot_messages
             )
             
             # Primeiro verificar períodos perdidos de forma assíncrona
@@ -1700,9 +1707,7 @@ async def on_ready():
             bot.loop.create_task(detect_missing_voice_leaves(), name='detect_missing_voice_leaves')
             bot.loop.create_task(cleanup_ghost_sessions_wrapper(), name='cleanup_ghost_sessions_wrapper')
             
-            # --- LINHA ADICIONADA ---
             bot.loop.create_task(cleanup_old_bot_messages(), name='cleanup_old_bot_messages_task')
-            # -------------------------
 
             bot.queue_processor_task = bot.loop.create_task(bot.process_queues(), name='queue_processor')
             bot.pool_monitor_task = bot.loop.create_task(bot.monitor_db_pool(), name='db_pool_monitor')
