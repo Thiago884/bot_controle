@@ -813,34 +813,28 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
             return
 
         # Usar UTC consistentemente
-        end_date = datetime.now(pytz.utc)
-        start_date = end_date - timedelta(days=days)
+        end_date_param = datetime.now(pytz.utc)
+        start_date_param = end_date_param - timedelta(days=days)
 
         try:
             async with bot.db.pool.acquire() as conn:
-                # Obter dados do usuário
-                user_data = await conn.fetchrow(
-                    "SELECT * FROM user_activity WHERE user_id = $1 AND guild_id = $2",
-                    member.id, member.guild.id
-                )
-
-                # Obter sessões de voz
-                voice_sessions = await conn.fetch(
+                # Obter sessões de voz para o período do comando (/user_activity X dias)
+                voice_sessions_param = await conn.fetch(
                     "SELECT * FROM voice_sessions WHERE user_id = $1 AND guild_id = $2 AND join_time >= $3 AND leave_time <= $4",
-                    member.id, member.guild.id, start_date, end_date
+                    member.id, member.guild.id, start_date_param, end_date_param
                 )
 
                 # Calcular tempo total apenas para o período solicitado
-                total_time = sum(session['duration'] for session in voice_sessions) if voice_sessions else 0
+                total_time = sum(session['duration'] for session in voice_sessions_param) if voice_sessions_param else 0
                 total_minutes = total_time / 60
-                sessions_count = len(voice_sessions)
+                sessions_count = len(voice_sessions_param)
                 avg_session_duration = total_minutes / sessions_count if sessions_count else 0
 
                 # Calcular dias mais ativos com datas
-                most_active_days = calculate_most_active_days(voice_sessions, days)
+                most_active_days = calculate_most_active_days(voice_sessions_param, days)
 
                 # Formatar a lista de dias mais ativos com datas
-                active_days_text = "Nenhum dia com atividade significativa"
+                active_days_text = "Nenhum dia com atividade"
                 if most_active_days:
                     active_days_text = "\n".join(
                         f"• {day_name} ({date_str}): {total} min (⌀ {avg} min/sessão)"
@@ -860,7 +854,7 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
                 )
                 embed.set_thumbnail(url=member.display_avatar.url)
 
-                # Seção de estatísticas básicas
+                # Seção de estatísticas gerais
                 embed.add_field(
                     name="📈 Estatísticas Gerais",
                     value=(
@@ -868,7 +862,7 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
                         f"**Tempo Total:** {int(total_minutes)} min\n"
                         f"**Duração Média:** {int(avg_session_duration)} min/sessão\n"
                         f"**Dias Mais Ativos:**\n{active_days_text}\n"
-                        f"**Última Atividade:** {max(s['join_time'] for s in voice_sessions).strftime('%d/%m %H:%M') if voice_sessions else 'N/D'}"
+                        f"**Última Atividade:** {max(s['join_time'] for s in voice_sessions_param).strftime('%d/%m %H:%M') if voice_sessions_param else 'N/D'}"
                     ),
                     inline=True
                 )
@@ -883,52 +877,73 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
                     ),
                     inline=True
                 )
-
-                # Seção de status atual
+                
+                # --- INÍCIO DA CORREÇÃO ---
+                # Seção de status atual (lógica corrigida)
+                
                 last_check = await conn.fetchrow(
                     "SELECT * FROM checked_periods WHERE user_id = $1 AND guild_id = $2 ORDER BY period_end DESC LIMIT 1",
                     member.id, member.guild.id
                 )
 
-                if last_check:
+                now = datetime.now(pytz.utc)
+                period_start = None
+                period_end = None
+
+                # Validar o período obtido do banco de dados.
+                # Se o período for inválido (ex: futuro) ou não existir, calculamos o período atual com base nas configs.
+                if last_check and last_check['period_start'].replace(tzinfo=pytz.utc) <= now:
+                    # O período encontrado é válido e atual, usamos ele
                     period_start = last_check['period_start'].replace(tzinfo=pytz.utc)
                     period_end = last_check['period_end'].replace(tzinfo=pytz.utc)
-                    days_remaining = (period_end - datetime.now(pytz.utc)).days
+                else:
+                    # O período é inválido (futuro) ou não existe. Calculamos o período atual.
+                    # O período atual de análise são os últimos 'monitoring_period' dias a partir de agora.
+                    # Isso é uma representação teórica, pois a task pode não ter rodado ainda.
+                    period_end = now
+                    period_start = now - timedelta(days=monitoring_period)
 
-                    status_emoji = "✅" if last_check['meets_requirements'] else "⚠️"
-                    status_text = "Cumprindo" if last_check['meets_requirements'] else "Não cumprindo"
+                # Calcular dias válidos para o período ATUAL (seja do DB ou recalculado)
+                valid_days_current_period = set()
+                current_period_sessions = await conn.fetch(
+                    "SELECT join_time, duration FROM voice_sessions WHERE user_id = $1 AND guild_id = $2 AND join_time >= $3 AND leave_time <= $4",
+                    member.id, member.guild.id, period_start, period_end
+                )
+                for session in current_period_sessions:
+                    if session['duration'] >= required_min * 60:
+                        day = session['join_time'].replace(tzinfo=pytz.utc).date()
+                        valid_days_current_period.add(day)
+                
+                # O status é sempre baseado neste cálculo em tempo real para garantir precisão
+                is_complying = len(valid_days_current_period) >= required_days
+                status_emoji = "✅" if is_complying else "⚠️"
+                status_text = "Cumprindo" if is_complying else "Não cumprindo"
+                
+                days_remaining = (period_end - now).days if period_end > now else 0
 
-                    embed.add_field(
-                        name="🔄 Status Atual",
-                        value=(
-                            f"{status_emoji} **{status_text}** os requisitos\n"
-                            f"**Período:** {period_start.strftime('%d/%m/%Y')} a {period_end.strftime('%d/%m/%Y')}\n"
-                            f"**Dias Restantes:** {days_remaining}"
-                        ),
-                        inline=True
-                    )
+                embed.add_field(
+                    name="🔄 Status Atual",
+                    value=(
+                        f"{status_emoji} **{status_text}** os requisitos\n"
+                        f"**Período:** {period_start.strftime('%d/%m/%Y')} a {period_end.strftime('%d/%m/%Y')}\n"
+                        f"**Dias Restantes:** {days_remaining if days_remaining >= 0 else 'N/A'}"
+                    ),
+                    inline=True
+                )
 
-                    # Calcular dias válidos para o período atual
-                    valid_days = set()
-                    current_sessions = await conn.fetch(
-                        "SELECT * FROM voice_sessions WHERE user_id = $1 AND guild_id = $2 AND join_time >= $3 AND leave_time <= $4",
-                        member.id, member.guild.id, period_start, period_end
-                    )
-                    for session in current_sessions:
-                        if session['duration'] >= required_min * 60:
-                            day = session['join_time'].replace(tzinfo=pytz.utc).date()
-                            valid_days.add(day)
+                # A lógica da barra de progresso agora usa os `valid_days` que acabamos de calcular,
+                # garantindo consistência com o status.
+                progress = min(1.0, len(valid_days_current_period) / required_days)
+                progress_bar = "[" + "█" * int(progress * 10) + " " * (10 - int(progress * 10)) + "]"
+                progress_text = f"{progress*100:.0f}% ({len(valid_days_current_period)}/{required_days} dias)"
 
-                    # Barra de progresso
-                    progress = min(1.0, len(valid_days) / required_days)
-                    progress_bar = "[" + "█" * int(progress * 10) + " " * (10 - int(progress * 10)) + "]"
-                    progress_text = f"{progress*100:.0f}% ({len(valid_days)}/{required_days} dias)"
-
-                    embed.add_field(
-                        name="📊 Progresso",
-                        value=f"{progress_bar}\n{progress_text}",
-                        inline=False
-                    )
+                embed.add_field(
+                    name="📊 Progresso no Período",
+                    value=f"{progress_bar}\n{progress_text}",
+                    inline=False
+                )
+                
+                # --- FIM DA CORREÇÃO ---
 
                 # Seção de avisos
                 all_warnings = await conn.fetch(
@@ -937,7 +952,6 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
                 )
 
                 if all_warnings:
-                    # CORREÇÃO: Adicionar (UTC) à formatação da data
                     warnings_text = "\n".join(
                         f"• {warn['warning_type'].capitalize()} - {warn['warning_date'].strftime('%d/%m/%Y %H:%M')} (UTC)"
                         for warn in all_warnings
@@ -982,9 +996,10 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
 
                 # Enviar resposta com tratamento de rate limit
                 try:
-                    if voice_sessions:
+                    # Gerar gráfico com base nos dias do parâmetro do comando
+                    if voice_sessions_param:
                         try:
-                            report_file = await generate_activity_report(member, voice_sessions, days)
+                            report_file = await generate_activity_report(member, voice_sessions_param, days)
                             if report_file:
                                 await interaction.followup.send(embed=embed, file=report_file)
                                 return
@@ -1013,7 +1028,7 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
             return
 
     except Exception as e:
-        logger.error(f"Erro no comando user_activity: {e}")
+        logger.error(f"Erro no comando user_activity: {e}", exc_info=True)
         try:
             await interaction.followup.send(
                 "❌ Ocorreu um erro inesperado.",
