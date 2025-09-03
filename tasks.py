@@ -174,9 +174,9 @@ class BatchProcessor:
     async def _process_member_optimized(self, member):
         """
         Verifica a inatividade de um membro, processando todos os períodos de monitoramento
-        que passaram desde a última verificação.
+        que passaram desde a última verificação e envia avisos para o período atual.
         """
-        result = {'processed': 0, 'removed': 0}
+        result = {'processed': 0, 'removed': 0, 'warnings': {'first': 0, 'second': 0}}
         
         try:
             # 1. Verificar se o membro deve ser processado (whitelist, cargos monitorados)
@@ -305,6 +305,42 @@ class BatchProcessor:
             if any(r.id in tracked_roles for r in current_member_roles):
                 new_period_end = next_period_start + period_duration
                 await self.bot.db.log_period_check(member.id, member.guild.id, next_period_start, new_period_end, False)
+
+            # 7. AVISOS: Verificar o período ATUAL para enviar avisos
+            warnings_config = self.bot.config.get('warnings', {})
+            first_warning_days = warnings_config.get('first_warning', 7)
+            second_warning_days = warnings_config.get('second_warning', 1)
+
+            # Se o membro ainda tiver cargos monitorados, verifique os avisos.
+            if any(r.id in tracked_roles for r in current_member_roles):
+                current_period = await self.bot.db.get_last_period_check(member.id, member.guild.id)
+                
+                if current_period and current_period['period_end']:
+                    period_end = current_period['period_end']
+                    if period_end.tzinfo is None:
+                        period_end = period_end.replace(tzinfo=pytz.UTC)
+
+                    # Apenas processar se o período ainda não terminou
+                    if period_end > now:
+                        days_remaining = (period_end - now).days
+                        
+                        warnings_in_period = await self.bot.db.get_warnings_in_period(
+                            member.id, member.guild.id, current_period['period_start']
+                        )
+                        
+                        # Lógica de aviso
+                        if (days_remaining <= first_warning_days and 
+                            days_remaining > second_warning_days and
+                            'first' not in warnings_in_period):
+                            await self.bot.send_warning(member, 'first')
+                            result['warnings']['first'] += 1
+                        
+                        elif (days_remaining <= second_warning_days and 
+                              days_remaining >= 0 and
+                              'first' in warnings_in_period and 
+                              'second' not in warnings_in_period):
+                            await self.bot.send_warning(member, 'second')
+                            result['warnings']['second'] += 1
 
         except Exception as e:
             logger.error(f"Erro ao verificar inatividade para {member}: {e}", exc_info=True)
@@ -441,7 +477,7 @@ async def execute_task_with_persistent_interval(task_name: str, monitoring_perio
                 if hasattr(bot.db, 'log_task_execution'):
                     try:
                         period_to_log = monitoring_period
-                        if task_name in ['inactivity_check', 'check_warnings', 'cleanup_members']:
+                        if task_name in ['inactivity_check', 'cleanup_members']:
                             period_to_log = bot.config.get('monitoring_period', monitoring_period)
                         
                         await bot.db.log_task_execution(task_name, period_to_log)
@@ -528,7 +564,7 @@ async def save_task_states():
             logger.error("Banco de dados não inicializado - pulando salvamento de estados")
             return
 
-        for task_name in ['inactivity_check', 'check_warnings', 'cleanup_members']:
+        for task_name in ['inactivity_check', 'cleanup_members']:
             last_exec = await bot.db.get_last_task_execution(task_name)
             if last_exec:
                 await bot.db.log_task_execution(task_name, last_exec['monitoring_period'])
@@ -544,7 +580,7 @@ async def load_task_states():
             logger.error("Banco de dados não inicializado - pulando carregamento de estados")
             return
 
-        for task_name in ['inactivity_check', 'check_warnings', 'cleanup_members']:
+        for task_name in ['inactivity_check', 'cleanup_members']:
             last_exec = await bot.db.get_last_task_execution(task_name)
             if last_exec:
                 await bot.db.log_task_execution(task_name, last_exec['monitoring_period'])
@@ -631,7 +667,7 @@ async def _health_check():
 
     try:
         # Verificar última execução das tasks críticas
-        critical_tasks = ['inactivity_check', 'check_warnings', 'cleanup_members']
+        critical_tasks = ['inactivity_check', 'cleanup_members']
         for task_name in critical_tasks:
             last_exec = await bot.db.get_last_task_execution(task_name)
             if last_exec:
@@ -654,7 +690,6 @@ async def _health_check():
         
         expected_tasks = {
             'inactivity_check_wrapper',
-            'check_warnings_wrapper', 
             'cleanup_members_wrapper',
             'database_backup_wrapper',
             'cleanup_old_data_wrapper',
@@ -677,8 +712,6 @@ async def _health_check():
                 logger.warning(f"Task {task_name} não está ativa - reiniciando...")
                 if task_name == 'inactivity_check_wrapper':
                     asyncio.create_task(inactivity_check(), name='inactivity_check_wrapper')
-                elif task_name == 'check_warnings_wrapper':
-                    asyncio.create_task(check_warnings(), name='check_warnings_wrapper')
                 elif task_name == 'cleanup_members_wrapper':
                     asyncio.create_task(cleanup_members(), name='cleanup_members_wrapper')
                 elif task_name == 'database_backup_wrapper':
@@ -716,7 +749,7 @@ async def _health_check():
 
 @log_task_metrics("inactivity_check")
 async def _inactivity_check():
-    """Verifica a inatividade dos membros e remove cargos se necessário"""
+    """Verifica a inatividade dos membros, envia avisos e remove cargos se necessário"""
     await bot.wait_until_ready()
     
     # Verificar configuração essencial
@@ -733,9 +766,6 @@ async def _inactivity_check():
     logger.debug(f"Configuração atual: {bot.config}")
     logger.debug(f"Monitoring period: {bot.config.get('monitoring_period')}")
     
-    required_minutes = bot.config['required_minutes']
-    required_days = bot.config['required_days']
-    monitoring_period = bot.config['monitoring_period']
     tracked_roles = bot.config['tracked_roles']
     
     if not tracked_roles:
@@ -744,6 +774,7 @@ async def _inactivity_check():
     
     processed_members = 0
     members_with_roles_removed = 0
+    warnings_sent = {'first': 0, 'second': 0}
     
     for guild in bot.guilds:
         try:
@@ -761,16 +792,18 @@ async def _inactivity_check():
             results = await processor.process_inactivity_batch(prioritized_members)
             
             # Atualizar contadores
-            for result in results:
-                if not isinstance(result, Exception):
-                    processed_members += result.get('processed', 0)
-                    members_with_roles_removed += result.get('removed', 0)
+            for res in results:
+                if not isinstance(res, Exception) and isinstance(res, dict):
+                    processed_members += res.get('processed', 0)
+                    members_with_roles_removed += res.get('removed', 0)
+                    warnings_sent['first'] += res.get('warnings', {}).get('first', 0)
+                    warnings_sent['second'] += res.get('warnings', {}).get('second', 0)
                 
         except Exception as e:
             logger.error(f"Erro ao verificar inatividade na guild {guild.name}: {e}")
             continue
     
-    logger.info(f"Verificação de inatividade concluída. Membros processados: {processed_members}, Cargos removidos: {members_with_roles_removed}")
+    logger.info(f"Verificação de inatividade concluída. Membros processados: {processed_members}, Cargos removidos: {members_with_roles_removed}, Avisos enviados: Primeiro={warnings_sent['first']}, Segundo={warnings_sent['second']}")
 
 async def inactivity_check():
     """Wrapper para a task com intervalo de 24h"""
@@ -784,118 +817,6 @@ async def inactivity_check():
         name='inactivity_check_wrapper'
     )
     return task
-
-@log_task_metrics("check_warnings")
-async def _check_warnings():
-    """Lógica original da task"""
-    await bot.wait_until_ready()
-    
-    # Verificar configuração essencial
-    if 'tracked_roles' not in bot.config or not bot.config['tracked_roles'] or 'warnings' not in bot.config:
-        logger.info("Cargos monitorados ou configurações de aviso não definidos - verificação ignorada")
-        return
-    
-    # Verificar se o banco de dados está disponível
-    if not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
-        logger.error("Banco de dados não inicializado - pulando verificação de avisos")
-        return
-    
-    # Log de depuração para configurações
-    logger.debug(f"Configuração atual: {bot.config}")
-    logger.debug(f"Monitoring period: {bot.config.get('monitoring_period')}")
-    
-    required_minutes = bot.config['required_minutes']
-    required_days = bot.config['required_days']
-    monitoring_period = bot.config['monitoring_period']
-    tracked_roles = bot.config['tracked_roles']
-    warnings_config = bot.config.get('warnings', {})
-    
-    if not tracked_roles or not warnings_config:
-        logger.info("Cargos monitorados ou configurações de aviso não definidos - verificação ignorada")
-        return
-    
-    first_warning_days = warnings_config.get('first_warning', 3)
-    second_warning_days = warnings_config.get('second_warning', 1)
-    
-    warnings_sent = {'first': 0, 'second': 0}
-    batch_size = bot._batch_processing_size
-    
-    for guild in bot.guilds:
-        members = list(guild.members)
-        for i in range(0, len(members), batch_size):
-            batch = members[i:i + batch_size]
-            await asyncio.gather(*[process_member_warnings(member, guild, tracked_roles, 
-                first_warning_days, second_warning_days, warnings_sent) for member in batch])
-            
-            await asyncio.sleep(bot.rate_limit_delay)
-    
-    logger.info(f"Verificação de avisos concluída. Avisos enviados: Primeiro={warnings_sent['first']}, Segundo={warnings_sent['second']}")
-
-async def check_warnings():
-    """Wrapper para a task com intervalo persistente"""
-    monitoring_period = bot.config['monitoring_period']
-    task = bot.loop.create_task(execute_task_with_persistent_interval(
-        "check_warnings", 
-        monitoring_period,
-        _check_warnings
-    ), name='check_warnings_wrapper')
-    return task
-
-async def process_member_warnings(member: discord.Member, guild: discord.Guild, 
-                                tracked_roles: List[int], first_warning_days: int, 
-                                second_warning_days: int, warnings_sent: Dict):
-    """Process warnings for a single member with CORRECTED logic"""
-    try:
-        # Verificar whitelist
-        if member.id in bot.config['whitelist']['users'] or \
-           any(role.id in bot.config['whitelist']['roles'] for role in member.roles):
-            return
-            
-        # Verificar se tem cargos monitorados
-        if not any(role.id in tracked_roles for role in member.roles):
-            return
-        
-        # Obter o período de verificação ATUAL
-        last_check = await bot.db.get_last_period_check(member.id, guild.id)
-        
-        if not last_check:
-            return
-        
-        # Garantir timezone UTC
-        period_end = last_check['period_end']
-        if period_end.tzinfo is None:
-            period_end = period_end.replace(tzinfo=pytz.UTC)
-        
-        now = datetime.now(pytz.UTC)
-        
-        # CORREÇÃO: Calcular dias restantes corretamente, não permitindo negativo
-        days_remaining = max(0, (period_end - now).days)
-        
-        # Obter avisos já enviados neste período
-        warnings_in_period = await bot.db.get_warnings_in_period(
-            member.id, guild.id, last_check['period_start']
-        )
-        
-        # Primeiro aviso: dias_restantes <= primeiro_aviso_dias E primeiro aviso não enviado
-        # E ainda há tempo suficiente para o segundo aviso depois
-        if (days_remaining <= first_warning_days and 
-            days_remaining > second_warning_days and
-            'first' not in warnings_in_period):
-            
-            await bot.send_warning(member, 'first')
-            warnings_sent['first'] += 1
-        
-        # Segundo aviso: dias_restantes <= segundo_aviso_dias E primeiro aviso já enviado E segundo não enviado
-        elif (days_remaining <= second_warning_days and 
-              days_remaining >= 0 and  # Garantir que ainda não passou do período
-              'first' in warnings_in_period and 
-              'second' not in warnings_in_period):
-            
-            await bot.send_warning(member, 'second')
-            warnings_sent['second'] += 1
-            
-    except Exception as e:
-        logger.error(f"Erro ao verificar avisos para {member}: {e}")
 
 @log_task_metrics("cleanup_members")
 async def _cleanup_members(force_check: bool = False):
@@ -1213,7 +1134,7 @@ async def _report_metrics():
     
     try:
         metrics_report = []
-        for task_name in ['inactivity_check', 'check_warnings', 'cleanup_members', 
+        for task_name in ['inactivity_check', 'cleanup_members', 
                          'database_backup', 'cleanup_old_data', 'monitor_rate_limits',
                          'cleanup_ghost_sessions', 'register_role_assignments']:
             metrics = task_metrics.get_metrics(task_name)

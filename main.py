@@ -1699,7 +1699,7 @@ async def on_ready():
             logger.info("Iniciando tarefas de fundo...")
             
             from tasks import (
-                inactivity_check, check_warnings, cleanup_members,
+                inactivity_check, cleanup_members,
                 database_backup, cleanup_old_data, monitor_rate_limits,
                 report_metrics, health_check,
                 process_pending_voice_events,
@@ -1717,7 +1717,6 @@ async def on_ready():
             # Agendar tarefas principais com um pequeno atraso para não sobrecarregar a inicialização
             await start_task_with_jitter(register_role_assignments_wrapper(), 'register_role_assignments_wrapper')
             await start_task_with_jitter(inactivity_check(), 'inactivity_check_wrapper')
-            await start_task_with_jitter(check_warnings(), 'check_warnings_wrapper')
             await start_task_with_jitter(cleanup_members(), 'cleanup_members_wrapper')
             await start_task_with_jitter(database_backup(), 'database_backup_wrapper')
             await start_task_with_jitter(cleanup_old_data(), 'cleanup_old_data_wrapper')
