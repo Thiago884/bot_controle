@@ -1701,15 +1701,12 @@ async def on_ready():
             from tasks import (
                 inactivity_check, check_warnings, cleanup_members,
                 database_backup, cleanup_old_data, monitor_rate_limits,
-                report_metrics, health_check, check_missed_periods,
+                report_metrics, health_check,
                 process_pending_voice_events,
                 check_current_voice_members, detect_missing_voice_leaves,
                 cleanup_ghost_sessions_wrapper, register_role_assignments_wrapper,
                 cleanup_old_bot_messages
             )
-            
-            # Primeiro verificar períodos perdidos de forma assíncrona
-            bot.loop.create_task(check_missed_periods(), name='check_missed_periods_task')
             
             async def start_task_with_jitter(task_coro, name):
                 delay = random.uniform(1, 30)
