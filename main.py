@@ -431,47 +431,63 @@ class InactivityBot(commands.Bot):
                     logger.critical("Máximo de tentativas de conexão atingido devido a erro inesperado. Desistindo.", exc_info=True)
                     raise
 
-    async def initialize_db(self):
-        """Inicializa a conexão com o banco de dados usando a classe Database."""
-        if self._is_initialized:
-            return True
+    
+async def initialize_db(self):
+    """Inicializa a conexão com o banco de dados usando a classe Database."""
+    if self._is_initialized:
+        return True
 
-        try:
-            self.db = Database()
-            await self.db.initialize()
-                
-            logger.info("Conexão com o banco de dados (via asyncpg) estabelecida com sucesso.")
-            
-            # Inicializar o backup após o banco estar pronto
-            from database import DatabaseBackup
-            self.db_backup = DatabaseBackup(self.db)
-            logger.info("Backup do banco de dados inicializado")
-            
-            # Verificar se a conexão está realmente funcionando
-            try:
-                async with self.db.pool.acquire() as conn:
-                    await asyncio.wait_for(conn.execute("SELECT 1"), timeout=10)
-            except Exception as e:
-                logger.error(f"Falha ao verificar conexão com o banco: {e}")
-                self.db_connection_failed = True
-                return False
-                
-            self._is_initialized = True
-            
-            # Carregar configuração após inicializar o banco
-            await self.load_config()
-            
-            return True
-            
-        except Exception as e:
-            logger.critical(f"Falha crítica ao inicializar o banco de dados: {e}", exc_info=True)
-            self.db_connection_failed = True
-            # Criar instância vazia para evitar erros de NoneType
-            self.db = Database()
-            self.db.pool = None
+    try:
+        self.db = Database()
+        success = await self.db.initialize()
+
+        if not success:
+            logger.critical("Falha na inicialização do banco de dados")
+            # Sinalizar o evento mesmo em caso de falha para evitar deadlock
+            if self.ready_event and not self.ready_event.is_set():
+                self.ready_event.set()
             return False
 
-    async def load_config(self, guild_id: int = None):
+        logger.info("Conexão com o banco de dados (via asyncpg) estabelecida com sucesso.")
+
+        # Inicializar o backup após o banco estar pronto
+        from database import DatabaseBackup
+        self.db_backup = DatabaseBackup(self.db)
+        logger.info("Backup do banco de dados inicializado")
+
+        # Verificar se a conexão está realmente funcionando
+        try:
+            async with self.db.pool.acquire() as conn:
+                await asyncio.wait_for(conn.execute("SELECT 1"), timeout=10)
+        except Exception as e:
+            logger.error(f"Falha ao verificar conexão com o banco: {e}")
+            self.db_connection_failed = True
+            # Sinalizar o evento mesmo em caso de falha para evitar deadlock
+            if self.ready_event and not self.ready_event.is_set():
+                self.ready_event.set()
+            return False
+
+        self._is_initialized = True
+
+        # Carregar configuração após inicializar o banco
+        await self.load_config()
+
+        return True
+
+    except Exception as e:
+        logger.critical(f"Falha crítica ao inicializar o banco de dados: {e}", exc_info=True)
+        self.db_connection_failed = True
+        # Sinalizar o evento mesmo em caso de falha para evitar deadlock
+        if self.ready_event and not self.ready_event.is_set():
+            self.ready_event.set()
+        # Criar instância vazia para evitar erros de NoneType
+        try:
+            self.db = Database()
+            self.db.pool = None
+        except Exception:
+            self.db = None
+        return False
+async def load_config(self, guild_id: int = None):
         """Carrega configuração de forma assíncrona com tratamento melhorado"""
         try:
             # Primeiro tentar carregar do arquivo local
@@ -531,7 +547,7 @@ class InactivityBot(commands.Bot):
             self._update_config(DEFAULT_CONFIG)
             return False
 
-    def _update_config(self, new_config: dict):
+def _update_config(self, new_config: dict):
         """Atualiza a configuração garantindo que todas as chaves necessárias existam"""
         # Garantir que todas as chaves padrão existam
         for key, value in DEFAULT_CONFIG.items():
@@ -545,7 +561,7 @@ class InactivityBot(commands.Bot):
         self.config = new_config
         logger.info("Configuração atualizada com sucesso")
 
-    async def save_config(self, guild_id: int = None):
+async def save_config(self, guild_id: int = None):
         """Salva configuração com cache (modificado)"""
         if not hasattr(self, 'config') or not self.config:
             return
@@ -574,7 +590,7 @@ class InactivityBot(commands.Bot):
         except Exception as e:
             logger.error(f"Erro ao salvar configuração: {e}")
 
-    async def setup_hook(self):
+async def setup_hook(self):
         """Configurações assíncronas antes do bot ficre pronto"""
         if self._setup_complete:
             return
@@ -602,7 +618,7 @@ class InactivityBot(commands.Bot):
             logger.critical("Falha na inicialização do banco de dados. As tarefas não serão iniciadas.")
             self.db_connection_failed = True
 
-    async def send_with_fallback(self, destination, content=None, embed=None, file=None):
+async def send_with_fallback(self, destination, content=None, embed=None, file=None):
         """Envia mensagens com tratamento de erros và fallback para rate limits."""
         max_retries = 3
         base_delay = 2.0
@@ -644,7 +660,7 @@ class InactivityBot(commands.Bot):
                     raise
                 await asyncio.sleep(base_delay * (2 ** attempt))
 
-    async def on_error(self, event, *args, **kwargs):
+async def on_error(self, event, *args, **kwargs):
         """Tratamento de erros genéricos."""
         exc_type, exc_value, exc_traceback = sys.exc_info()
         tb_details = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
@@ -659,7 +675,7 @@ class InactivityBot(commands.Bot):
         )
         await self.log_action("Erro Crítico de Evento", details=log_message)
 
-    async def check_audio_states(self):
+async def check_audio_states(self):
         await self.wait_until_ready()
         while True:
             try:
@@ -702,7 +718,7 @@ class InactivityBot(commands.Bot):
                 logger.error(f"Erro ao verificar estados de áudio: {e}")
                 await asyncio.sleep(60)
 
-    async def monitor_db_pool(self):
+async def monitor_db_pool(self):
         await self.wait_until_ready()
         while True:
             try:
@@ -730,7 +746,7 @@ class InactivityBot(commands.Bot):
                 log_with_context(f"Erro no monitoramento do pool: {e}", logging.ERROR)
                 await asyncio.sleep(60)
 
-    async def periodic_health_check(self):
+async def periodic_health_check(self):
         await self.wait_until_ready()
         while True:
             try:
@@ -766,7 +782,7 @@ class InactivityBot(commands.Bot):
                 logger.error(f"Erro no health check: {e}")
                 await asyncio.sleep(60)
 
-    async def process_queues(self):
+async def process_queues(self):
         await self.wait_until_ready()
         while True:
             try:
@@ -825,7 +841,7 @@ class InactivityBot(commands.Bot):
                     self.rate_limit_monitor.handle_cloudflare_block()
                 await asyncio.sleep(5)  # Aumentado o tempo de espera em caso de erro
 
-    async def _process_voice_batch(self, batch):
+async def _process_voice_batch(self, batch):
         processed = {}
         
         for event in batch:
@@ -852,7 +868,7 @@ class InactivityBot(commands.Bot):
             except Exception as e:
                 logger.error(f"Erro ao processar eventos para {user_data['member']}: {e}")
 
-    async def _process_user_voice_events(self, member, events):
+async def _process_user_voice_events(self, member, events):
         if not hasattr(self, 'config') or 'absence_channel' not in self.config:
             logger.error("Configuração do canal de ausência não encontrada")
             return
@@ -897,7 +913,7 @@ class InactivityBot(commands.Bot):
             except Exception as e:
                 logger.error(f"Erro ao processar evento de voz para {member}: {e}")
 
-    async def _handle_voice_join(self, member, after):
+async def _handle_voice_join(self, member, after):
         try:
             # Registrar entrada no banco de dados
             await self.db.log_voice_join(member.id, member.guild.id)
@@ -932,7 +948,7 @@ class InactivityBot(commands.Bot):
                 str(e)
             )
 
-    async def _handle_voice_leave(self, member, before):
+async def _handle_voice_leave(self, member, before):
         session_data = self.active_sessions.get((member.id, member.guild.id))
         if not session_data:
             return
@@ -983,7 +999,7 @@ class InactivityBot(commands.Bot):
             # Garantir que a sessão seja removida
             self.active_sessions.pop((member.id, member.guild.id), None)
 
-    async def _handle_voice_move(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState, absence_channel_id: int):
+async def _handle_voice_move(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState, absence_channel_id: int):
         audio_key = (member.id, member.guild.id)
         
         # Caso 1: Entrando no canal de ausência a partir de outro canal
@@ -1120,7 +1136,7 @@ class InactivityBot(commands.Bot):
             
             await self._handle_audio_change(member, before, after)
 
-    async def _handle_audio_change(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+async def _handle_audio_change(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
         audio_key = (member.id, member.guild.id)
         
         # Se não há sessão ativa e o usuário está em um canal, criar uma
@@ -1183,7 +1199,7 @@ class InactivityBot(commands.Bot):
                 
                 await self.log_action(None, None, embed=embed)
 
-    async def process_voice_events(self):
+async def process_voice_events(self):
         """Processa eventos de voz da fila"""
         await self.wait_until_ready()
         while True:
@@ -1210,7 +1226,7 @@ class InactivityBot(commands.Bot):
                 logger.error(f"Erro no processador de eventos de voz: {e}")
                 await asyncio.sleep(1)
 
-    async def log_action(self, action: str, member: Optional[discord.Member] = None, 
+async def log_action(self, action: str, member: Optional[discord.Member] = None, 
                        details: str = None, file: discord.File = None, 
                        embed: discord.Embed = None):
         """Registra uma ação no canal de logs"""
@@ -1268,7 +1284,7 @@ class InactivityBot(commands.Bot):
         except Exception as e:
             logger.error(f"Erro ao registrar ação no log: {e}")
 
-    async def notify_roles(self, message: str, is_warning: bool = False):
+async def notify_roles(self, message: str, is_warning: bool = False):
         try:
             channel_id = self.config.get('notification_channel')
             if not channel_id:
@@ -1306,7 +1322,7 @@ class InactivityBot(commands.Bot):
             logger.error(f"Erro ao enviar notificação: {e}")
             await self.log_action("Erro de Notificação", None, f"Falha ao enviar mensagem: {str(e)}")
 
-    async def notify_admins_dm(self, guild: discord.Guild, embed: discord.Embed):
+async def notify_admins_dm(self, guild: discord.Guild, embed: discord.Embed):
         """Envia uma mensagem direta a todos os membros com permissões de administrador em uma guilda."""
         if not guild:
             logger.warning("notify_admins_dm chamada sem guilda.")
@@ -1329,7 +1345,7 @@ class InactivityBot(commands.Bot):
                 # send_dm já registra a maioria dos erros, mas podemos adicionar um específico aqui.
                 logger.error(f"Falha ao enfileirar DM de notificação de administrador para {admin.display_name} na guilda {guild.name}: {e}")
 
-    async def send_dm(self, member: discord.Member, message_content: str, embed: discord.Embed):
+async def send_dm(self, member: discord.Member, message_content: str, embed: discord.Embed):
         try:
             # A prioridade para DMs de admin será alta
             priority = 'high' if embed and (embed.title.startswith("🚨") or embed.title.startswith("👢")) else 'low'
@@ -1354,7 +1370,7 @@ class InactivityBot(commands.Bot):
         except Exception as e:
             logger.error(f"Erro ao enviar DM para {member}: {e}")
 
-    async def send_warning(self, member: discord.Member, warning_type: str):
+async def send_warning(self, member: discord.Member, warning_type: str):
         try:
             warnings_config = self.config.get('warnings', {})
             messages = warnings_config.get('messages', {})
@@ -1635,29 +1651,38 @@ async def on_ready():
         logger.info(f'Bot conectado como {bot.user}')
         logger.info(f"Latência: {round(bot.latency * 1000)}ms")
 
+
         # --- ETAPA 1: INICIALIZAÇÃO CRÍTICA ---
-        # Garante que o banco de dados e a configuração estão prontos.
-        # Estas são as dependências essenciais para o painel de controle funcionar.
+        try:
+            # Garante que o banco de dados e a configuração estão prontos.
+            # Estas são as dependências essenciais para o painel de controle funcionar.
+            if not hasattr(bot, 'db') or not bot.db or not getattr(bot.db, '_is_initialized', False):
+                logger.error("Banco de dados não foi inicializado corretamente. Tentando novamente...")
+                if not await bot.initialize_db():
+                    logger.critical("Falha crítica na inicialização do banco de dados no on_ready.")
+                    # SINALIZAR EVENTO MESMO COM FALHA
+                    if bot.ready_event and not bot.ready_event.is_set():
+                        bot.ready_event.set()
+                    return
 
-        if not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
-            logger.error("Banco de dados não foi inicializado corretamente. Tentando novamente...")
-            if not await bot.initialize_db():
-                logger.critical("Falha crítica na inicialização do banco de dados no on_ready. O bot não pode continuar.")
-                # Sinaliza que o bot falhou para o painel não ficar esperando para sempre.
-                if bot.ready_event and not bot.ready_event.is_set():
-                    bot.ready_event.set() # Libera o painel, mesmo que com um bot não funcional.
-                return
+            logger.info("Carregando e validando configurações...")
+            await bot.load_config()
+            await bot.save_config()  # Garante que a configuração está sincronizada com o DB.
+            
+            if hasattr(bot, 'db') and getattr(bot.db, 'sync_task_periods', None):
+                monitoring_period = bot.config.get('monitoring_period')
+                if monitoring_period:
+                    await bot.db.sync_task_periods(monitoring_period)
 
-        logger.info("Carregando e validando configurações...")
-        await bot.load_config()
-        await bot.save_config() # Garante que a configuração está sincronizada com o DB.
+        except Exception as critical_error:
+            logger.critical(f"Erro crítico na inicialização: {critical_error}", exc_info=True)
+            # SINALIZAR EVENTO MESMO COM FALHA
+            if bot.ready_event and not bot.ready_event.is_set():
+                bot.ready_event.set()
+            return
 
-        if hasattr(bot.db, 'sync_task_periods'):
-            monitoring_period = bot.config.get('monitoring_period')
-            if monitoring_period:
-                await bot.db.sync_task_periods(monitoring_period)
-        
         logger.info("Inicialização crítica concluída.")
+
 
         # --- ETAPA 2: SINALIZAR PRONTIDÃO PARA O PAINEL WEB ---
         # O bot agora tem DB and config, então a API pode ser liberada.
