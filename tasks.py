@@ -180,7 +180,7 @@ class BatchProcessor:
         
         try:
             # 1. Verificar se o membro deve ser processado (whitelist, cargos monitorados)
-            if member.id in self.bot.config['whitelist']['users'] or \
+            if member.bot or member.id in self.bot.config['whitelist']['users'] or \
                any(role.id in self.bot.config['whitelist']['roles'] for role in member.roles):
                 return result
                     
@@ -192,54 +192,41 @@ class BatchProcessor:
             now = datetime.now(pytz.UTC)
             monitoring_period = self.bot.config['monitoring_period']
             period_duration = timedelta(days=monitoring_period)
-
-            # 2. Obter o último período verificado para estabelecer um ponto de partida
+            
+            # 2. Obter o último período verificado
             last_check = await self.bot.db.get_last_period_check(member.id, member.guild.id)
-
-            # 3. Se o membro nunca foi verificado, criar o primeiro período com base na data de atribuição do cargo
+            
+            # 3. [CORREÇÃO] Se o membro nunca foi verificado, definir o início do período como 'agora'.
             if not last_check:
-                role_assignment_times = []
-                for role in member.roles:
-                    if role.id in tracked_roles:
-                        assigned_time = await self.bot.db.get_role_assigned_time(member.id, member.guild.id, role.id)
-                        if assigned_time:
-                            if assigned_time.tzinfo is None:
-                                assigned_time = assigned_time.replace(tzinfo=pytz.UTC)
-                            role_assignment_times.append(assigned_time)
-                
-                # Usar a data de atribuição mais antiga, ou fallback para data de entrada ou agora
-                if role_assignment_times:
-                    start_date = min(role_assignment_times)
-                else:
-                    start_date = member.joined_at or now
-                    if start_date.tzinfo is None:
-                        start_date = start_date.replace(tzinfo=pytz.UTC)
-
-                # Definir e registrar o primeiro período
+                # Se for a primeira vez, o período começa agora para evitar analisar o passado incorretamente.
+                start_date = now
                 first_period_end = start_date + period_duration
                 await self.bot.db.log_period_check(member.id, member.guild.id, start_date, first_period_end, False)
                 last_check = await self.bot.db.get_last_period_check(member.id, member.guild.id)
 
-            # 4. Calcular todos os períodos completos que se passaram desde a última verificação
+            # 4. [CORREÇÃO] Calcular todos os períodos que terminaram entre a última verificação e agora.
             periods_to_check = []
             next_period_start = last_check['period_end']
             if next_period_start.tzinfo is None:
                 next_period_start = next_period_start.replace(tzinfo=pytz.UTC)
 
-            while (next_period_start + period_duration) <= now:
-                period_start = next_period_start
-                period_end = period_start + period_duration
-                periods_to_check.append((period_start, period_end))
-                next_period_start = period_end
+            # A lógica foi invertida: o período atual é o que começa em 'period_start' da última verificação.
+            period_start_current_cycle = last_check['period_start']
+            if period_start_current_cycle.tzinfo is None:
+                period_start_current_cycle = period_start_current_cycle.replace(tzinfo=pytz.UTC)
+            
+            while period_start_current_cycle + period_duration <= now:
+                period_end_cycle = period_start_current_cycle + period_duration
+                periods_to_check.append((period_start_current_cycle, period_end_cycle))
+                period_start_current_cycle = period_end_cycle
 
             # 5. Processar cada período passado em ordem cronológica
-            current_member_roles = set(member.roles)
+            current_member_roles = set(r for r in member.roles if r.id in tracked_roles)
+            if not current_member_roles:
+                return result # Sai se o membro perdeu os cargos por outros meios
+
             for period_start, period_end in periods_to_check:
                 
-                # Se o membro não tiver mais cargos monitorados, parar de processar
-                if not any(r.id in tracked_roles for r in current_member_roles):
-                    break
-
                 # Obter sessões de voz e verificar requisitos
                 sessions = await self.bot.db.get_voice_sessions(member.id, member.guild.id, period_start, period_end)
                 required_minutes = self.bot.config['required_minutes']
@@ -256,91 +243,72 @@ class BatchProcessor:
                 # Registrar o resultado da verificação para este período
                 await self.bot.db.log_period_check(member.id, member.guild.id, period_start, period_end, meets_requirements)
 
-                # Se não cumpriu os requisitos, remover os cargos relevantes
+                # Se não cumpriu os requisitos, remover os cargos e parar de verificar períodos passados
                 if not meets_requirements:
-                    roles_to_remove_this_period = []
-                    for role in list(current_member_roles):
-                        if role.id in tracked_roles:
-                            assigned_at = await self.bot.db.get_role_assigned_time(member.id, member.guild.id, role.id)
-                            if not assigned_at or (assigned_at.replace(tzinfo=pytz.UTC) < period_end):
-                                roles_to_remove_this_period.append(role)
-                    
-                    if roles_to_remove_this_period:
-                        try:
-                            await member.remove_roles(*roles_to_remove_this_period, reason=f"Inatividade no período {period_start.date()} - {period_end.date()}")
-                            current_member_roles.difference_update(roles_to_remove_this_period)
-                            result['removed'] = 1
-                            
-                            # Enviar aviso final e registrar a remoção
-                            await self.bot.send_warning(member, 'final')
-                            await self.bot.db.log_removed_roles(member.id, member.guild.id, [r.id for r in roles_to_remove_this_period])
-                            
-                            log_message = (
-                                f"Cargos removidos: {', '.join([r.name for r in roles_to_remove_this_period])}\n"
-                                f"Dias válidos: {len(valid_days)}/{required_days}\n"
-                                f"Período: {period_start.strftime('%d/%m/%Y')} a {period_end.strftime('%d/%m/%Y')}"
-                            )
-                            await self.bot.log_action("Cargo Removido", member, log_message)
-                            await self.bot.notify_roles(
-                                f"🚨 Cargos removidos de {member.mention} por inatividade: " +
-                                ", ".join([f"`{r.name}`" for r in roles_to_remove_this_period]))
-                            
-                            # Notificar administradores
-                            admin_embed = discord.Embed(
-                                title="🚨 Cargos Removidos por Inatividade",
-                                description=f"Os cargos de {member.mention} foram removidos por inatividade.",
-                                color=discord.Color.dark_red(),
-                                timestamp=datetime.now(pytz.utc)
-                            )
-                            admin_embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
-                            admin_embed.add_field(name="Cargos Removidos", value=", ".join([r.mention for r in roles_to_remove_this_period]), inline=False)
-                            await self.bot.notify_admins_dm(member.guild, embed=admin_embed)
+                    try:
+                        await member.remove_roles(*current_member_roles, reason=f"Inatividade no período {period_start.date()} - {period_end.date()}")
+                        result['removed'] = 1
+                        
+                        await self.bot.send_warning(member, 'final')
+                        await self.bot.db.log_removed_roles(member.id, member.guild.id, [r.id for r in current_member_roles])
+                        
+                        log_message = (
+                            f"Cargos removidos: {', '.join([r.name for r in current_member_roles])}\n"
+                            f"Dias válidos: {len(valid_days)}/{required_days}\n"
+                            f"Período: {period_start.strftime('%d/%m/%Y')} a {period_end.strftime('%d/%m/%Y')}"
+                        )
+                        await self.bot.log_action("Cargo Removido", member, log_message)
+                        await self.bot.notify_roles(
+                            f"🚨 Cargos removidos de {member.mention} por inatividade: " +
+                            ", ".join([f"`{r.name}`" for r in current_member_roles]))
+                        
+                        admin_embed = discord.Embed(
+                            title="🚨 Cargos Removidos por Inatividade",
+                            description=f"Os cargos de {member.mention} foram removidos por inatividade.",
+                            color=discord.Color.dark_red(), timestamp=now)
+                        admin_embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
+                        admin_embed.add_field(name="Cargos Removidos", value=", ".join([r.mention for r in current_member_roles]), inline=False)
+                        await self.bot.notify_admins_dm(member.guild, embed=admin_embed)
+                        
+                        # Como os cargos foram removidos, não há mais o que verificar para este membro.
+                        return result 
 
-                        except discord.Forbidden as e:
-                            logger.error(f"Permissões insuficientes para remover cargos de {member}: {e}")
-                        except Exception as e:
-                            logger.error(f"Erro ao remover cargos de {member}: {e}")
+                    except discord.Forbidden as e:
+                        logger.error(f"Permissões insuficientes para remover cargos de {member}: {e}")
+                        return result
+                    except Exception as e:
+                        logger.error(f"Erro ao remover cargos de {member}: {e}")
+                        return result
             
-            # 6. Definir o próximo período de verificação futuro se o membro ainda tiver cargos monitorados
-            if any(r.id in tracked_roles for r in current_member_roles):
-                new_period_end = next_period_start + period_duration
-                await self.bot.db.log_period_check(member.id, member.guild.id, next_period_start, new_period_end, False)
+            # 6. Se o membro passou por todas as verificações, definir o próximo período e checar avisos
+            new_period_start = period_start_current_cycle
+            new_period_end = new_period_start + period_duration
+            await self.bot.db.log_period_check(member.id, member.guild.id, new_period_start, new_period_end, False)
 
-            # 7. AVISOS: Verificar o período ATUAL para enviar avisos
+            # 7. AVISOS: Verificar o período ATUAL (futuro) para enviar avisos
             warnings_config = self.bot.config.get('warnings', {})
             first_warning_days = warnings_config.get('first_warning', 7)
             second_warning_days = warnings_config.get('second_warning', 1)
 
-            # Se o membro ainda tiver cargos monitorados, verifique os avisos.
-            if any(r.id in tracked_roles for r in current_member_roles):
-                current_period = await self.bot.db.get_last_period_check(member.id, member.guild.id)
+            if new_period_end > now:
+                days_remaining = (new_period_end - now).days
                 
-                if current_period and current_period['period_end']:
-                    period_end = current_period['period_end']
-                    if period_end.tzinfo is None:
-                        period_end = period_end.replace(tzinfo=pytz.UTC)
-
-                    # Apenas processar se o período ainda não terminou
-                    if period_end > now:
-                        days_remaining = (period_end - now).days
-                        
-                        warnings_in_period = await self.bot.db.get_warnings_in_period(
-                            member.id, member.guild.id, current_period['period_start']
-                        )
-                        
-                        # Lógica de aviso
-                        if (days_remaining <= first_warning_days and 
-                            days_remaining > second_warning_days and
-                            'first' not in warnings_in_period):
-                            await self.bot.send_warning(member, 'first')
-                            result['warnings']['first'] += 1
-                        
-                        elif (days_remaining <= second_warning_days and 
-                              days_remaining >= 0 and
-                              'first' in warnings_in_period and 
-                              'second' not in warnings_in_period):
-                            await self.bot.send_warning(member, 'second')
-                            result['warnings']['second'] += 1
+                warnings_in_period = await self.bot.db.get_warnings_in_period(
+                    member.id, member.guild.id, new_period_start
+                )
+                
+                if (days_remaining <= first_warning_days and 
+                    days_remaining > second_warning_days and
+                    'first' not in warnings_in_period):
+                    await self.bot.send_warning(member, 'first')
+                    result['warnings']['first'] += 1
+                
+                elif (days_remaining <= second_warning_days and 
+                      days_remaining >= 0 and
+                      'second' not in warnings_in_period):
+                    # O segundo aviso pode ser enviado mesmo sem o primeiro (caso o bot tenha ficado offline)
+                    await self.bot.send_warning(member, 'second')
+                    result['warnings']['second'] += 1
 
         except Exception as e:
             logger.error(f"Erro ao verificar inatividade para {member}: {e}", exc_info=True)
@@ -778,14 +746,16 @@ async def _inactivity_check():
     
     for guild in bot.guilds:
         try:
-            # Obter todos os membros com cargos monitorados
-            members_with_roles = []
-            for member in guild.members:
-                if any(role.id in tracked_roles for role in member.roles):
-                    members_with_roles.append(member)
-            
+            # [OTIMIZAÇÃO] Obter de forma eficiente apenas os membros com cargos monitorados
+            members_with_roles = set()
+            for role_id in tracked_roles:
+                role = guild.get_role(role_id)
+                if role:
+                    # Adiciona os membros do cargo ao conjunto para evitar duplicatas
+                    members_with_roles.update(role.members) 
+
             # Priorizar membros para processamento
-            prioritized_members = prioritize_members(members_with_roles)
+            prioritized_members = prioritize_members(list(members_with_roles))
             processor = BatchProcessor(bot)
             
             # Processar em lotes otimizados
