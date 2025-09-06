@@ -15,7 +15,6 @@ from discord.ext import tasks
 import random
 from collections import defaultdict
 from collections import deque
-from flask import Flask
 import sys
 import traceback
 from io import BytesIO
@@ -356,9 +355,6 @@ class InactivityBot(commands.Bot):
         self.event_counter = 0
         self.last_reconnect_time = None
 
-        # NOVO: Inicializa o atributo que receberá o evento
-        self.ready_event = None
-
     def generate_event_id(self):
         """Gera um ID único para cada evento"""
         self.event_counter += 1
@@ -443,9 +439,6 @@ class InactivityBot(commands.Bot):
 
             if not success:
                 logger.critical("Falha na inicialização do banco de dados")
-                # Sinalizar o evento mesmo em caso de falha para evitar deadlock
-                if self.ready_event and not self.ready_event.is_set():
-                    self.ready_event.set()
                 return False
 
             logger.info("Conexão com o banco de dados (via asyncpg) estabelecida com sucesso.")
@@ -462,9 +455,6 @@ class InactivityBot(commands.Bot):
             except Exception as e:
                 logger.error(f"Falha ao verificar conexão com o banco: {e}")
                 self.db_connection_failed = True
-                # Sinalizar o evento mesmo em caso de falha para evitar deadlock
-                if self.ready_event and not self.ready_event.is_set():
-                    self.ready_event.set()
                 return False
 
             self._is_initialized = True
@@ -477,9 +467,6 @@ class InactivityBot(commands.Bot):
         except Exception as e:
             logger.critical(f"Falha crítica ao inicializar o banco de dados: {e}", exc_info=True)
             self.db_connection_failed = True
-            # Sinalizar o evento mesmo em caso de falha para evitar deadlock
-            if self.ready_event and not self.ready_event.is_set():
-                self.ready_event.set()
             # Criar instância vazia para evitar erros de NoneType
             try:
                 self.db = Database()
@@ -1555,6 +1542,12 @@ async def on_member_update(before: discord.Member, after: discord.Member):
 
                     if time_since_removal <= timedelta(days=30):
                         await send_forgiveness_message(after, role)
+                        # <<< INÍCIO DA CORREÇÃO >>>
+                        # Reseta o histórico de avisos e períodos do usuário para um novo começo.
+                        if hasattr(bot, 'db') and bot.db:
+                            await bot.db.reset_user_tracking(after.id, after.guild.id)
+                            logger.info(f"Acompanhamento de inatividade resetado para {after.display_name} após devolução de cargo.")
+                        # <<< FIM DA CORREÇÃO >>>
                         # Não enviar múltiplas mensagens se vários cargos forem devolvidos ao mesmo tempo
                         break
 
@@ -1657,14 +1650,10 @@ async def on_ready():
         # --- ETAPA 1: INICIALIZAÇÃO CRÍTICA ---
         try:
             # Garante que o banco de dados e a configuração estão prontos.
-            # Estas são as dependências essenciais para o painel de controle funcionar.
             if not hasattr(bot, 'db') or not bot.db or not getattr(bot.db, '_is_initialized', False):
                 logger.error("Banco de dados não foi inicializado corretamente. Tentando novamente...")
                 if not await bot.initialize_db():
                     logger.critical("Falha crítica na inicialização do banco de dados no on_ready.")
-                    # SINALIZAR EVENTO MESMO COM FALHA
-                    if bot.ready_event and not bot.ready_event.is_set():
-                        bot.ready_event.set()
                     return
 
             logger.info("Carregando e validando configurações...")
@@ -1678,21 +1667,11 @@ async def on_ready():
 
         except Exception as critical_error:
             logger.critical(f"Erro crítico na inicialização: {critical_error}", exc_info=True)
-            # SINALIZAR EVENTO MESMO COM FALHA
-            if bot.ready_event and not bot.ready_event.is_set():
-                bot.ready_event.set()
             return
 
         logger.info("Inicialização crítica concluída.")
 
-
-        # --- ETAPA 2: SINALIZAR PRONTIDÃO PARA O PAINEL WEB ---
-        # O bot agora tem DB and config, então a API pode ser liberada.
-        if bot.ready_event and not bot.ready_event.is_set():
-            bot.ready_event.set()
-            logger.info("SINAL DE PRONTO ENVIADO! O painel de controle agora está operacional.")
-
-        # --- ETAPA 3: INICIAR TAREFAS DE FUNDO E PROCESSOS NÃO CRÍTICOS ---
+        # --- ETAPA 2: INICIAR TAREFAS DE FUNDO E PROCESSOS NÃO CRÍTICOS ---
         # Estas tarefas podem levar tempo e rodarão em segundo plano.
 
         if not bot._tasks_started:
@@ -1759,9 +1738,6 @@ async def on_ready():
 
     except Exception as e:
         logger.critical(f"Erro crítico irrecuperável no on_ready: {e}", exc_info=True)
-        # Se algo crítico falhar, sinalize o evento mesmo assim para que o painel não trave
-        if bot.ready_event and not bot.ready_event.is_set():
-            bot.ready_event.set()
         await bot.close()
 
 @bot.event

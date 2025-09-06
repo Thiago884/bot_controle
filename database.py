@@ -1581,3 +1581,27 @@ class Database:
         finally:
             if conn:
                 await self.pool.release(conn)
+
+    async def reset_user_tracking(self, user_id: int, guild_id: int):
+        """Reseta os períodos de verificação e avisos de um usuário, dando-lhe um novo começo."""
+        conn = None
+        try:
+            conn = await self.acquire_connection()
+            async with conn.transaction():
+                # Deleta os períodos de verificação antigos
+                await conn.execute(
+                    "DELETE FROM checked_periods WHERE user_id = $1 AND guild_id = $2",
+                    user_id, guild_id
+                )
+                # Deleta os avisos antigos
+                await conn.execute(
+                    "DELETE FROM user_warnings WHERE user_id = $1 AND guild_id = $2",
+                    user_id, guild_id
+                )
+            logger.info(f"Acompanhamento de inatividade resetado para o usuário {user_id} na guilda {guild_id}.")
+        except Exception as e:
+            logger.error(f"Erro ao resetar o acompanhamento para o usuário {user_id}: {e}", exc_info=True)
+            raise
+        finally:
+            if conn:
+                await self.pool.release(conn)
