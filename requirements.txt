@@ -9,3 +9,4 @@ python-dateutil>=2.8.2
 tzlocal>=4.3
 nest-asyncio>=1.5.8
 pycares>=3.0.0
+Flask>=3.0.0  # <== ADICIONE ESTA LINHA

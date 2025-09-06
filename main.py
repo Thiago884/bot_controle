@@ -18,6 +18,9 @@ from collections import deque
 import sys
 import traceback
 from io import BytesIO
+# Adições para o servidor web
+from flask import Flask
+from threading import Thread
 
 # Importe sua classe Database
 from database import Database
@@ -1765,6 +1768,26 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
     except Exception as e:
         logger.error(f"Erro ao enfileirar evento de voz: {e}")
 
+# --- CÓDIGO DO SERVIDOR WEB PARA UPTIMEROBOT ---
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    # Retorna uma resposta simples para o UptimeRobot
+    return "Bot de Controle de Atividade está online."
+
+def run():
+    # O Render define a porta através da variável de ambiente PORT
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
+
+def start_web_server():
+    # Inicia o servidor Flask em um thread separado
+    t = Thread(target=run)
+    t.daemon = True
+    t.start()
+# --- FIM DO CÓDIGO DO SERVIDOR WEB ---
+
 # Importar comandos
 from bot_commands import *
 
@@ -1791,6 +1814,9 @@ async def main():
     except Exception as e:
         logger.critical(f"Falha crítica ao inicializar o banco de dados: {e}")
         return
+
+    # Inicia o servidor web ANTES de iniciar o bot
+    start_web_server()
         
     async with bot:
         try:
