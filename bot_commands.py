@@ -879,8 +879,8 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
                 )
                 
                 # --- INÍCIO DA CORREÇÃO ---
-                # Seção de status atual (lógica corrigida)
-                
+                # Seção de status atual (lógica de cálculo de período corrigida)
+
                 last_check = await conn.fetchrow(
                     "SELECT * FROM checked_periods WHERE user_id = $1 AND guild_id = $2 ORDER BY period_end DESC LIMIT 1",
                     member.id, member.guild.id
@@ -890,20 +890,24 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
                 period_start = None
                 period_end = None
 
-                # Validar o período obtido do banco de dados.
-                # Se o período for inválido (ex: futuro) ou não existir, calculamos o período atual com base nas configs.
-                if last_check and last_check['period_start'].replace(tzinfo=pytz.utc) <= now:
-                    # O período encontrado é válido e atual, usamos ele
-                    period_start = last_check['period_start'].replace(tzinfo=pytz.utc)
-                    period_end = last_check['period_end'].replace(tzinfo=pytz.utc)
+                # Lógica robusta para determinar o período de análise ATUAL.
+                if last_check:
+                    last_period_end = last_check['period_end'].replace(tzinfo=pytz.utc)
+                    # Se a data atual for anterior ao fim do último período, estamos nele.
+                    if now < last_period_end:
+                        period_start = last_check['period_start'].replace(tzinfo=pytz.utc)
+                        period_end = last_period_end
+                    # Se o último período já acabou, o período atual é o ciclo seguinte.
+                    else:
+                        period_start = last_period_end
+                        period_end = period_start + timedelta(days=monitoring_period)
                 else:
-                    # O período é inválido (futuro) ou não existe. Calculamos o período atual.
-                    # O período atual de análise são os últimos 'monitoring_period' dias a partir de agora.
-                    # Isso é uma representação teórica, pois a task pode não ter rodado ainda.
+                    # Se o usuário nunca foi verificado, o período atual é uma janela retroativa
+                    # para fins de exibição, alinhado ao que a task de verificação faria.
                     period_end = now
                     period_start = now - timedelta(days=monitoring_period)
 
-                # Calcular dias válidos para o período ATUAL (seja do DB ou recalculado)
+                # Calcular dias válidos para o período ATUAL determinado acima
                 valid_days_current_period = set()
                 current_period_sessions = await conn.fetch(
                     "SELECT join_time, duration FROM voice_sessions WHERE user_id = $1 AND guild_id = $2 AND join_time >= $3 AND leave_time <= $4",
@@ -913,12 +917,11 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
                     if session['duration'] >= required_min * 60:
                         day = session['join_time'].replace(tzinfo=pytz.utc).date()
                         valid_days_current_period.add(day)
-                
-                # O status é sempre baseado neste cálculo em tempo real para garantir precisão
+
                 is_complying = len(valid_days_current_period) >= required_days
                 status_emoji = "✅" if is_complying else "⚠️"
                 status_text = "Cumprindo" if is_complying else "Não cumprindo"
-                
+
                 days_remaining = (period_end - now).days if period_end > now else 0
 
                 embed.add_field(
@@ -926,13 +929,12 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
                     value=(
                         f"{status_emoji} **{status_text}** os requisitos\n"
                         f"**Período:** {period_start.strftime('%d/%m/%Y')} a {period_end.strftime('%d/%m/%Y')}\n"
-                        f"**Dias Restantes:** {days_remaining if days_remaining >= 0 else 'N/A'}"
+                        f"**Dias Restantes:** {days_remaining if days_remaining >= 0 else 'Finalizado'}"
                     ),
                     inline=True
                 )
 
-                # A lógica da barra de progresso agora usa os `valid_days` que acabamos de calcular,
-                # garantindo consistência com o status.
+                # A barra de progresso agora usa os dados do período correto
                 progress = min(1.0, len(valid_days_current_period) / required_days)
                 progress_bar = "[" + "█" * int(progress * 10) + " " * (10 - int(progress * 10)) + "]"
                 progress_text = f"{progress*100:.0f}% ({len(valid_days_current_period)}/{required_days} dias)"
@@ -942,7 +944,6 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
                     value=f"{progress_bar}\n{progress_text}",
                     inline=False
                 )
-                
                 # --- FIM DA CORREÇÃO ---
 
                 # Seção de avisos
@@ -1491,11 +1492,13 @@ class ConfirmRestoreView(discord.ui.View):
         self.stop()
 
     @discord.ui.button(label="Confirmar Devolução", style=discord.ButtonStyle.green, custom_id="confirm_restore")
+    
     async def confirm_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(thinking=True, ephemeral=True)
         restored_count = 0
         error_count = 0
         log_lines = []
+        forgiveness_messages_sent = 0  # <-- Contador adicionado
 
         # iterate over a copy to avoid mutation issues
         for member, roles in list(self.roles_to_restore.items()):
@@ -1512,8 +1515,9 @@ class ConfirmRestoreView(discord.ui.View):
                 for role in roles:
                     try:
                         await send_forgiveness_message(member, role)
+                        forgiveness_messages_sent += 1  # <-- Contador incrementado
                     except Exception as e:
-                        logger.debug(f"Falha ao enviar mensagem de perdão para {member}: {e}")
+                        logger.warning(f"Falha ao enviar mensagem de perdão para {member}: {e}", exc_info=True) # <-- Log melhorado
 
                 # Try to log to DB (best-effort)
                 try:
@@ -1552,15 +1556,20 @@ class ConfirmRestoreView(discord.ui.View):
 
         # Log the action to bot logs (best-effort)
         try:
+            # <-- Log final melhorado para incluir o contador
             await bot.log_action(
                 "Reversão de Remoção de Cargos",
                 interaction.user,
-                f"Executou /devolver_cargos para as últimas {self.periodo_horas} horas. Cargos devolvidos: {restored_count}. Falhas: {error_count}"
+                f"Executou /devolver_cargos para as últimas {self.periodo_horas} horas. "
+                f"Cargos devolvidos: {restored_count}. "
+                f"Mensagens de perdão enviadas: {forgiveness_messages_sent}. "
+                f"Falhas: {error_count}"
             )
         except Exception as e:
             logger.debug(f"Falha ao logar ação: {e}")
 
         await self.disable_buttons()
+
 
     @discord.ui.button(label="Cancelar", style=discord.ButtonStyle.red, custom_id="cancel_restore")
     async def cancel_callback(self, interaction: discord.Interaction, button: discord.ui.Button):

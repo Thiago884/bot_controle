@@ -1517,8 +1517,18 @@ async def on_member_update(before: discord.Member, after: discord.Member):
     added_roles = [role for role in after.roles if role not in before.roles and role.id in tracked_roles]
 
     if added_roles:
+        # <<< INÍCIO DA CORREÇÃO >>>
+        # Sempre que um cargo monitorado é adicionado, o histórico do usuário é resetado.
+        # Isso cria um "novo começo" e previne que o bot remova o cargo imediatamente
+        # com base em um período de inatividade anterior onde o usuário não possuía o cargo.
+        if hasattr(bot, 'db') and bot.db:
+            await bot.db.reset_user_tracking(after.id, after.guild.id)
+            logger.info(f"Acompanhamento de inatividade resetado para {after.display_name} após receber um cargo monitorado.")
+        # <<< FIM DA CORREÇÃO >>>
+
         try:
-            # Verificar se algum desses cargos foi previamente removido por inatividade
+            # A lógica original para enviar a mensagem de perdão foi mantida,
+            # mas o reset agora acontece de forma incondicional.
             for role in added_roles:
                 try:
                     last_removal = None
@@ -1530,7 +1540,6 @@ async def on_member_update(before: discord.Member, after: discord.Member):
 
                 if last_removal and last_removal.get('removal_date'):
                     removal_date = last_removal['removal_date']
-                    # Caso a data venha como string, tentar parsear; caso contrário assume-se datetime
                     try:
                         if isinstance(removal_date, str):
                             from dateutil import parser
@@ -1545,13 +1554,6 @@ async def on_member_update(before: discord.Member, after: discord.Member):
 
                     if time_since_removal <= timedelta(days=30):
                         await send_forgiveness_message(after, role)
-                        # <<< INÍCIO DA CORREÇÃO >>>
-                        # Reseta o histórico de avisos e períodos do usuário para um novo começo.
-                        if hasattr(bot, 'db') and bot.db:
-                            await bot.db.reset_user_tracking(after.id, after.guild.id)
-                            logger.info(f"Acompanhamento de inatividade resetado para {after.display_name} após devolução de cargo.")
-                        # <<< FIM DA CORREÇÃO >>>
-                        # Não enviar múltiplas mensagens se vários cargos forem devolvidos ao mesmo tempo
                         break
 
             # Registrar a atribuição de cada cargo novo
