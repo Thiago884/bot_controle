@@ -260,18 +260,16 @@ class SmartPriorityQueue:
 
 class InactivityBot(commands.Bot):
     def __init__(self, *args, **kwargs):
-        # --- INÍCIO DA CORREÇÃO ---
-        # Configuração do cache de membros otimizada para reduzir o uso de RAM.
-        # Em vez de carregar todos os membros (`discord.MemberCacheFlags.all()`),
-        # esta abordagem armazena em cache apenas os membros que interagem ou estão em canais de voz.
+        # Configuração do cache de membros otimizada para reduzir o uso de RAM,
+        # mas garantindo que o `members intent` seja totalmente aproveitado.
+        # A flag `chunk_guilds_at_startup` já existente é crucial e será mantida.
         member_cache_flags = discord.MemberCacheFlags.from_intents(kwargs.get('intents'))
         member_cache_flags.voice = True  # Garante que estados de voz sejam sempre cacheados.
         member_cache_flags.joined = True # Garante que a data de entrada seja sempre cacheada.
-        # --- FIM DA CORREÇÃO ---
         
         kwargs.update({
             'max_messages': 100,
-            'chunk_guilds_at_startup': True,
+            'chunk_guilds_at_startup': True, # Esta linha é VITAL para popular o cache na inicialização.
             'member_cache_flags': member_cache_flags, # Utiliza a flag otimizada
             'enable_debug_events': False,
             'heartbeat_timeout': 120.0,
@@ -430,7 +428,6 @@ class InactivityBot(commands.Bot):
                     logger.critical("Máximo de tentativas de conexão atingido devido a erro inesperado. Desistindo.", exc_info=True)
                     raise
 
-    # --- INÍCIO DA CORREÇÃO: Funções movidas para dentro da classe ---
     async def initialize_db(self):
         """Inicializa a conexão com o banco de dados usando a classe Database."""
         if self._is_initialized:
@@ -608,7 +605,6 @@ class InactivityBot(commands.Bot):
         else:
             logger.critical("Falha na inicialização do banco de dados. As tarefas não serão iniciadas.")
             self.db_connection_failed = True
-    # --- FIM DA CORREÇÃO ---
     
     async def send_with_fallback(self, destination, content=None, embed=None, file=None):
         """Envia mensagens com tratamento de erros e fallback para rate limits."""
@@ -1517,14 +1513,12 @@ async def on_member_update(before: discord.Member, after: discord.Member):
     added_roles = [role for role in after.roles if role not in before.roles and role.id in tracked_roles]
 
     if added_roles:
-        # <<< INÍCIO DA CORREÇÃO >>>
         # Sempre que um cargo monitorado é adicionado, o histórico do usuário é resetado.
         # Isso cria um "novo começo" e previne que o bot remova o cargo imediatamente
         # com base em um período de inatividade anterior onde o usuário não possuía o cargo.
         if hasattr(bot, 'db') and bot.db:
             await bot.db.reset_user_tracking(after.id, after.guild.id)
             logger.info(f"Acompanhamento de inatividade resetado para {after.display_name} após receber um cargo monitorado.")
-        # <<< FIM DA CORREÇÃO >>>
 
         try:
             # A lógica original para enviar a mensagem de perdão foi mantida,

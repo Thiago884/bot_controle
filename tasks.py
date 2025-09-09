@@ -196,22 +196,21 @@ class BatchProcessor:
             # 2. Obter o último período verificado
             last_check = await self.bot.db.get_last_period_check(member.id, member.guild.id)
             
-            # 3. [CORREÇÃO] Se o membro nunca foi verificado, definir o início do período como 'agora'.
+            # 3. Se o membro nunca foi verificado, definir o início do período como 'agora'.
             if not last_check:
-                # Se for a primeira vez, o período começa agora para evitar analisar o passado incorretamente.
-                start_date = now
-                first_period_end = start_date + period_duration
-                await self.bot.db.log_period_check(member.id, member.guild.id, start_date, first_period_end, False)
+                # Se for a primeira vez, o período de análise é o que termina AGORA.
+                period_end = now
+                period_start = now - period_duration
+                await self.bot.db.log_period_check(member.id, member.guild.id, period_start, period_end, False)
                 last_check = await self.bot.db.get_last_period_check(member.id, member.guild.id)
 
-            # 4. [CORREÇÃO] Calcular todos os períodos que terminaram entre a última verificação e agora.
+            # 4. Calcular todos os períodos que terminaram desde o início da última verificação até agora.
             periods_to_check = []
-            next_period_start = last_check['period_end']
-            if next_period_start.tzinfo is None:
-                next_period_start = next_period_start.replace(tzinfo=pytz.UTC)
-
-            # A lógica foi invertida: o período atual é o que começa em 'period_start' da última verificação.
+            
+            # Começamos a verificação a partir do INÍCIO do último período registrado.
+            # Isso garante que o período recém-criado para um novo usuário seja verificado imediatamente.
             period_start_current_cycle = last_check['period_start']
+            
             if period_start_current_cycle.tzinfo is None:
                 period_start_current_cycle = period_start_current_cycle.replace(tzinfo=pytz.UTC)
             
@@ -283,7 +282,10 @@ class BatchProcessor:
             # 6. Se o membro passou por todas as verificações, definir o próximo período e checar avisos
             new_period_start = period_start_current_cycle
             new_period_end = new_period_start + period_duration
-            await self.bot.db.log_period_check(member.id, member.guild.id, new_period_start, new_period_end, False)
+            
+            # Verifica se o período que estamos prestes a registrar é de fato um novo período
+            if not periods_to_check or new_period_start > periods_to_check[-1][0]:
+                await self.bot.db.log_period_check(member.id, member.guild.id, new_period_start, new_period_end, False)
 
             # 7. AVISOS: Verificar o período ATUAL (futuro) para enviar avisos
             warnings_config = self.bot.config.get('warnings', {})
@@ -734,9 +736,9 @@ async def _inactivity_check():
     logger.debug(f"Configuração atual: {bot.config}")
     logger.debug(f"Monitoring period: {bot.config.get('monitoring_period')}")
     
-    tracked_roles = bot.config['tracked_roles']
+    tracked_roles_ids = set(bot.config['tracked_roles'])
     
-    if not tracked_roles:
+    if not tracked_roles_ids:
         logger.info("Nenhum cargo monitorado definido - verificação de inatividade ignorada")
         return
     
@@ -746,16 +748,16 @@ async def _inactivity_check():
     
     for guild in bot.guilds:
         try:
-            # [OTIMIZAÇÃO] Obter de forma eficiente apenas os membros com cargos monitorados
-            members_with_roles = set()
-            for role_id in tracked_roles:
-                role = guild.get_role(role_id)
-                if role:
-                    # Adiciona os membros do cargo ao conjunto para evitar duplicatas
-                    members_with_roles.update(role.members) 
+            # Em vez de depender de `role.members` (que usa o cache), iteramos por
+            # todos os membros do servidor e verificamos se eles possuem algum dos cargos monitorados.
+            # Isso é mais confiável, especialmente com o `members intent` ativado.
+            members_to_check = [
+                member for member in guild.members
+                if not member.bot and any(role.id in tracked_roles_ids for role in member.roles)
+            ]
 
             # Priorizar membros para processamento
-            prioritized_members = prioritize_members(list(members_with_roles))
+            prioritized_members = prioritize_members(members_to_check)
             processor = BatchProcessor(bot)
             
             # Processar em lotes otimizados
