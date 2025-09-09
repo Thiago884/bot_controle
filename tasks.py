@@ -351,33 +351,6 @@ def prioritize_members(members: list[discord.Member]) -> list[discord.Member]:
         reverse=False
     )
 
-async def get_time_without_roles(member: discord.Member) -> Optional[timedelta]:
-    """Obtém há quanto tempo o membro está sem cargos (exceto @everyone)"""
-    try:
-        # Se o membro tem mais que o cargo @everyone (len=1)
-        if len(member.roles) > 1:
-            return None
-            
-        # Obter a data em que o membro perdeu todos os cargos (exceto @everyone)
-        last_role_removal = await bot.db.get_last_role_removal(member.id, member.guild.id)
-        
-        # CORREÇÃO: Verificar se last_role_removal e a data existem
-        if last_role_removal and last_role_removal.get('removal_date'):
-            removal_date = last_role_removal['removal_date']
-            if removal_date.tzinfo is None:
-                removal_date = removal_date.replace(tzinfo=pytz.UTC)
-            return datetime.now(pytz.UTC) - removal_date
-            
-        # Se não há registro de remoção de cargos, usar a data de entrada no servidor
-        if member.joined_at:
-            joined_at = member.joined_at.replace(tzinfo=pytz.UTC) if member.joined_at.tzinfo is None else member.joined_at
-            return datetime.now(pytz.UTC) - joined_at
-            
-        return None
-    except Exception as e:
-        logger.error(f"Erro ao verificar tempo sem cargos para {member}: {e}", exc_info=True) # Adicionado exc_info
-        return None
-
 async def voice_event_processor():
     """Processa eventos de voz da fila principal"""
     await bot.wait_until_ready()
@@ -838,87 +811,123 @@ async def cleanup_members(force_check: bool = False):
     ), name='cleanup_members_wrapper')
     return task
 
-async def process_member_cleanup(member: discord.Member, guild: discord.Guild, 
-                               kick_after_days: int):
-    """Process cleanup for a single member and returns whether member was kicked"""
+async def process_member_cleanup(member: discord.Member, guild: discord.Guild, kick_after_days: int) -> bool:
+    """
+    Verifica se um membro deve ser expulso por estar sem cargos por um período configurado.
+    A contagem começa na primeira vez que o bot detecta o membro sem cargos.
+    Retorna True se o membro foi expulso, False caso contrário.
+    """
     try:
-        # Verificar whitelist (usuários isentos)
-        if member.id in bot.config['whitelist']['users']:
+        # Pular bots e usuários na whitelist
+        if member.bot or member.id in bot.config['whitelist']['users']:
             return False
+
+        # ID especial usado como marcador na tabela 'removed_roles'
+        NO_ROLES_MARKER_ROLE_ID = 0
+
+        # --- LÓGICA PARA MEMBROS QUE POSSUEM CARGOS ---
+        if len(member.roles) > 1:
+            # O membro tem cargos. Se havia um marcador de "sem cargos" para ele, removemos.
+            try:
+                # Não é necessário verificar se existe, o DELETE simplesmente não fará nada se não encontrar.
+                await bot.db.pool.execute(
+                    "DELETE FROM removed_roles WHERE user_id = $1 AND guild_id = $2 AND role_id = $3",
+                    member.id, guild.id, NO_ROLES_MARKER_ROLE_ID
+                )
+            except Exception as e:
+                logger.error(f"Falha ao tentar limpar o marcador 'sem cargos' para {member.display_name}: {e}")
+            return False  # O membro tem cargos, então não fazemos mais nada.
+
+        # --- LÓGICA PARA MEMBROS SEM CARGOS (exceto @everyone) ---
+        
+        # Verificar se já existe um marcador de "sem cargos" para este membro
+        first_seen_record = await bot.db.pool.fetchrow(
+            "SELECT removal_date FROM removed_roles WHERE user_id = $1 AND guild_id = $2 AND role_id = $3",
+            member.id, guild.id, NO_ROLES_MARKER_ROLE_ID
+        )
+
+        if first_seen_record:
+            # Já vimos este membro sem cargos antes. Verificar há quanto tempo.
+            first_seen_date = first_seen_record['removal_date']
+            if first_seen_date.tzinfo is None:
+                first_seen_date = first_seen_date.replace(tzinfo=pytz.UTC)
             
-        # Verificar se tem apenas @everyone (len=1) ou nenhum cargo (len=0)
-        if len(member.roles) <= 1:  
-            # Obter há quanto tempo está sem cargos
-            time_without_roles = await get_time_without_roles(member)
-            
-            if not time_without_roles:
-                return False
-                
-            # Verificar se o membro ainda está no servidor
-            if member not in guild.members:
-                return False
-                
-            # Verificar se já foi expulso recentemente
-            last_kick = await bot.db.get_last_kick(member.id, guild.id)
-            if last_kick and last_kick.get('kick_date') and (datetime.now(pytz.UTC) - last_kick['kick_date']).days < kick_after_days:
-                return False
-                
-            # 🔴 **LÓGICA PRINCIPAL**: Expulsar se passou mais tempo que kick_after_days sem cargos
+            time_without_roles = datetime.now(pytz.UTC) - first_seen_date
+
+            # Se o tempo sem cargos atingiu o limite configurado, iniciar o processo de expulsão.
             if time_without_roles >= timedelta(days=kick_after_days):
                 try:
-                    # Verificar permissões antes de tentar expulsar
+                    # Verificar se o bot tem permissão para expulsar
                     if not guild.me.guild_permissions.kick_members:
-                        await bot.log_action("Erro ao Expulsar", member, "Bot não tem permissão para expulsar membros")
+                        await bot.log_action("Erro ao Expulsar", member, "O bot não tem permissão para expulsar membros.")
                         return False
                         
+                    # Verificar hierarquia de cargos
                     if guild.me.top_role <= member.top_role:
-                        await bot.log_action("Erro ao Expulsar", member, "Hierarquia de cargos impede a expulsão")
+                        await bot.log_action("Erro ao Expulsar", member, "A hierarquia de cargos impede a expulsão.")
                         return False
 
-                    await member.kick(reason=f"Sem cargos há mais de {kick_after_days} dias")
+                    await member.kick(reason=f"Sem cargos por mais de {kick_after_days} dias.")
                     
                     # Notificar administradores por DM
                     admin_embed = discord.Embed(
                         title="👢 Membro Expulso por Inatividade",
                         description=f"{member.mention} foi expulso do servidor.",
-                        color=discord.Color.from_rgb(156, 39, 176), # Roxo
+                        color=discord.Color.from_rgb(156, 39, 176),
                         timestamp=datetime.now(pytz.utc)
                     )
                     admin_embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
                     admin_embed.add_field(name="Usuário", value=f"{member.mention} (`{member.id}`)", inline=False)
-                    admin_embed.add_field(name="Motivo", value=f"Sem cargos monitorados por mais de {kick_after_days} dias.", inline=False)
+                    admin_embed.add_field(name="Motivo", value=f"Sem cargos por mais de {kick_after_days} dias.", inline=False)
                     admin_embed.set_footer(text=f"Servidor: {guild.name}")
-                    
                     await bot.notify_admins_dm(guild, embed=admin_embed)
 
-                    # Registrar no banco de dados
-                    await bot.db.log_kicked_member(
-                        member.id, guild.id, 
-                        f"Sem cargos há mais de {kick_after_days} dias"
+                    # Registrar a expulsão no banco de dados
+                    await bot.db.log_kicked_member(member.id, guild.id, f"Sem cargos por mais de {kick_after_days} dias")
+                    
+                    # Logar a ação no canal de logs
+                    await bot.log_action("Membro Expulso", member, f"Motivo: Sem cargos por mais de {kick_after_days} dias.\nTempo sem cargos: {time_without_roles.days} dias")
+                    await bot.notify_roles(f"👢 {member.mention} foi expulso por estar sem cargos há mais de {kick_after_days} dias.")
+                    
+                    # Limpar o marcador após a expulsão bem-sucedida
+                    await bot.db.pool.execute(
+                        "DELETE FROM removed_roles WHERE user_id = $1 AND guild_id = $2 AND role_id = $3",
+                        member.id, guild.id, NO_ROLES_MARKER_ROLE_ID
                     )
                     
-                    # Logar a ação
-                    await bot.log_action(
-                        "Membro Expulso",
-                        member,
-                        f"Motivo: Sem cargos há mais de {kick_after_days} dias\n"
-                        f"Tempo sem cargos: {time_without_roles.days} dias"
-                    )
-                    await bot.notify_roles(
-                        f"👢 {member.mention} foi expulso por estar sem cargos há mais de {kick_after_days} dias")
-                    
-                    return True
+                    return True  # Membro foi expulso
                     
                 except discord.Forbidden:
-                    await bot.log_action("Erro ao Expulsar", member, "Permissões insuficientes")
+                    await bot.log_action("Erro ao Expulsar", member, "Permissões insuficientes.")
                 except discord.HTTPException as e:
                     await bot.log_action("Erro ao Expulsar", member, f"Erro HTTP: {e}")
                 except Exception as e:
-                    logger.error(f"Erro ao expulsar membro {member}: {e}")
-        return False
+                    logger.error(f"Erro inesperado ao expulsar membro {member.display_name}: {e}")
+                return False
+            else:
+                # Ainda não atingiu o tempo necessário para expulsão, não faz nada.
+                return False
+        else:
+            # É a primeira vez que vemos este membro sem cargos. Iniciar a contagem.
+            try:
+                await bot.db.pool.execute(
+                    """
+                    INSERT INTO removed_roles (user_id, guild_id, role_id, removal_date)
+                    VALUES ($1, $2, $3, $4)
+                    ON CONFLICT (user_id, guild_id, role_id) DO NOTHING
+                    """,
+                    member.id, guild.id, NO_ROLES_MARKER_ROLE_ID, datetime.now(pytz.UTC)
+                )
+                logger.info(f"Iniciando contagem de expulsão para {member.display_name} (ID: {member.id}) que está sem cargos.")
+            except Exception as e:
+                logger.error(f"Falha ao inserir marcador 'sem cargos' para {member.display_name}: {e}")
+            
+            return False # Não expulsa na primeira verificação.
+
     except Exception as e:
-        logger.error(f"Erro ao verificar membro para expulsão {member}: {e}")
+        logger.error(f"Erro geral ao processar limpeza para o membro {member.display_name}: {e}", exc_info=True)
         return False
+
 
 @log_task_metrics("database_backup")
 async def _database_backup():
