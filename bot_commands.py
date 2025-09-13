@@ -866,43 +866,47 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
                     inline=True
                 )
                 
-                # --- INÍCIO DA LÓGICA CORRIGIDA E SIMPLIFICADA ---
+                # --- INÍCIO DA NOVA LÓGICA CORRIGIDA ---
                 now = datetime.now(pytz.utc)
-                period_duration = timedelta(days=monitoring_period)
+                period_duration_days = bot.config.get('monitoring_period', 14)
                 period_start = None
+                anchor_date = None
 
-                last_check = await conn.fetchrow(
-                    "SELECT period_start, period_end FROM checked_periods WHERE user_id = $1 AND guild_id = $2 ORDER BY period_start DESC LIMIT 1",
-                    member.id, member.guild.id
-                )
+                # Tenta obter a data de atribuição do cargo como âncora principal
+                tracked_roles_ids = bot.config.get('tracked_roles', [])
+                member_tracked_roles = [role for role in member.roles if role.id in tracked_roles_ids]
+                
+                if member_tracked_roles:
+                    assigned_times = await asyncio.gather(*[
+                        bot.db.get_role_assigned_time(member.id, member.guild.id, role.id) for role in member_tracked_roles
+                    ])
+                    valid_times = [t for t in assigned_times if t is not None]
+                    if valid_times:
+                        # A âncora é a data de atribuição MAIS RECENTE
+                        anchor_date = max(valid_times)
+                        if anchor_date.tzinfo is None:
+                             anchor_date = anchor_date.replace(tzinfo=pytz.utc)
 
-                if last_check:
-                    # Se já houve verificação, começamos a partir do início do último período registrado.
-                    anchor_date = last_check['period_start']
-                    if anchor_date.tzinfo is None: anchor_date = anchor_date.replace(tzinfo=pytz.utc)
-                    period_start = anchor_date
-                else:
-                    # Se nunca foi verificado, a data de atribuição do cargo é a âncora.
-                    tracked_roles_ids = bot.config.get('tracked_roles', [])
-                    member_tracked_roles = [role for role in member.roles if role.id in tracked_roles_ids]
-                    
-                    if member_tracked_roles:
-                        assigned_times = await asyncio.gather(*[
-                            bot.db.get_role_assigned_time(member.id, member.guild.id, role.id) for role in member_tracked_roles
-                        ])
-                        valid_times = [t for t in assigned_times if t is not None]
-                        if valid_times:
-                            anchor_date = max(valid_times)
-                            if anchor_date.tzinfo is None: anchor_date = anchor_date.replace(tzinfo=pytz.utc)
-                            period_start = anchor_date
+                # Se não encontrou data de atribuição, usa a última verificação como fallback
+                if not anchor_date:
+                    last_check = await conn.fetchrow(
+                        "SELECT period_start FROM checked_periods WHERE user_id = $1 AND guild_id = $2 ORDER BY period_start DESC LIMIT 1",
+                        member.id, member.guild.id
+                    )
+                    if last_check and last_check['period_start']:
+                        anchor_date = last_check['period_start']
+                        if anchor_date.tzinfo is None:
+                            anchor_date = anchor_date.replace(tzinfo=pytz.utc)
 
-                if period_start:
-                    # "Caminha" para frente, um período de cada vez, até encontrar o período atual
-                    while (period_start + period_duration) < now:
-                        period_start += period_duration
+                if anchor_date:
+                    # Cálculo direto para encontrar o período atual
+                    time_since_anchor = now - anchor_date
+                    periods_passed = time_since_anchor.days // period_duration_days
                     
-                    period_end = period_start + period_duration
-                    
+                    period_start = anchor_date + timedelta(days=periods_passed * period_duration_days)
+                    period_end = period_start + timedelta(days=period_duration_days)
+
+                    # Obter sessões de voz para o período atual calculado
                     valid_days_current_period = set()
                     current_period_sessions = await conn.fetch(
                         "SELECT join_time, duration FROM voice_sessions WHERE user_id = $1 AND guild_id = $2 AND join_time >= $3 AND join_time < $4",
@@ -910,7 +914,8 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
                     )
                     
                     for session in current_period_sessions:
-                        if session['duration'] >= required_min * 60:
+                        # O requisito de minutos deve ser aplicado por sessão, não por dia
+                        if session['duration'] >= (required_min * 60):
                             valid_days_current_period.add(session['join_time'].date())
 
                     is_complying = len(valid_days_current_period) >= required_days
@@ -938,13 +943,13 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
                         inline=False
                     )
                 else:
-                    # Fallback caso o membro não tenha cargos rastreados ou verificações
+                    # Fallback caso o membro não tenha cargos rastreados ou histórico de verificação
                      embed.add_field(
                         name="🔄 Status Atual",
                         value="Não foi possível determinar o período (sem cargos monitorados ou histórico).",
                         inline=True
                     )
-                # --- FIM DA LÓGICA CORRIGIDA ---
+                # --- FIM DA NOVA LÓGICA CORRIGIDA ---
 
                 all_warnings = await conn.fetch(
                     "SELECT warning_type, warning_date FROM user_warnings WHERE user_id = $1 AND guild_id = $2 ORDER BY warning_date DESC LIMIT 3",

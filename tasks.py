@@ -138,6 +138,29 @@ def log_task_metrics(task_name: str):
         return wrapper
     return decorator
 
+class DynamicBatcher:
+    def __init__(self):
+        self.batch_size = 10  # Valor inicial
+        self.min_batch = 5    # Mínimo seguro
+        self.max_batch = 50   # Máximo permitido
+        self.last_rate_limit = None
+
+    async def adjust_batch_size(self):
+        """Ajusta dinamicamente o tamanho do lote."""
+        now = time.time()
+
+        # Se houve rate limit recentemente, reduz o batch
+        if self.last_rate_limit and (now - self.last_rate_limit) < 60:
+            self.batch_size = max(self.min_batch, self.batch_size - 5)
+        else:
+            # Senão, aumenta gradualmente
+            self.batch_size = min(self.max_batch, self.batch_size + 2)
+
+    async def handle_rate_limit(self):
+        """Chamado quando um rate limit é detectado."""
+        self.last_rate_limit = time.time()
+        await self.adjust_batch_size()
+
 class BatchProcessor:
     def __init__(self, bot):
         self.bot = bot
@@ -170,209 +193,124 @@ class BatchProcessor:
             await asyncio.sleep(self.bot.rate_limit_delay)  # Delay entre lotes
             
         return results
+
     async def _process_member_optimized(self, member):
         """
         Verifica a inatividade de um membro, processando todos os períodos de monitoramento
         que passaram desde a última verificação e envia avisos para o período atual.
-
-        Correção: quando NÃO existe last_check, usa a data de atribuição do(s) cargo(s)
-        monitorados como início do período (se disponível), em vez de usar uma janela
-        baseada na entrada do servidor.
         """
         result = {'processed': 0, 'removed': 0, 'warnings': {'first': 0, 'second': 0}}
         try:
-            # 1. Verificar se o membro deve ser processado (whitelist, cargos monitorados)
+            # 1. Verificar se o membro deve ser processado
             if member.bot or member.id in self.bot.config['whitelist']['users'] or \
-               any(role.id in self.bot.config['whitelist']['roles'] for role in member.roles):
+                any(role.id in self.bot.config['whitelist']['roles'] for role in member.roles):
                 return result
 
-            tracked_roles = self.bot.config['tracked_roles']
-            if not any(role.id in tracked_roles for role in member.roles):
-                return result
+            tracked_roles_ids = self.bot.config.get('tracked_roles', [])
+            current_member_roles = [role for role in member.roles if role.id in tracked_roles_ids]
+            if not current_member_roles:
+                return result # Membro não possui mais os cargos monitorados
 
             result['processed'] = 1
             now = datetime.now(pytz.UTC)
-            monitoring_period = self.bot.config['monitoring_period']
-            period_duration = timedelta(days=monitoring_period)
+            monitoring_period_days = self.bot.config.get('monitoring_period')
+            period_duration = timedelta(days=monitoring_period_days)
+            anchor_date = None
 
-            # 2. Obter o último período verificado
-            last_check = await self.bot.db.get_last_period_check(member.id, member.guild.id)
+            # 2. Determinar a data âncora (início da contagem)
+            # A prioridade é a data de atribuição mais recente de um cargo monitorado
+            assigned_times = await asyncio.gather(
+                *[self.bot.db.get_role_assigned_time(member.id, member.guild.id, role.id)
+                    for role in current_member_roles],
+                return_exceptions=True
+            )
+            valid_times = [t for t in assigned_times if isinstance(t, datetime)]
+            if valid_times:
+                anchor_date = max(valid_times)
+                if anchor_date.tzinfo is None: anchor_date = anchor_date.replace(tzinfo=pytz.UTC)
 
-            # 3. Se o membro nunca foi verificado, tentar usar a data de atribuição do(s) cargo(s)
-            if not last_check:
-                # obter os cargos monitorados que o membro possui agora
-                member_roles_to_check = [role for role in member.roles if role.id in tracked_roles]
+            # Se não há data de atribuição, usar a última verificação
+            if not anchor_date:
+                last_check = await self.bot.db.get_last_period_check(member.id, member.guild.id)
+                if last_check:
+                    anchor_date = last_check['period_start']
+                    if anchor_date.tzinfo is None: anchor_date = anchor_date.replace(tzinfo=pytz.UTC)
 
-                latest_assigned = None
-                if member_roles_to_check:
-                    # buscar as datas de atribuição em paralelo
-                    try:
-                        assigned_times = await asyncio.gather(
-                            *[self.bot.db.get_role_assigned_time(member.id, member.guild.id, role.id)
-                              for role in member_roles_to_check],
-                            return_exceptions=True
-                        )
-                        # filtrar resultados válidos
-                        valid_times = []
-                        for at in assigned_times:
-                            if isinstance(at, Exception) or at is None:
-                                continue
-                            # garantir tz-aware
-                            if getattr(at, 'tzinfo', None) is None:
-                                at = at.replace(tzinfo=pytz.UTC)
-                            valid_times.append(at)
-                        if valid_times:
-                            latest_assigned = max(valid_times)
-                    except Exception:
-                        # se alguma exceção ocorrer, não interromper — caímos para fallback abaixo
-                        logger.debug(f"Erro ao obter datas de atribuição de cargo para {member.id}", exc_info=True)
+            # Se não há âncora, não podemos processar
+            if not anchor_date:
+                # Registrar um período inicial para que o membro seja verificado no futuro
+                initial_start = now - period_duration
+                await self.bot.db.log_period_check(member.id, member.guild.id, initial_start, now, False)
+                logger.info(f"Nenhuma âncora encontrada para {member.display_name}. Definindo período inicial.")
+                return result
+            
+            # 3. Processar todos os períodos CONCLUÍDOS desde a âncora
+            current_period_start = anchor_date
+            while (current_period_start + period_duration) <= now:
+                period_end = current_period_start + period_duration
 
-                if latest_assigned:
-                    # iniciar a contagem a partir da atribuição mais recente
-                    period_start = latest_assigned
-                    period_end = period_start + period_duration
-                    # registrar o período inicial (não cumprido por padrão)
-                    await self.bot.db.log_period_check(member.id, member.guild.id, period_start, period_end, False)
-                    # atualizar last_check para que o loop abaixo processe corretamente
-                    last_check = await self.bot.db.get_last_period_check(member.id, member.guild.id)
-                else:
-                    # Fallback antigo: janela retroativa ending now
-                    period_end = now
-                    period_start = now - period_duration
-                    await self.bot.db.log_period_check(member.id, member.guild.id, period_start, period_end, False)
-                    last_check = await self.bot.db.get_last_period_check(member.id, member.guild.id)
+                # Verificar se este período já foi avaliado como "cumprido"
+                last_check = await self.bot.db.get_last_period_check(member.id, member.guild.id)
+                if last_check and last_check['period_start'] == current_period_start and last_check['meets_requirements']:
+                    current_period_start += period_duration # Pula para o próximo período
+                    continue
 
-            # 4. Calcular todos os períodos que terminaram desde o início da última verificação até agora.
-            periods_to_check = []
-
-            # Começamos a verificação a partir do INÍCIO do último período registrado.
-            # Isso garante que o período recém-criado para um novo usuário seja verificado imediatamente.
-            period_start_current_cycle = last_check['period_start']
-
-            if period_start_current_cycle.tzinfo is None:
-                period_start_current_cycle = period_start_current_cycle.replace(tzinfo=pytz.UTC)
-
-            while period_start_current_cycle + period_duration <= now:
-                period_end_cycle = period_start_current_cycle + period_duration
-                periods_to_check.append((period_start_current_cycle, period_end_cycle))
-                period_start_current_cycle = period_end_cycle
-
-            # 5. Processar cada período passado em ordem cronológica
-            current_member_roles = [r for r in member.roles if r.id in tracked_roles]
-            if not current_member_roles:
-                return result  # Sai se o membro perdeu os cargos por outros meios
-
-            for period_start, period_end in periods_to_check:
-                # Obter sessões de voz e verificar requisitos
-                sessions = await self.bot.db.get_voice_sessions(member.id, member.guild.id, period_start, period_end)
+                sessions = await self.bot.db.get_voice_sessions(member.id, member.guild.id, current_period_start, period_end)
                 required_minutes = self.bot.config['required_minutes']
                 required_days = self.bot.config['required_days']
 
                 valid_days = set()
-                if sessions:
-                    for session in sessions:
-                        if session['duration'] >= required_minutes * 60:
-                            valid_days.add(session['join_time'].date())
-
+                for session in sessions:
+                    if session['duration'] >= required_minutes * 60:
+                        valid_days.add(session['join_time'].date())
+                
                 meets_requirements = len(valid_days) >= required_days
+                await self.bot.db.log_period_check(member.id, member.guild.id, current_period_start, period_end, meets_requirements)
 
-                # Registrar o resultado da verificação para este período
-                await self.bot.db.log_period_check(member.id, member.guild.id, period_start, period_end, meets_requirements)
-
-                # Se não cumpriu os requisitos, remover os cargos e parar de verificar períodos passados
                 if not meets_requirements:
                     try:
-                        await member.remove_roles(*current_member_roles, reason=f"Inatividade no período {period_start.date()} - {period_end.date()}")
+                        await member.remove_roles(*current_member_roles, reason=f"Inatividade no período {current_period_start.date()} a {period_end.date()}")
                         result['removed'] = 1
-
                         await self.bot.send_warning(member, 'final')
                         await self.bot.db.log_removed_roles(member.id, member.guild.id, [r.id for r in current_member_roles])
-
+                        
+                        # Log e notificação para admin (exemplo)
                         log_message = (
                             f"Cargos removidos: {', '.join([r.name for r in current_member_roles])}\n"
                             f"Dias válidos: {len(valid_days)}/{required_days}\n"
-                            f"Período: {period_start.strftime('%d/%m/%Y')} a {period_end.strftime('%d/%m/%Y')}"
+                            f"Período: {current_period_start.strftime('%d/%m/%Y')} a {period_end.strftime('%d/%m/%Y')}"
                         )
                         await self.bot.log_action("Cargo Removido", member, log_message)
-                        await self.bot.notify_roles(
-                            f"🚨 Cargos removidos de {member.mention} por inatividade: " +
-                            ", ".join([f"`{r.name}`" for r in current_member_roles]))
-
-                        admin_embed = discord.Embed(
-                            title="🚨 Cargos Removidos por Inatividade",
-                            description=f"Os cargos de {member.mention} foram removidos por inatividade.",
-                            color=discord.Color.dark_red(), timestamp=now)
-                        admin_embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
-                        admin_embed.add_field(name="Cargos Removidos", value=", ".join([r.mention for r in current_member_roles]), inline=False)
-                        await self.bot.notify_admins_dm(member.guild, embed=admin_embed)
-
-                        # Como os cargos foram removidos, não há mais o que verificar para este membro.
-                        return result
-
-                    except discord.Forbidden as e:
-                        logger.error(f"Permissões insuficientes para remover cargos de {member}: {e}")
-                        return result
+                        
+                        return result # Membro perdeu os cargos, encerra o processamento para ele
                     except Exception as e:
-                        logger.error(f"Erro ao remover cargos de {member}: {e}")
-                        return result
+                        logger.error(f"Erro ao remover cargos de {member.display_name}: {e}")
+                        return result # Para de processar para evitar loops de erro
 
-            # 6. Se o membro passou por todas as verificações, definir o próximo período e checar avisos
-            new_period_start = period_start_current_cycle
-            new_period_end = new_period_start + period_duration
+                current_period_start += period_duration # Avança para o próximo período
 
-            # Verifica se o período que estamos prestes a registrar é de fato um novo período
-            if not periods_to_check or new_period_start > periods_to_check[-1][0]:
-                await self.bot.db.log_period_check(member.id, member.guild.id, new_period_start, new_period_end, False)
+            # 4. Checar o período ATUAL para enviar avisos
+            final_period_start = current_period_start
+            final_period_end = final_period_start + period_duration
+            days_remaining = (final_period_end - now).days
 
-            # 7. AVISOS: Verificar o período ATUAL (futuro) para enviar avisos
             warnings_config = self.bot.config.get('warnings', {})
             first_warning_days = warnings_config.get('first_warning', 7)
             second_warning_days = warnings_config.get('second_warning', 1)
 
-            if new_period_end > now:
-                days_remaining = (new_period_end - now).days
+            warnings_in_period = await self.bot.db.get_warnings_in_period(member.id, member.guild.id, final_period_start)
 
-                warnings_in_period = await self.bot.db.get_warnings_in_period(
-                    member.id, member.guild.id, new_period_start
-                )
-
-                if (days_remaining <= first_warning_days and
-                    days_remaining > second_warning_days and
-                    'first' not in warnings_in_period):
-                    await self.bot.send_warning(member, 'first')
-                    result['warnings']['first'] += 1
-
-                elif (days_remaining <= second_warning_days and
-                      days_remaining >= 0 and
-                      'second' not in warnings_in_period):
-                    await self.bot.send_warning(member, 'second')
-                    result['warnings']['second'] += 1
+            if days_remaining <= first_warning_days and 'first' not in warnings_in_period:
+                await self.bot.send_warning(member, 'first')
+                result['warnings']['first'] += 1
+            elif days_remaining <= second_warning_days and 'second' not in warnings_in_period:
+                await self.bot.send_warning(member, 'second')
+                result['warnings']['second'] += 1
 
         except Exception as e:
-            logger.error(f"Erro ao verificar inatividade para {member}: {e}", exc_info=True)
+            logger.error(f"Erro ao verificar inatividade para {member.display_name}: {e}", exc_info=True)
 
         return result
-    def __init__(self):
-        self.batch_size = 10  # Valor inicial
-        self.min_batch = 5    # Mínimo seguro
-        self.max_batch = 50   # Máximo permitido
-        self.last_rate_limit = None
-
-    async def adjust_batch_size(self):
-        """Ajusta dinamicamente o tamanho do lote."""
-        now = time.time()
-
-        # Se houve rate limit recentemente, reduz o batch
-        if self.last_rate_limit and (now - self.last_rate_limit) < 60:
-            self.batch_size = max(self.min_batch, self.batch_size - 5)
-        else:
-            # Senão, aumenta gradualmente
-            self.batch_size = min(self.max_batch, self.batch_size + 2)
-
-    async def handle_rate_limit(self):
-        """Chamado quando um rate limit é detectado."""
-        self.last_rate_limit = time.time()
-        await self.adjust_batch_size()
 
 def prioritize_members(members: list[discord.Member]) -> list[discord.Member]:
     """Ordena membros para processar os mais prováveis de estarem inativos primeiro."""
