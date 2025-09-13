@@ -823,6 +823,7 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
                     "SELECT * FROM voice_sessions WHERE user_id = $1 AND guild_id = $2 AND join_time >= $3 AND leave_time <= $4",
                     member.id, member.guild.id, start_date_param, end_date_param
                 )
+                await asyncio.sleep(0.1) # Pequeno delay
 
                 # Calcular tempo total apenas para o período solicitado
                 total_time = sum(session['duration'] for session in voice_sessions_param) if voice_sessions_param else 0
@@ -878,41 +879,70 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
                     inline=True
                 )
                 
-                # --- INÍCIO DA CORREÇÃO ---
-                # Seção de status atual (lógica de cálculo de período corrigida)
-
+                # --- INÍCIO DA LÓGICA CORRIGIDA PARA STATUS ATUAL ---
                 last_check = await conn.fetchrow(
                     "SELECT * FROM checked_periods WHERE user_id = $1 AND guild_id = $2 ORDER BY period_end DESC LIMIT 1",
                     member.id, member.guild.id
                 )
+                await asyncio.sleep(0.1) # Pequeno delay
 
                 now = datetime.now(pytz.utc)
+                monitoring_period_days = bot.config.get('monitoring_period', 14)
+                period_duration = timedelta(days=monitoring_period_days)
                 period_start = None
                 period_end = None
 
-                # Lógica robusta para determinar o período de análise ATUAL.
                 if last_check:
-                    last_period_end = last_check['period_end'].replace(tzinfo=pytz.utc)
-                    # Se a data atual for anterior ao fim do último período, estamos nele.
-                    if now < last_period_end:
-                        period_start = last_check['period_start'].replace(tzinfo=pytz.utc)
-                        period_end = last_period_end
-                    # Se o último período já acabou, o período atual é o ciclo seguinte.
-                    else:
-                        period_start = last_period_end
-                        period_end = period_start + timedelta(days=monitoring_period)
-                else:
-                    # Se o usuário nunca foi verificado, o período atual é uma janela retroativa
-                    # para fins de exibição, alinhado ao que a task de verificação faria.
-                    period_end = now
-                    period_start = now - timedelta(days=monitoring_period)
+                    last_period_end = last_check['period_end']
+                    if last_period_end.tzinfo is None:
+                        last_period_end = last_period_end.replace(tzinfo=pytz.utc)
+                    
+                    last_period_start = last_check['period_start']
+                    if last_period_start.tzinfo is None:
+                        last_period_start = last_period_start.replace(tzinfo=pytz.utc)
 
-                # Calcular dias válidos para o período ATUAL determinado acima
+                    if now < last_period_end:
+                        period_start = last_period_start
+                        period_end = last_period_end
+                    else:
+                        time_since_end = now - last_period_end
+                        cycles_passed = time_since_end.days // monitoring_period_days
+                        period_start = last_period_end + timedelta(days=cycles_passed * monitoring_period_days)
+                        period_end = period_start + period_duration
+                else:
+                    assigned_at = None
+                    tracked_roles_ids = bot.config.get('tracked_roles', [])
+                    member_tracked_roles = [role for role in member.roles if role.id in tracked_roles_ids]
+                    
+                    if member_tracked_roles:
+                        assigned_times = await asyncio.gather(
+                            *[bot.db.get_role_assigned_time(member.id, member.guild.id, role.id) for role in member_tracked_roles]
+                        )
+                        valid_times = [t for t in assigned_times if t is not None]
+                        if valid_times:
+                            assigned_at = max(valid_times)
+
+                    if assigned_at:
+                        if assigned_at.tzinfo is None:
+                            assigned_at = assigned_at.replace(tzinfo=pytz.utc)
+                        period_start = assigned_at
+                        period_end = period_start + period_duration
+                        if now > period_end:
+                            time_since_end = now - period_end
+                            cycles_passed = time_since_end.days // monitoring_period_days
+                            period_start = period_end + timedelta(days=cycles_passed * monitoring_period_days)
+                            period_end = period_start + period_duration
+                    else:
+                        period_start = now - period_duration
+                        period_end = now
+
                 valid_days_current_period = set()
                 current_period_sessions = await conn.fetch(
                     "SELECT join_time, duration FROM voice_sessions WHERE user_id = $1 AND guild_id = $2 AND join_time >= $3 AND leave_time <= $4",
                     member.id, member.guild.id, period_start, period_end
                 )
+                await asyncio.sleep(0.1) # Pequeno delay
+                
                 for session in current_period_sessions:
                     if session['duration'] >= required_min * 60:
                         day = session['join_time'].replace(tzinfo=pytz.utc).date()
@@ -933,9 +963,8 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
                     ),
                     inline=True
                 )
-
-                # A barra de progresso agora usa os dados do período correto
-                progress = min(1.0, len(valid_days_current_period) / required_days)
+                
+                progress = min(1.0, len(valid_days_current_period) / required_days) if required_days > 0 else 1.0
                 progress_bar = "[" + "█" * int(progress * 10) + " " * (10 - int(progress * 10)) + "]"
                 progress_text = f"{progress*100:.0f}% ({len(valid_days_current_period)}/{required_days} dias)"
 
@@ -944,7 +973,7 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
                     value=f"{progress_bar}\n{progress_text}",
                     inline=False
                 )
-                # --- FIM DA CORREÇÃO ---
+                # --- FIM DA LÓGICA CORRIGIDA ---
 
                 # Seção de avisos
                 all_warnings = await conn.fetch(
