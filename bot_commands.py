@@ -893,6 +893,8 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
                 period_end = None
 
                 if last_check:
+                    # Se houver um registro de verificação, ele é a fonte mais confiável para o início do ciclo de períodos.
+                    # O próximo período começará exatamente após o término do último verificado.
                     last_period_end = last_check['period_end']
                     if last_period_end.tzinfo is None:
                         last_period_end = last_period_end.replace(tzinfo=pytz.utc)
@@ -902,14 +904,17 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
                         last_period_start = last_period_start.replace(tzinfo=pytz.utc)
 
                     if now < last_period_end:
+                        # Ainda estamos dentro do último período verificado.
                         period_start = last_period_start
                         period_end = last_period_end
                     else:
-                        time_since_end = now - last_period_end
-                        cycles_passed = time_since_end.days // monitoring_period_days
+                        # O último período verificado terminou. Calculamos o período atual.
+                        time_since_last_period_ended = now - last_period_end
+                        cycles_passed = time_since_last_period_ended.days // monitoring_period_days
                         period_start = last_period_end + timedelta(days=cycles_passed * monitoring_period_days)
                         period_end = period_start + period_duration
                 else:
+                    # Se o membro nunca foi verificado, a data de atribuição do cargo é o início de tudo.
                     assigned_at = None
                     tracked_roles_ids = bot.config.get('tracked_roles', [])
                     member_tracked_roles = [role for role in member.roles if role.id in tracked_roles_ids]
@@ -920,19 +925,28 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
                         )
                         valid_times = [t for t in assigned_times if t is not None]
                         if valid_times:
-                            assigned_at = max(valid_times)
+                            assigned_at = max(valid_times) # Usamos a atribuição mais recente como âncora
 
                     if assigned_at:
-                        if assigned_at.tzinfo is None:
-                            assigned_at = assigned_at.replace(tzinfo=pytz.utc)
-                        period_start = assigned_at
+                        # A data de atribuição é a nossa âncora.
+                        anchor_date = assigned_at
+                        if anchor_date.tzinfo is None:
+                            anchor_date = anchor_date.replace(tzinfo=pytz.utc)
+                        
+                        time_since_assignment = now - anchor_date
+                        
+                        if time_since_assignment.total_seconds() < 0:
+                            # Caso raro: atribuição no futuro. O primeiro período começará nessa data.
+                            period_start = anchor_date
+                        else:
+                            # Calculamos quantos ciclos completos se passaram desde a atribuição.
+                            cycles_passed = time_since_assignment.days // monitoring_period_days
+                            # O período atual começa após todos os ciclos passados.
+                            period_start = anchor_date + timedelta(days=cycles_passed * monitoring_period_days)
+                        
                         period_end = period_start + period_duration
-                        if now > period_end:
-                            time_since_end = now - period_end
-                            cycles_passed = time_since_end.days // monitoring_period_days
-                            period_start = period_end + timedelta(days=cycles_passed * monitoring_period_days)
-                            period_end = period_start + period_duration
                     else:
+                        # Fallback: se não há verificações nem data de atribuição, usamos uma janela retroativa.
                         period_start = now - period_duration
                         period_end = now
 
