@@ -816,7 +816,7 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
         try:
             async with bot.db.pool.acquire() as conn:
                 voice_sessions_param = await conn.fetch(
-                    "SELECT * FROM voice_sessions WHERE user_id = $1 AND guild_id = $2 AND join_time >= $3 AND leave_time <= $4 ORDER BY join_time DESC",
+                    "SELECT * FROM voice_sessions WHERE user_id = $1 AND guild_id = $2 AND join_time < $4 AND leave_time > $3 ORDER BY join_time DESC",
                     member.id, member.guild.id, start_date_param, end_date_param
                 )
                 
