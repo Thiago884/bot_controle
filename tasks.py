@@ -299,54 +299,53 @@ class BatchProcessor:
             second_warning_days = warnings_config.get('second_warning', 1)
 
             
-# --- Checar se o PERÍODO ATUAL já cumpre os requisitos antes de enviar avisos ---
-try:
-    sessions_now = await self.bot.db.get_voice_sessions(
-        member.id, member.guild.id, final_period_start, now
-    )
-    required_minutes = self.bot.config.get('required_minutes', 60)
-    required_days = self.bot.config.get('required_days', 5)
+            # --- CORREÇÃO: Checar se o PERÍODO ATUAL já cumpre os requisitos antes de enviar avisos ---
+            try:
+                # Carregar requisitos da configuração principal para consistência
+                required_minutes = self.bot.config.get('required_minutes')
+                required_days = self.bot.config.get('required_days')
 
-    # agregar por dia
-    daily_totals_now = {}
-    if sessions_now:
-        for s in sessions_now:
-            if s.get('duration', 0) > 0:
-                join_dt = s.get('join_time')
-                if join_dt is not None:
-                    daily_totals_now[join_dt.date()] = daily_totals_now.get(join_dt.date(), 0) + s.get('duration', 0)
+                sessions_now = await self.bot.db.get_voice_sessions(
+                    member.id, member.guild.id, final_period_start, now
+                )
+                
+                # A lógica aqui deve ser IDÊNTICA à usada para períodos concluídos:
+                # contar dias únicos que tiveram pelo menos UMA sessão com a duração mínima.
+                valid_days_in_current_period = set()
+                if sessions_now:
+                    for session in sessions_now:
+                        if session.get('duration', 0) >= (required_minutes * 60):
+                            join_dt = session.get('join_time')
+                            if join_dt:
+                                valid_days_in_current_period.add(join_dt.date())
 
-    valid_days_current = sum(1 for total in daily_totals_now.values() if total >= (required_minutes * 60))
+                # Se o usuário já cumpre os requisitos no período atual, não envie avisos.
+                if len(valid_days_in_current_period) >= required_days:
+                    logger.debug(
+                        f"{member.display_name} já cumpre requisitos no período atual ({len(valid_days_in_current_period)}/{required_days} dias) — pulando avisos."
+                    )
+                else:
+                    # Se não cumpre, verifique se é hora de enviar um aviso.
+                    warnings_in_period = await self.bot.db.get_warnings_in_period(
+                        member.id, member.guild.id, final_period_start
+                    ) or []
 
-    if valid_days_current >= required_days:
-        logger.debug(
-            f"{member.display_name} já cumpre requisitos no período atual ({valid_days_current}/{required_days} dias) — pulando avisos."
-        )
-    else:
-        warnings_in_period = await self.bot.db.get_warnings_in_period(
-            member.id, member.guild.id, final_period_start
-        ) or []
-
-        if days_remaining <= first_warning_days and 'first' not in warnings_in_period:
-            await self.bot.send_warning(member, 'first')
-            result['warnings']['first'] += 1
-            logger.info(f"Primeiro aviso enviado para {member.display_name}. Days remaining: {days_remaining}")
-        elif days_remaining <= second_warning_days and 'second' not in warnings_in_period:
-            await self.bot.send_warning(member, 'second')
-            result['warnings']['second'] += 1
-            logger.info(f"Segundo aviso enviado para {member.display_name}. Days remaining: {days_remaining}")
-except Exception as e:
-    logger.error(f"Erro ao avaliar/decidir avisos para {member.display_name}: {e}", exc_info=True)
-
-            result['warnings']['first'] += 1
-            elif days_remaining <= second_warning_days and 'second' not in warnings_in_period:
-                await self.bot.send_warning(member, 'second')
-            result['warnings']['second'] += 1
+                    if days_remaining <= first_warning_days and 'first' not in warnings_in_period:
+                        await self.bot.send_warning(member, 'first')
+                        result['warnings']['first'] += 1
+                        logger.info(f"Primeiro aviso enviado para {member.display_name}. Days remaining: {days_remaining}")
+                    elif days_remaining <= second_warning_days and 'second' not in warnings_in_period:
+                        await self.bot.send_warning(member, 'second')
+                        result['warnings']['second'] += 1
+                        logger.info(f"Segundo aviso enviado para {member.display_name}. Days remaining: {days_remaining}")
+            
+            except Exception as e:
+                logger.error(f"Erro ao avaliar/decidir avisos para {member.display_name}: {e}", exc_info=True)
 
         except Exception as e:
             logger.error(f"Erro ao verificar inatividade para {member.display_name}: {e}", exc_info=True)
 
-     return result
+        return result
 
 def prioritize_members(members: list[discord.Member]) -> list[discord.Member]:
     """Ordena membros para processar os mais prováveis de estarem inativos primeiro."""
