@@ -1521,13 +1521,12 @@ async def on_member_update(before: discord.Member, after: discord.Member):
             logger.info(f"Acompanhamento de inatividade resetado para {after.display_name} após receber um cargo monitorado.")
 
         try:
-            # A lógica original para enviar a mensagem de perdão foi mantida,
-            # mas o reset agora acontece de forma incondicional.
             for role in added_roles:
                 try:
                     last_removal = None
                     if hasattr(bot, 'db') and bot.db:
-                        last_removal = await bot.db.get_last_role_removal(after.id, after.guild.id)
+                        # CORREÇÃO: Chama a nova função para verificar a remoção do cargo específico.
+                        last_removal = await bot.db.get_last_specific_role_removal(after.id, after.guild.id, role.id)
                 except Exception as e:
                     logger.error(f"Erro ao obter histórico de remoções do DB: {e}")
                     last_removal = None
@@ -1548,9 +1547,11 @@ async def on_member_update(before: discord.Member, after: discord.Member):
 
                     if time_since_removal <= timedelta(days=30):
                         await send_forgiveness_message(after, role)
+                        # O 'break' aqui é mantido para enviar apenas uma mensagem de perdão,
+                        # mesmo que múltiplos cargos sejam devolvidos de uma vez.
                         break
 
-            # Registrar a atribuição de cada cargo novo
+            # Registrar a atribuição de cada cargo novo, independentemente de ser uma devolução ou não.
             for role in added_roles:
                 try:
                     if hasattr(bot, 'db') and bot.db:

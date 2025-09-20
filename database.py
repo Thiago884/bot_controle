@@ -1165,6 +1165,43 @@ class Database:
                     await self.pool.release(conn)
         return None
 
+    async def get_last_specific_role_removal(self, user_id: int, guild_id: int, role_id: int) -> Optional[Dict]:
+        """Obtém a última remoção de um cargo específico para um usuário."""
+        max_retries = 3
+        retry_delay = 2
+
+        for attempt in range(max_retries):
+            conn = None
+            try:
+                conn = await self.acquire_connection()
+                result = await conn.fetchrow('''
+                    SELECT removal_date, role_id
+                    FROM removed_roles
+                    WHERE user_id = $1 AND guild_id = $2 AND role_id = $3
+                    ORDER BY removal_date DESC
+                    LIMIT 1
+                ''', user_id, guild_id, role_id)
+                
+                if result:
+                    return {
+                        'removal_date': result['removal_date'],
+                        'role_id': result['role_id']
+                    }
+                return None
+            except (asyncio.TimeoutError, asyncpg.PostgresConnectionError, asyncpg.InterfaceError, ConnectionError) as e:
+                logger.warning(f"Erro de conexão/timeout em get_last_specific_role_removal (tentativa {attempt + 1}/{max_retries}): {e}")
+                if attempt == max_retries - 1:
+                    logger.error(f"Falha final ao obter remoção do cargo {role_id} para {user_id}", exc_info=True)
+                    return None
+                await asyncio.sleep(retry_delay * (2 ** attempt))
+            except Exception as e:
+                logger.error(f"Erro inesperado ao obter remoção de cargo específico: {e}", exc_info=True)
+                return None
+            finally:
+                if conn:
+                    await self.pool.release(conn)
+        return None
+
     async def log_kicked_member(self, user_id: int, guild_id: int, reason: str):
         """Registra membro expulso por inatividade"""
         max_retries = 3
