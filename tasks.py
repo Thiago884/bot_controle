@@ -269,18 +269,48 @@ class BatchProcessor:
 
                 if not meets_requirements:
                     try:
+                        removed_role_names = [r.name for r in current_member_roles]
                         await member.remove_roles(*current_member_roles, reason=f"Inatividade no período {current_period_start.date()} a {period_end.date()}")
                         result['removed'] = 1
                         await self.bot.send_warning(member, 'final')
                         await self.bot.db.log_removed_roles(member.id, member.guild.id, [r.id for r in current_member_roles])
                         
-                        # Log e notificação para admin (exemplo)
+                        # --- INÍCIO DA CORREÇÃO ---
+
+                        # Mensagem para o canal de logs (já existia)
                         log_message = (
-                            f"Cargos removidos: {', '.join([r.name for r in current_member_roles])}\n"
+                            f"Cargos removidos: {', '.join(removed_role_names)}\n"
                             f"Dias válidos: {len(valid_days)}/{required_days}\n"
                             f"Período: {current_period_start.strftime('%d/%m/%Y')} a {period_end.strftime('%d/%m/%Y')}"
                         )
                         await self.bot.log_action("Cargo Removido", member, log_message)
+
+                        # 1. Notificar no canal de notificações
+                        notification_message = f"🚨 {member.mention} perdeu o(s) cargo(s) `{', '.join(removed_role_names)}` por inatividade."
+                        await self.bot.notify_roles(notification_message)
+                        
+                        # 2. Notificar administradores via DM
+                        admin_embed = discord.Embed(
+                            title="🚨 Cargos Removidos por Inatividade",
+                            description=f"O membro {member.mention} não cumpriu os requisitos de atividade.",
+                            color=discord.Color.orange(),
+                            timestamp=datetime.now(pytz.utc)
+                        )
+                        admin_embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
+                        admin_embed.add_field(name="Usuário", value=f"{member.mention} (`{member.id}`)", inline=False)
+                        admin_embed.add_field(name="Cargos Removidos", value=', '.join(removed_role_names), inline=False)
+                        admin_embed.add_field(
+                            name="Detalhes da Inatividade", 
+                            value=(
+                                f"**Dias Válidos:** {len(valid_days)}/{required_days}\n"
+                                f"**Período:** {current_period_start.strftime('%d/%m/%Y')} - {period_end.strftime('%d/%m/%Y')}"
+                            ), 
+                            inline=False
+                        )
+                        admin_embed.set_footer(text=f"Servidor: {member.guild.name}")
+                        await self.bot.notify_admins_dm(member.guild, embed=admin_embed)
+
+                        # --- FIM DA CORREÇÃO ---
                         
                         return result # Membro perdeu os cargos, encerra o processamento para ele
                     except Exception as e:
