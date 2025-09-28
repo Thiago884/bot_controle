@@ -186,6 +186,7 @@ DEFAULT_CONFIG = {
     "tracked_roles": [],
     "log_channel": None,
     "notification_channel": None,
+    "notification_roles_dm": [],  # <-- NOVO CAMPO ADICIONADO
     "timezone": "America/Sao_Paulo",
     "absence_channel": None,
     "allowed_roles": [],
@@ -1311,27 +1312,45 @@ class InactivityBot(commands.Bot):
             await self.log_action("Erro de Notificação", None, f"Falha ao enviar mensagem: {str(e)}")
 
     async def notify_admins_dm(self, guild: discord.Guild, embed: discord.Embed):
-        """Envia uma mensagem direta a todos os membros com permissões de administrador em uma guilda."""
+        """
+        Envia uma DM para membros com permissão de administrador E para membros
+        com cargos configurados em 'notification_roles_dm'.
+        """
         if not guild:
             logger.warning("notify_admins_dm chamada sem guilda.")
             return
 
-        admin_role_holders = [member for member in guild.members if member.guild_permissions.administrator and not member.bot]
+        # Usar um conjunto para evitar enviar DMs duplicadas
+        members_to_notify = set()
 
-        if not admin_role_holders:
-            logger.info(f"Nenhum administrador encontrado na guilda {guild.name} para notificar via DM.")
+        # 1. Adicionar todos os administradores
+        for member in guild.members:
+            if not member.bot and member.guild_permissions.administrator:
+                members_to_notify.add(member)
+
+        # 2. Adicionar membros com os cargos de notificação
+        notification_role_ids = self.config.get('notification_roles_dm', [])
+        if notification_role_ids:
+            for role_id in notification_role_ids:
+                role = guild.get_role(role_id)
+                if role:
+                    for member in role.members:
+                        if not member.bot:
+                            members_to_notify.add(member)
+
+        if not members_to_notify:
+            logger.info(f"Nenhum administrador ou cargo de notificação configurado na guilda {guild.name} para notificar via DM.")
             return
 
-        logger.info(f"Notificando {len(admin_role_holders)} administradores em {guild.name} via DM.")
+        logger.info(f"Notificando {len(members_to_notify)} membros privilegiados em {guild.name} via DM.")
 
-        for admin in admin_role_holders:
+        for member in members_to_notify:
             try:
-                # Usa o método send_dm existente que enfileira a mensagem
-                await self.send_dm(admin, message_content=None, embed=embed)
-                logger.debug(f"DM de notificação de administrador enfileirada para {admin.display_name} ({admin.id}).")
+                # Usa o método send_dm que enfileira a mensagem
+                await self.send_dm(member, message_content=None, embed=embed)
+                logger.debug(f"DM de notificação de administrador/cargo enfileirada para {member.display_name} ({member.id}).")
             except Exception as e:
-                # send_dm já registra a maioria dos erros, mas podemos adicionar um específico aqui.
-                logger.error(f"Falha ao enfileirar DM de notificação de administrador para {admin.display_name} na guilda {guild.name}: {e}")
+                logger.error(f"Falha ao enfileirar DM de notificação para {member.display_name} na guilda {guild.name}: {e}")
 
     async def send_dm(self, member: discord.Member, message_content: str, embed: discord.Embed):
         try:

@@ -384,6 +384,78 @@ async def manage_tracked_roles(
         )
         await interaction.response.send_message(embed=embed)
 
+@bot.tree.command(name="manage_dm_notification_roles", description="Gerencia cargos que recebem notificações por DM")
+@app_commands.describe(
+    action="Ação a ser realizada (adicionar ou remover)",
+    role="Cargo a ser gerenciado para receber DMs"
+)
+@allowed_roles_only()
+@commands.has_permissions(administrator=True)
+async def manage_dm_notification_roles(
+    interaction: discord.Interaction,
+    action: Literal["add", "remove"],
+    role: discord.Role
+):
+    """Gerencia quais cargos, além de administradores, devem receber DMs de notificação."""
+    try:
+        logger.info(f"Comando manage_dm_notification_roles por {interaction.user} - Ação: {action} Cargo: {role.name}")
+        config_key = 'notification_roles_dm'
+
+        if action == "add":
+            if role.id not in bot.config[config_key]:
+                bot.config[config_key].append(role.id)
+                await bot.save_config()
+
+                embed = discord.Embed(
+                    title="✅ Cargos de Notificação (DM) Atualizados",
+                    description=f"O cargo {role.mention} agora receberá notificações por DM.",
+                    color=discord.Color.green()
+                )
+                await bot.log_action(
+                    "Cargos de Notificação (DM) Atualizados",
+                    interaction.user,
+                    f"Cargo adicionado: {role.name} (ID: {role.id})"
+                )
+            else:
+                embed = discord.Embed(
+                    title="ℹ️ Informação",
+                    description=f"O cargo {role.mention} já está configurado para receber notificações por DM.",
+                    color=discord.Color.blue()
+                )
+        else:  # remove
+            if role.id in bot.config[config_key]:
+                bot.config[config_key].remove(role.id)
+                await bot.save_config()
+
+                embed = discord.Embed(
+                    title="✅ Cargos de Notificação (DM) Atualizados",
+                    description=f"O cargo {role.mention} não receberá mais notificações por DM.",
+                    color=discord.Color.green()
+                )
+                await bot.log_action(
+                    "Cargos de Notificação (DM) Atualizados",
+                    interaction.user,
+                    f"Cargo removido: {role.name} (ID: {role.id})"
+                )
+            else:
+                embed = discord.Embed(
+                    title="ℹ️ Informação",
+                    description=f"O cargo {role.mention} não estava na lista de notificações por DM.",
+                    color=discord.Color.blue()
+                )
+
+        await interaction.response.send_message(embed=embed)
+
+    except Exception as e:
+        logger.error(f"Erro ao gerenciar cargos de notificação por DM: {e}", exc_info=True)
+        embed = discord.Embed(
+            title="❌ Erro",
+            description="Ocorreu um erro ao atualizar a configuração. Por favor, tente novamente.",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
 @bot.tree.command(name="force_role_assignment_log", description="Força o registro de atribuição para membros sem data registrada.")
 @app_commands.describe(
     role="Cargo para registrar a atribuição"
@@ -690,86 +762,89 @@ async def set_absence_channel(interaction: discord.Interaction, channel: discord
 async def show_config(interaction: discord.Interaction):
     """Mostra todas as configurações atuais do bot"""
     try:
-        # Verificar banco de dados
         if not await check_db_connection(interaction):
             return
 
         logger.info(f"Comando show_config acionado por {interaction.user}")
 
         config = bot.config
-        tracked_roles = []
-        for role_id in config['tracked_roles']:
-            role = interaction.guild.get_role(role_id)
-            if role:
-                tracked_roles.append(role.name)
+        
+        # Helper function to get role names/mentions
+        def get_role_mentions(role_ids: list) -> str:
+            mentions = []
+            for role_id in role_ids:
+                role = interaction.guild.get_role(role_id)
+                if role:
+                    mentions.append(role.mention)
+            return "\n".join(mentions) if mentions else "Nenhum"
+
+        tracked_roles_mentions = get_role_mentions(config.get('tracked_roles', []))
+        allowed_roles_mentions = get_role_mentions(config.get('allowed_roles', []))
+        dm_notification_roles_mentions = get_role_mentions(config.get('notification_roles_dm', []))
 
         whitelist_users = []
         for user_id in config['whitelist']['users']:
             user = interaction.guild.get_member(user_id)
             if user:
                 whitelist_users.append(user.display_name)
-
+        
         whitelist_roles = []
         for role_id in config['whitelist']['roles']:
             role = interaction.guild.get_role(role_id)
             if role:
                 whitelist_roles.append(role.name)
 
-        allowed_roles = []
-        for role_id in config['allowed_roles']:
-            role = interaction.guild.get_role(role_id)
-            if role:
-                allowed_roles.append(role.mention)
-
         warnings_config = config.get('warnings', {})
 
         embed = discord.Embed(
             title="⚙️ Configuração do Bot",
-            color=discord.Color.blue())
+            color=discord.Color.blue()
+        )
 
         # Seção de Requisitos
         embed.add_field(
             name="📊 Requisitos de Atividade",
             value=(
-                f"**Minutos necessários:** {config['required_minutes']}\n"
-                f"**Dias necessários:** {config['required_days']}\n"
                 f"**Período de monitoramento:** {config['monitoring_period']} dias\n"
+                f"**Minutos necessários:** {config['required_minutes']} min\n"
+                f"**Dias necessários:** {config['required_days']} dias\n"
                 f"**Expulsão sem cargo:** {config['kick_after_days']} dias"
             ),
             inline=False
         )
 
         # Seção de Canais
+        notification_channel_mention = f"<#{config['notification_channel']}>" if config.get('notification_channel') else "Não definido"
+        log_channel_mention = f"<#{config['log_channel']}>" if config.get('log_channel') else "Não definido"
+        absence_channel_mention = f"<#{config['absence_channel']}>" if config.get('absence_channel') else "Não definido"
+        
         embed.add_field(
             name="📌 Canais",
             value=(
-                f"**Logs:** <#{config['log_channel']}>\n"
-                f"**Notificações:** <#{config['notification_channel']}>\n"
-                f"**Ausência:** <#{config['absence_channel']}>" if config.get('absence_channel') else "**Ausência:** Não definido"
+                f"**Logs:** {log_channel_mention}\n"
+                f"**Notificações:** {notification_channel_mention}\n"
+                f"**Ausência (Voz):** {absence_channel_mention}"
             ),
-            inline=True
-        )
-
-        # Seção de Whitelist
-        embed.add_field(
-            name="🛡️ Whitelist",
-            value=(
-                f"**Usuários:** {len(whitelist_users)}\n"
-                f"**Cargos:** {len(whitelist_roles)}"
-            ),
-            inline=True
+            inline=False
         )
 
         # Seção de Cargos
+        embed.add_field(name="Monitorados por Inatividade", value=tracked_roles_mentions, inline=True)
+        embed.add_field(name="Permissão de Comandos", value=allowed_roles_mentions, inline=True)
+        embed.add_field(name="Notificações por DM", value=dm_notification_roles_mentions, inline=True)
+        
+        # Seção de Whitelist
+        whitelist_users_text = "\n".join(whitelist_users) if whitelist_users else "Nenhum"
+        whitelist_roles_text = "\n".join(whitelist_roles) if whitelist_roles else "Nenhum"
         embed.add_field(
-            name="🎖️ Cargos",
+            name="🛡️ Whitelist (Ignorados pelo bot)",
             value=(
-                f"**Monitorados:** {len(tracked_roles)}\n"
-                f"**Permitidos:** {len(allowed_roles)}"
+                f"**Usuários:**\n{whitelist_users_text}\n"
+                f"**Cargos:**\n{whitelist_roles_text}"
             ),
-            inline=True
+            inline=False
         )
-
+        
         # Seção de Avisos
         if warnings_config:
             embed.add_field(
@@ -784,13 +859,14 @@ async def show_config(interaction: discord.Interaction):
         await interaction.response.send_message(embed=embed)
         logger.info("Configuração exibida com sucesso")
     except Exception as e:
-        logger.error(f"Erro ao mostrar configuração: {e}")
+        logger.error(f"Erro ao mostrar configuração: {e}", exc_info=True)
         embed = discord.Embed(
             title="❌ Erro",
             description="Ocorreu um erro ao mostrar a configuração. Por favor, tente novamente.",
             color=discord.Color.red()
         )
         await interaction.response.send_message(embed=embed)
+
 
 @bot.tree.command(name="user_activity", description="Verifica as estatísticas de atividade de um usuário")
 @app_commands.describe(
