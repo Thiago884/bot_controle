@@ -1,3 +1,5 @@
+# bot_commands.py
+
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -1098,7 +1100,7 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
 @bot.tree.command(name="activity_ranking", description="Mostra o ranking dos usuários mais ativos")
 @app_commands.describe(
     days="Período em dias para análise (1-30)",
-    limit="Número de usuários para mostrar (3-10)"
+    limit="Número de usuários para mostrar (3-20)"
 )
 @allowed_roles_only()
 @app_commands.checks.cooldown(1, 60.0, key=lambda i: (i.guild_id, i.user.id))
@@ -1111,9 +1113,9 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
                 "⚠️ O período deve ser entre 1 e 30 dias.", ephemeral=True)
             return
 
-        if limit < 3 or limit > 10:
+        if limit < 3 or limit > 20:
             await interaction.response.send_message(
-                "⚠️ O limite deve ser entre 3 e 10 usuários.", ephemeral=True)
+                "⚠️ O limite deve ser entre 3 e 20 usuários.", ephemeral=True)
             return
 
         await interaction.response.defer(thinking=True)
@@ -1126,9 +1128,9 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
         end_date = datetime.now(pytz.utc)
         start_date = end_date - timedelta(days=days)
 
-        # Obter ranking completo do banco de dados
         async with bot.db.pool.acquire() as conn:
-            results = await conn.fetch('''
+            # Consulta otimizada para buscar apenas o top N de usuários
+            top_results = await conn.fetch('''
                 SELECT
                     user_id,
                     SUM(duration) as total_time,
@@ -1141,10 +1143,23 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
                 AND leave_time <= $3
                 GROUP BY user_id
                 ORDER BY total_time DESC
+                LIMIT $4
+            ''', interaction.guild.id, start_date, end_date, limit)
+
+            # Consulta para obter as estatísticas gerais de todos os usuários no período
+            general_stats = await conn.fetchrow('''
+                SELECT
+                    COUNT(DISTINCT user_id) as total_users,
+                    COUNT(*) as total_sessions,
+                    SUM(duration) as total_time
+                FROM voice_sessions
+                WHERE guild_id = $1
+                AND join_time >= $2
+                AND leave_time <= $3
             ''', interaction.guild.id, start_date, end_date)
 
         # Processar resultados
-        if not results:
+        if not top_results:
             embed = discord.Embed(
                 title=f"🏆 Ranking de Atividade (últimos {days} dias)",
                 description=f"ℹ️ Nenhuma sessão de voz registrada nos últimos {days} dias.",
@@ -1152,9 +1167,6 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
             )
             await interaction.followup.send(embed=embed)
             return
-
-        # Pegar apenas os top N resultados
-        top_results = results[:limit]
 
         # Obter informações dos membros de forma mais eficiente
         member_ids = [row['user_id'] for row in top_results]
@@ -1185,10 +1197,11 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
                 f"⌀ {avg_session:.1f} min/sessão)"
             )
 
-        # Calcular estatísticas gerais
-        total_sessions = sum(row['session_count'] for row in results)
-        total_time = sum(row['total_time'] for row in results)
-        avg_time_per_user = total_time / len(results) if results else 0
+        # Calcular estatísticas gerais a partir da segunda consulta
+        total_users_active = general_stats['total_users'] if general_stats else 0
+        total_sessions_all = general_stats['total_sessions'] if general_stats else 0
+        total_time_all = general_stats['total_time'] if general_stats else 0
+        avg_time_per_user = total_time_all / total_users_active if total_users_active > 0 else 0
 
         # Criar embed
         embed = discord.Embed(
@@ -1201,9 +1214,9 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
         embed.add_field(
             name="📊 Estatísticas Gerais",
             value=(
-                f"**Total de usuários ativos:** {len(results)}\n"
-                f"**Total de sessões:** {total_sessions}\n"
-                f"**Tempo total em voz:** {total_time/3600:.1f}h\n"
+                f"**Total de usuários ativos:** {total_users_active}\n"
+                f"**Total de sessões:** {total_sessions_all}\n"
+                f"**Tempo total em voz:** {total_time_all/3600:.1f}h\n"
                 f"**Média por usuário:** {avg_time_per_user/3600:.1f}h"
             ),
             inline=False
