@@ -1563,94 +1563,97 @@ class ConfirmRestoreView(discord.ui.View):
         self.stop()
 
     @discord.ui.button(label="Confirmar Devolução", style=discord.ButtonStyle.green, custom_id="confirm_restore")
-    
     async def confirm_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(thinking=True, ephemeral=True)
+        # Resposta inicial para o usuário saber que o processo começou
+        await interaction.response.send_message("⏳ Iniciando devolução de cargos... Isso pode levar um momento.", ephemeral=True)
+        
         restored_count = 0
+        dm_sent_count = 0
         error_count = 0
-        log_lines = []
-        forgiveness_messages_sent = 0  # <-- Contador adicionado
+        
+        success_logs = []
+        failure_logs = []
 
-        # iterate over a copy to avoid mutation issues
-        for member, roles in list(self.roles_to_restore.items()):
+        # Itera sobre os membros para devolver os cargos
+        for member, roles in self.roles_to_restore.items():
             try:
-                # Add roles (respecting hierarchy will raise Forbidden if not allowed)
+                # 1. DEVOLVER CARGOS
                 start = time.time()
-                await member.add_roles(*roles, reason="Reversão de remoção por inatividade via comando /devolver_cargos.")
+                await member.add_roles(*roles, reason=f"Reversão de remoção por inatividade via /devolver_cargos por {interaction.user.name}.")
                 perf_metrics.record_api_call(time.time() - start)
-
+                
                 restored_count += len(roles)
-                log_lines.append(f"✅ Devolvido(s) {', '.join(r.name for r in roles)} para {member}")
+                success_logs.append(f"✅ Devolvidos {len(roles)} cargos para {member.display_name}.")
 
-                # Send forgiveness messages (best-effort)
-                for role in roles:
-                    try:
-                        await send_forgiveness_message(member, role)
-                        forgiveness_messages_sent += 1  # <-- Contador incrementado
-                    except Exception as e:
-                        logger.warning(f"Falha ao enviar mensagem de perdão para {member}: {e}", exc_info=True) # <-- Log melhorado
-
-                # Try to log to DB (best-effort)
+                # 2. ENVIAR UMA ÚNICA MENSAGEM DE PERDÃO (APÓS A OTIMIZAÇÃO)
                 try:
-                    start = time.time()
-                    await bot.db.log_restored_roles(member.id, member.guild.id, [r.id for r in roles])
-                    perf_metrics.record_db_query(time.time() - start)
-                except Exception:
-                    logger.debug("Falha ao registrar devolução no DB, ignorando.")
+                    # Chame a função `send_forgiveness_message` atualizada
+                    await send_forgiveness_message(member, roles)
+                    dm_sent_count += 1
+                except Exception as e:
+                    logger.warning(f"Falha ao enfileirar DM de perdão para {member.display_name}: {e}")
 
             except discord.Forbidden:
                 error_count += len(roles)
-                log_lines.append(f"❌ Falha ao devolver cargos para {member} (Permissão/Hierarquia).")
+                failure_logs.append(f"❌ Falha ao devolver cargos para {member.display_name} (Permissão/Hierarquia).")
+            except discord.HTTPException as http_err:
+                error_count += len(roles)
+                failure_logs.append(f"❌ Falha ao devolver cargos para {member.display_name} (Erro HTTP: {http_err.status}).")
             except Exception as e:
                 error_count += len(roles)
-                log_lines.append(f"❌ Falha ao devolver cargos para {member} (Erro: {e}).")
+                failure_logs.append(f"❌ Falha ao devolver cargos para {member.display_name} (Erro: {e}).")
+            
+            # 3. ADICIONAR DELAY INTELIGENTE
+            # Adiciona um pequeno delay entre cada membro para espaçar as requisições à API.
+            # 0.5 a 1.0 segundo é um valor seguro.
+            await asyncio.sleep(0.75)
 
-        embed = discord.Embed(
+        # Criar um embed de resumo detalhado
+        summary_embed = discord.Embed(
             title="✅ Operação Concluída: Devolução de Cargos",
-            description="A devolução de cargos foi finalizada.",
+            description=f"A devolução de cargos para as últimas {self.periodo_horas} horas foi finalizada.",
             color=discord.Color.green()
         )
-        embed.add_field(
-            name="Resumo da Operação",
+        summary_embed.add_field(
+            name="📊 Resumo da Operação",
             value=(
-                f"**Membros afetados:** {len(self.roles_to_restore)}\n"
-                f"**Total de cargos devolvidos:** {restored_count}\n"
-                f"**Falhas:** {error_count}"
+                f"**Membros Processados:** {len(self.roles_to_restore)}\n"
+                f"**Total de Cargos Devolvidos:** {restored_count}\n"
+                f"**Mensagens de Perdão Enviadas:** {dm_sent_count}\n"
+                f"**Falhas (cargos não devolvidos):** {error_count}"
             ),
             inline=False
         )
 
-        if log_lines:
-            embed.add_field(name="Detalhes (amostra)", value="\n".join(log_lines[:10]), inline=False)
-
-        await interaction.followup.send(embed=embed, ephemeral=True)
-
-        # Log the action to bot logs (best-effort)
-        try:
-            # <-- Log final melhorado para incluir o contador
-            await bot.log_action(
-                "Reversão de Remoção de Cargos",
-                interaction.user,
-                f"Executou /devolver_cargos para as últimas {self.periodo_horas} horas. "
-                f"Cargos devolvidos: {restored_count}. "
-                f"Mensagens de perdão enviadas: {forgiveness_messages_sent}. "
-                f"Falhas: {error_count}"
+        # Adicionar detalhes das falhas, se houver
+        if failure_logs:
+            summary_embed.add_field(
+                name="⚠️ Detalhes das Falhas",
+                value="\n".join(failure_logs[:10]), # Mostra as 10 primeiras falhas
+                inline=False
             )
-        except Exception as e:
-            logger.debug(f"Falha ao logar ação: {e}")
+
+        # Envia o resumo para o admin que executou o comando
+        await interaction.followup.send(embed=summary_embed, ephemeral=True)
+
+        # Loga a ação completa no canal de logs do bot
+        log_details = (
+            f"Executou /devolver_cargos para as últimas {self.periodo_horas} horas.\n"
+            f"**Sucessos:** {restored_count} cargos para {len(success_logs)} membros.\n"
+            f"**DMs Enviadas:** {dm_sent_count}\n"
+            f"**Falhas:** {error_count}."
+        )
+        await bot.log_action(
+            "Reversão de Remoção de Cargos",
+            interaction.user,
+            log_details
+        )
 
         await self.disable_buttons()
 
-
     @discord.ui.button(label="Cancelar", style=discord.ButtonStyle.red, custom_id="cancel_restore")
     async def cancel_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(thinking=True, ephemeral=True)
-        embed = discord.Embed(
-            title="❌ Operação Cancelada",
-            description="A devolução de cargos foi cancelada.",
-            color=discord.Color.red()
-        )
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        await interaction.response.send_message("❌ Operação cancelada.", ephemeral=True)
         await self.disable_buttons()
 
 

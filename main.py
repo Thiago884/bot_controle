@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 import asyncio
 import time
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, List
 from discord.ext import tasks
 import random
 from collections import defaultdict
@@ -1565,7 +1565,11 @@ async def on_member_update(before: discord.Member, after: discord.Member):
                     time_since_removal = datetime.now(pytz.UTC) - removal_date
 
                     if time_since_removal <= timedelta(days=30):
-                        await send_forgiveness_message(after, role)
+                        # *** INÍCIO DA CORREÇÃO ***
+                        # Ajusta a chamada para a nova assinatura da função, passando o cargo como uma lista.
+                        await send_forgiveness_message(after, [role])
+                        # *** FIM DA CORREÇÃO ***
+                        
                         # O 'break' aqui é mantido para enviar apenas uma mensagem de perdão,
                         # mesmo que múltiplos cargos sejam devolvidos de uma vez.
                         break
@@ -1581,21 +1585,25 @@ async def on_member_update(before: discord.Member, after: discord.Member):
         except Exception as e:
             logger.error(f"Erro ao processar atualização de membro: {e}")
 
+# *** INÍCIO DA CORREÇÃO ***
+# Função atualizada para aceitar uma lista de cargos e enviar uma única DM consolidada.
+async def send_forgiveness_message(member: discord.Member, roles: List[discord.Role]):
+    """Envia UMA mensagem de perdão quando um ou mais cargos são devolvidos."""
+    if not roles:
+        return
 
-async def send_forgiveness_message(member: discord.Member, role: discord.Role):
-    """Envia mensagem de perdão quando um cargo é devolvido"""
     try:
-        # Verificar se já foi enviada uma mensagem recentemente para este cargo
+        # Pega o primeiro cargo da lista para a verificação no DB,
+        # assumindo que uma mensagem por devolução é suficiente para o controle de spam.
+        role_for_db_check = roles[0]
         last_message = None
         try:
             if hasattr(bot, 'db') and bot.db:
-                last_message = await bot.db.get_last_forgiveness_message(member.id, member.guild.id, role.id)
+                last_message = await bot.db.get_last_forgiveness_message(member.id, member.guild.id, role_for_db_check.id)
         except Exception as e:
             logger.error(f"Erro ao obter último registro de mensagem de perdão do DB: {e}")
-            last_message = None
 
         if last_message:
-            # last_message pode ser datetime ou string
             try:
                 lm = last_message
                 if isinstance(lm, str):
@@ -1603,22 +1611,26 @@ async def send_forgiveness_message(member: discord.Member, role: discord.Role):
                     lm = parser.parse(lm)
                 if lm.tzinfo is None:
                     lm = lm.replace(tzinfo=pytz.UTC)
+                
+                if (datetime.now(pytz.UTC) - lm) < timedelta(days=7):
+                    logger.info(f"Mensagem de perdão já enviada recentemente para {member.display_name}.")
+                    return
             except Exception:
-                lm = None
-
-            if lm and (datetime.now(pytz.UTC) - lm) < timedelta(days=7):
-                logger.info(f"Mensagem de perdão já enviada recentemente para {member.display_name} sobre o cargo {role.name}")
-                return
+                pass
 
         # Obter configurações atuais
         required_minutes = bot.config.get('required_minutes', 15)
         required_days = bot.config.get('required_days', 2)
         monitoring_period = bot.config.get('monitoring_period', 14)
 
+        # Formata a lista de cargos para a mensagem
+        roles_text = "\n".join(f"• **{role.name}**" for role in roles)
+        title = "🎉 Cargo Devolvido!" if len(roles) == 1 else "🎉 Cargos Devolvidos!"
+        
         message = (
-            f"🎉 **Seu cargo foi devolvido!** 🎉\n\n"
-            f"O cargo **{role.name}** foi devolvido e você foi perdoado pelo seu período de inatividade. "
-            f"Para mantê-lo, volte a ficar ativo nos canais de voz do servidor **{member.guild.name}**.\n\n"
+            f"🎉 **Seu(s) cargo(s) foi(ram) devolvido(s)!** 🎉\n\n"
+            f"O(s) seguinte(s) cargo(s) foi(ram) devolvido(s) e você foi perdoado pelo seu período de inatividade:\n{roles_text}\n\n"
+            f"Para mantê-lo(s), volte a ficar ativo nos canais de voz do servidor **{member.guild.name}**.\n\n"
             f"**Requisitos Atuais:**\n"
             f"• Período de Análise: **{monitoring_period} dias**\n"
             f"• Tempo Mínimo por Dia: **{required_minutes} minutos**\n"
@@ -1626,7 +1638,7 @@ async def send_forgiveness_message(member: discord.Member, role: discord.Role):
         )
 
         embed = discord.Embed(
-            title="🎉 Cargo Devolvido!",
+            title=title,
             description=message,
             color=discord.Color.green(),
             timestamp=datetime.now(pytz.UTC)
@@ -1635,23 +1647,24 @@ async def send_forgiveness_message(member: discord.Member, role: discord.Role):
         embed.set_footer(text="Sistema de Controle de Atividades")
 
         await bot.send_dm(member, None, embed)
-        logger.info(f"Mensagem de perdão enviada para {member.display_name} pelo cargo {role.name}")
+        logger.info(f"Mensagem de perdão enviada para {member.display_name} pelos cargos: {', '.join(r.name for r in roles)}")
 
-        # Registrar o envio da mensagem de perdão
+        # Registrar o envio da mensagem de perdão (usando o primeiro cargo como referência)
         try:
             if hasattr(bot, 'db') and bot.db:
-                await bot.db.log_forgiveness_message(member.id, member.guild.id, role.id)
+                await bot.db.log_forgiveness_message(member.id, member.guild.id, role_for_db_check.id)
         except Exception as e:
             logger.error(f"Erro ao registrar mensagem de perdão no DB: {e}")
 
         await bot.log_action(
             "Mensagem de Perdão Enviada",
             member,
-            f"Cargo devolvido: {role.name}"
+            f"Cargo(s) devolvido(s): {', '.join(r.name for r in roles)}"
         )
 
     except Exception as e:
         logger.error(f"Erro ao enviar mensagem de perdão para {member}: {e}")
+# *** FIM DA CORREÇÃO ***
 
 
 @bot.event
