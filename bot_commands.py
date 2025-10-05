@@ -1603,10 +1603,10 @@ class ConfirmRestoreView(discord.ui.View):
                 error_count += len(roles)
                 failure_logs.append(f"❌ Falha ao devolver cargos para {member.display_name} (Erro: {e}).")
             
-            # 3. ADICIONAR DELAY INTELIGENTE
-            # Adiciona um pequeno delay entre cada membro para espaçar as requisições à API.
-            # 0.5 a 1.0 segundo é um valor seguro.
-            await asyncio.sleep(0.75)
+            # 3. ADICIONAR DELAY INTELIGENTE E MAIS LONGO (A CORREÇÃO PRINCIPAL ESTÁ AQUI)
+            # Aumentamos o delay para reduzir a frequência das requisições à API.
+            # Isso é crucial para evitar rate limits ao processar muitos membros.
+            await asyncio.sleep(1.5)
 
         # Criar um embed de resumo detalhado
         summary_embed = discord.Embed(
