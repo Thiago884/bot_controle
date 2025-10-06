@@ -1815,4 +1815,3 @@ async def devolver_cargos_error(interaction: discord.Interaction, error: app_com
                 await interaction.followup.send("❌ Ocorreu um erro ao executar este comando.", ephemeral=True)
     except Exception as e:
         logger.error(f"Erro ao tratar erro do comando devolver_cargos: {e}")
-# --- FIM DA CORREÇÃO ---
