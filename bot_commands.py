@@ -1714,6 +1714,12 @@ async def devolver_cargos(interaction: discord.Interaction, periodo_horas: int =
                     logger.warning(f"Erro ao buscar membro {uid}: {e}")
                     member_cache[uid] = None
                     continue
+            
+            # --- INÍCIO DA CORREÇÃO ---
+            # Adiciona um delay para evitar rate limits do Cloudflare (Erro 1015)
+            # ao buscar muitos membros que não estão em cache.
+            await asyncio.sleep(0.5)
+            # --- FIM DA CORREÇÃO ---
 
             member = member_cache[uid]
             if not member:
