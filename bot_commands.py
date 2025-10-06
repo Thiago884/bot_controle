@@ -1533,6 +1533,7 @@ async def set_log_channel(interaction: discord.Interaction, channel: discord.Tex
         await interaction.response.send_message(embed=embed)
 
 
+# --- INÍCIO DA CORREÇÃO ---
 # NOVA CLASSE VIEW PARA CONFIRMAÇÃO (ATUALIZADA)
 class ConfirmRestoreView(discord.ui.View):
     """View com botões de confirmação e cancelamento para a devolução de cargos."""
@@ -1814,3 +1815,4 @@ async def devolver_cargos_error(interaction: discord.Interaction, error: app_com
                 await interaction.followup.send("❌ Ocorreu um erro ao executar este comando.", ephemeral=True)
     except Exception as e:
         logger.error(f"Erro ao tratar erro do comando devolver_cargos: {e}")
+# --- FIM DA CORREÇÃO ---
