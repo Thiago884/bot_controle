@@ -1723,7 +1723,27 @@ async def devolver_cargos(interaction: discord.Interaction, periodo_horas: int =
         await interaction.followup.send("ℹ️ Todos os cargos removidos já foram devolvidos ou os membros/cargos não existem mais.", ephemeral=True)
         return
 
-    # 3. Mostrar embed de confirmação
+    # --- INÍCIO DA MODIFICAÇÃO ---
+    # 3. Formatar lista de membros para exibição no embed
+    members_to_restore_list = list(roles_to_restore.keys())
+    member_mentions = []
+    char_count = 0
+    # Limite de 1000 para dar espaço para a mensagem "... e mais X"
+    max_chars = 1000
+
+    for member in members_to_restore_list:
+        mention = f"• {member.mention}\n"
+        if char_count + len(mention) > max_chars:
+            remaining_count = len(members_to_restore_list) - len(member_mentions)
+            member_mentions.append(f"... e mais {remaining_count} membro(s).")
+            break
+        member_mentions.append(mention)
+        char_count += len(mention)
+    
+    members_text = "".join(member_mentions)
+    # --- FIM DA MODIFICAÇÃO ---
+
+    # 4. Mostrar embed de confirmação
     total_roles = sum(len(roles) for roles in roles_to_restore.values())
     embed = discord.Embed(
         title="⚠️ Confirmação de Devolução de Cargos",
@@ -1734,6 +1754,16 @@ async def devolver_cargos(interaction: discord.Interaction, periodo_horas: int =
         ),
         color=discord.Color.orange()
     )
+    
+    # --- INÍCIO DA MODIFICAÇÃO ---
+    # Adiciona o campo com a lista de membros ao embed
+    embed.add_field(
+        name="👥 Membros Afetados",
+        value=members_text if members_text else "Nenhum membro encontrado para restauração.",
+        inline=False
+    )
+    # --- FIM DA MODIFICAÇÃO ---
+
     embed.set_footer(text="Esta ação não pode ser desfeita. A confirmação expira em 5 minutos.")
 
     view = SmartRestoreView(author=interaction.user, roles_to_restore=roles_to_restore, periodo_horas=periodo_horas)
