@@ -1,4 +1,5 @@
 # main.py
+
 import discord
 from discord.ext import commands
 import pytz
@@ -24,6 +25,14 @@ from threading import Thread
 
 # Importe sua classe Database
 from database import Database
+
+# --- INÍCIO DA MODIFICAÇÃO: Exceção customizada para Rate Limits ---
+# Criamos uma exceção específica para facilitar o tratamento de erros de rate limit.
+class RateLimitException(Exception):
+    def __init__(self, message, retry_after: float):
+        super().__init__(message)
+        self.retry_after = retry_after
+# --- FIM DA MODIFICAÇÃO ---
 
 # Configuração do logger
 def setup_logger():
@@ -607,46 +616,40 @@ class InactivityBot(commands.Bot):
             logger.critical("Falha na inicialização do banco de dados. As tarefas não serão iniciadas.")
             self.db_connection_failed = True
     
+    # --- INÍCIO DA MODIFICAÇÃO: Função de envio de mensagens refatorada ---
     async def send_with_fallback(self, destination, content=None, embed=None, file=None):
-        """Envia mensagens com tratamento de erros e fallback para rate limits."""
-        max_retries = 3
-        base_delay = 2.0
-        
-        for attempt in range(max_retries):
-            try:
-                if file:
-                    if isinstance(file, BytesIO):
-                        file.seek(0)
-                        file = discord.File(file, filename='activity_report.png')
-                    await destination.send(content=content, embed=embed, file=file)
-                elif embed:
-                    await destination.send(embed=embed)
-                elif content:
-                    await destination.send(content)
-                return  # Se enviou com sucesso, sai do loop
+        """
+        Envia mensagens com tratamento de erro, mas sem loop de retry interno.
+        Ele agora propaga o erro de rate limit para o chamador.
+        """
+        try:
+            if file:
+                # Garante que o buffer do arquivo está no início
+                if isinstance(file, BytesIO):
+                    file.seek(0)
+                    # A conversão para discord.File deve ser feita aqui se ainda não foi
+                    if not isinstance(file, discord.File):
+                         file = discord.File(file, filename='image.png') # Nome de arquivo genérico
+                await destination.send(content=content, embed=embed, file=file)
+            elif embed:
+                await destination.send(embed=embed)
+            elif content:
+                await destination.send(content)
                 
-            except discord.HTTPException as e:
-                if e.status == 429:  # Rate limited (limite de requisições atingido)
-                    # Usar delay exponencial com jitter
-                    delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
-                    logger.warning(f"Rate limit atingido (tentativa {attempt + 1}/{max_retries}). Tentando novamente em {delay:.2f} segundos")
-                    
-                    # Atualizar monitor de rate limits
-                    self.rate_limit_monitor.adaptive_delay = min(
-                        self.rate_limit_monitor.max_delay,
-                        self.rate_limit_monitor.adaptive_delay * 1.5
-                    )
-                    
-                    await asyncio.sleep(delay)
-                    continue
-                    
-                logger.error(f"Erro HTTP ao enviar mensagem para {destination}: {e}")
-                raise
+        except discord.HTTPException as e:
+            if e.status == 429:  # Rate limited
+                retry_after = e.retry_after or self.rate_limit_monitor.adaptive_delay
+                logger.warning(f"Rate limit atingido ao enviar para {destination}. O chamador irá tratar.")
+                # Propaga o erro com a informação de retry_after
+                raise RateLimitException(f"Rate limited by Discord API", retry_after) from e
+            else:
+                logger.error(f"Erro HTTP {e.status} não tratável ao enviar mensagem para {destination}: {e.text}")
+                raise  # Propaga outros erros HTTP
                 
-            except Exception as e:
-                logger.error(f"Erro inesperado ao enviar mensagem para {destination}: {e}")
-                if attempt == max_retries - 1:
-                    raise
+        except Exception as e:
+            logger.error(f"Erro inesperado ao enviar mensagem para {destination}: {e}", exc_info=True)
+            raise # Propaga outros erros
+    # --- FIM DA MODIFICAÇÃO ---
 
     async def on_error(self, event, *args, **kwargs):
         """Tratamento de erros genéricos."""
@@ -769,18 +772,24 @@ class InactivityBot(commands.Bot):
             except Exception as e:
                 logger.error(f"Erro no health check: {e}")
                 await asyncio.sleep(60)
-
+    
+    # --- INÍCIO DA MODIFICAÇÃO: Lógica do processador de filas refatorada ---
     async def process_queues(self):
+        """
+        Processador de filas redesenhado para lidar corretamente com rate limits,
+        evitando o erro 'task_done() called too many times'.
+        """
         await self.wait_until_ready()
         while True:
             try:
-                # Verificar rate limits antes de processar
+                # 1. Checagem global de rate limit antes de processar qualquer coisa
                 if self.rate_limit_monitor.should_delay():
                     delay = self.rate_limit_monitor.adaptive_delay
-                    logger.debug(f"Delay ativado por rate limit. Esperando {delay:.2f} segundos")
+                    logger.debug(f"Delay global de rate limit ativado. Esperando {delay:.2f} segundos")
                     await asyncio.sleep(delay)
                     continue
 
+                # 2. Processamento da fila de eventos de voz (sem alterações)
                 if not self.voice_event_queue.empty():
                     batch = []
                     for _ in range(min(self._batch_processing_size, self.voice_event_queue.qsize())):
@@ -790,44 +799,45 @@ class InactivityBot(commands.Bot):
                     
                     for _ in batch:
                         self.voice_event_queue.task_done()
-                
+
+                # 3. Processamento da fila de mensagens (lógica principal corrigida)
                 item, priority = await self.message_queue.get_next_message()
                 if item is None:
-                    await asyncio.sleep(0.5)  # Aumentado o sleep quando não há mensagens
+                    await asyncio.sleep(0.2) # Sleep menor quando a fila está vazia
                     continue
-                    
+
                 try:
-                    if isinstance(item, tuple):
-                        if len(item) == 4:
-                            destination, content, embed, file = item
-                            if isinstance(destination, (discord.TextChannel, discord.User, discord.Member)):
-                                await self.send_with_fallback(destination, content, embed, file)
-                            else:
-                                logger.warning(f"Destino inválido para mensagem: {type(destination)}")
-                        elif len(item) == 2:
-                            destination, embed = item
-                            if isinstance(destination, (discord.TextChannel, discord.User, discord.Member)):
-                                await self.send_with_fallback(destination, embed=embed)
-                            else:
-                                logger.warning(f"Destino inválido para mensagem: {type(destination)}")
-                        else:
-                            logger.warning(f"Item da fila em formato desconhecido: {item}")
-                    elif isinstance(item, (discord.TextChannel, discord.User, discord.Member)):
-                        logger.warning(f"Item da fila é um destino direto, mas não há conteúdo: {item}")
+                    # Tenta processar o item da fila
+                    destination, content, embed, file = item
+                    if isinstance(destination, (discord.TextChannel, discord.User, discord.Member)):
+                        await self.send_with_fallback(destination, content, embed, file)
                     else:
-                        logger.warning(f"Item da fila não é um destino válido: {type(item)}")
+                         logger.warning(f"Destino inválido para mensagem na fila: {type(destination)}")
+                    
+                    # Se o envio foi bem-sucedido, marca a tarefa como concluída
+                    self.message_queue.task_done(priority)
+
+                except RateLimitException as e:
+                    # Se um rate limit ocorreu, o item NÃO é concluído.
+                    # Ele é colocado de volta na fila para uma nova tentativa.
+                    logger.warning(f"Rate limit detectado pelo processador. Devolvendo item para a fila. Aguardando {e.retry_after:.2f}s.")
+                    await self.message_queue.put(item, priority)
+                    # O 'get' anterior é balanceado por este 'put', então não chamamos task_done().
+                    await asyncio.sleep(e.retry_after) # Espera o tempo solicitado pela API
+
                 except Exception as e:
-                    logger.error(f"Erro ao processar item da fila: {e}")
-                    if "Cloudflare" in str(e) or "1015" in str(e):
-                        self.rate_limit_monitor.handle_cloudflare_block()
-                    
-                self.message_queue.task_done(priority)
-                    
+                    # Se ocorreu um erro irrecuperável (ex: Forbidden, NotFound), o item é descartado.
+                    logger.error(f"Erro irrecuperável ao processar item da fila: {e}. O item será descartado.", exc_info=True)
+                    # Marcamos como concluído para que não seja tentado novamente.
+                    self.message_queue.task_done(priority)
+            
             except Exception as e:
-                logger.error(f"Erro no processador de filas: {e}")
+                # Erro no próprio loop do processador (não relacionado a um item específico)
+                logger.critical(f"Erro crítico no loop do processador de filas: {e}", exc_info=True)
                 if "Cloudflare" in str(e) or "1015" in str(e):
                     self.rate_limit_monitor.handle_cloudflare_block()
-                await asyncio.sleep(5)  # Aumentado o tempo de espera em caso de erro
+                await asyncio.sleep(5)
+    # --- FIM DA MODIFICAÇÃO ---
 
     async def _process_voice_batch(self, batch):
         processed = {}

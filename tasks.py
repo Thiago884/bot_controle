@@ -275,9 +275,7 @@ class BatchProcessor:
                         await self.bot.send_warning(member, 'final')
                         await self.bot.db.log_removed_roles(member.id, member.guild.id, [r.id for r in current_member_roles])
                         
-                        # --- INÍCIO DA CORREÇÃO ---
-
-                        # Mensagem para o canal de logs (já existia)
+                        # --- INÍCIO DA MODIFICAÇÃO: Notificações de remoção de cargos ---
                         log_message = (
                             f"Cargos removidos: {', '.join(removed_role_names)}\n"
                             f"Dias válidos: {len(valid_days)}/{required_days}\n"
@@ -285,11 +283,11 @@ class BatchProcessor:
                         )
                         await self.bot.log_action("Cargo Removido", member, log_message)
 
-                        # 1. Notificar no canal de notificações
+                        # 1. Notificar no canal de notificações público
                         notification_message = f"🚨 {member.mention} perdeu o(s) cargo(s) `{', '.join(removed_role_names)}` por inatividade."
-                        await self.bot.notify_roles(notification_message)
+                        await self.bot.notify_roles(notification_message, is_warning=True)
                         
-                        # 2. Notificar administradores via DM
+                        # 2. Notificar administradores via DM com um embed detalhado
                         admin_embed = discord.Embed(
                             title="🚨 Cargos Removidos por Inatividade",
                             description=f"O membro {member.mention} não cumpriu os requisitos de atividade.",
@@ -298,7 +296,7 @@ class BatchProcessor:
                         )
                         admin_embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
                         admin_embed.add_field(name="Usuário", value=f"{member.mention} (`{member.id}`)", inline=False)
-                        admin_embed.add_field(name="Cargos Removidos", value=', '.join(removed_role_names), inline=False)
+                        admin_embed.add_field(name="Cargos Removidos", value=', '.join(f"`{name}`" for name in removed_role_names), inline=False)
                         admin_embed.add_field(
                             name="Detalhes da Inatividade", 
                             value=(
@@ -309,8 +307,7 @@ class BatchProcessor:
                         )
                         admin_embed.set_footer(text=f"Servidor: {member.guild.name}")
                         await self.bot.notify_admins_dm(member.guild, embed=admin_embed)
-
-                        # --- FIM DA CORREÇÃO ---
+                        # --- FIM DA MODIFICAÇÃO ---
                         
                         return result # Membro perdeu os cargos, encerra o processamento para ele
                     except Exception as e:
@@ -904,13 +901,12 @@ async def process_member_cleanup(member: discord.Member, guild: discord.Guild, k
                         await bot.log_action("Erro ao Expulsar", member, "A hierarquia de cargos impede a expulsão.")
                         return False
 
-                    await member.kick(reason=f"Sem cargos por mais de {kick_after_days} dias.")
-                    
-                    # Notificar administradores por DM
+                    # --- INÍCIO DA MODIFICAÇÃO: Notificações de expulsão ---
+                    # 1. Notificar administradores por DM ANTES de expulsar
                     admin_embed = discord.Embed(
                         title="👢 Membro Expulso por Inatividade",
                         description=f"{member.mention} foi expulso do servidor.",
-                        color=discord.Color.from_rgb(156, 39, 176),
+                        color=discord.Color.from_rgb(156, 39, 176), # Roxo
                         timestamp=datetime.now(pytz.utc)
                     )
                     admin_embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
@@ -918,14 +914,20 @@ async def process_member_cleanup(member: discord.Member, guild: discord.Guild, k
                     admin_embed.add_field(name="Motivo", value=f"Sem cargos por mais de {kick_after_days} dias.", inline=False)
                     admin_embed.set_footer(text=f"Servidor: {guild.name}")
                     await bot.notify_admins_dm(guild, embed=admin_embed)
-
-                    # Registrar a expulsão no banco de dados
+                    
+                    # 2. Expulsar o membro
+                    await member.kick(reason=f"Sem cargos por mais de {kick_after_days} dias.")
+                    
+                    # 3. Registrar a expulsão no banco de dados
                     await bot.db.log_kicked_member(member.id, guild.id, f"Sem cargos por mais de {kick_after_days} dias")
                     
-                    # Logar a ação no canal de logs
+                    # 4. Logar a ação no canal de logs
                     await bot.log_action("Membro Expulso", member, f"Motivo: Sem cargos por mais de {kick_after_days} dias.\nTempo sem cargos: {time_without_roles.days} dias")
-                    await bot.notify_roles(f"👢 {member.mention} foi expulso por estar sem cargos há mais de {kick_after_days} dias.")
                     
+                    # 5. Notificar no canal de notificações público
+                    await bot.notify_roles(f"👢 O usuário `{member.display_name}` foi expulso por estar sem cargos há mais de {kick_after_days} dias.", is_warning=True)
+                    # --- FIM DA MODIFICAÇÃO ---
+
                     # Limpar o marcador após a expulsão bem-sucedida
                     await bot.db.pool.execute(
                         "DELETE FROM removed_roles WHERE user_id = $1 AND guild_id = $2 AND role_id = $3",
