@@ -386,58 +386,69 @@ class InactivityBot(commands.Bot):
     # O método `start` foi reescrito para usar uma estratégia de backoff muito mais
     # paciente e robusta, especialmente contra bloqueios do Cloudflare (Error 1015).
     async def start(self, token: str, *, reconnect: bool = True) -> None:
-        """Sobrescreve o método start para lidar com rate limits de forma robusta."""
-        
-        wait_before_next_try = 0
-
-        while self._connection_attempts < self._max_connection_attempts:
+        """
+        Sobrescreve o método start para lidar com falhas de conexão de forma robusta,
+        limpando recursos e esperando pacientemente antes de tentar novamente.
+        """
+        while not self.is_closed():
+            self._connection_attempts += 1
+            wait_duration = 0
+            
             try:
-                if wait_before_next_try > 0:
-                    logger.info(f"Aguardando {wait_before_next_try:.2f} segundos antes da próxima tentativa de conexão.")
-                    await asyncio.sleep(wait_before_next_try)
-
-                self._connection_attempts += 1
-                logger.info(f"Tentando conectar ao Discord (Tentativa {self._connection_attempts}/{self._max_connection_attempts})...")
-                await super().start(token, reconnect=reconnect)
+                # Só tenta conectar se não estiver já conectado
+                if not self.is_ready():
+                    logger.info(f"Tentando conectar ao Discord (Tentativa {self._connection_attempts}/{self._max_connection_attempts})...")
+                    await self.login(token)
+                    await self.connect(reconnect=reconnect)
                 
-                logger.info("O bot foi desconectado. Encerrando o loop de conexão.")
+                # Se a conexão for bem-sucedida e depois cair, o loop de reconexão interno do discord.py assume.
+                # Se o bot for encerrado corretamente, saímos do loop.
                 break
 
             except discord.HTTPException as e:
-                # Lida com erros de conexão HTTP, incluindo rate limits.
-                if "Cloudflare" in str(e) or "1015" in str(e) or e.status == 429:
-                    self.rate_limit_monitor.handle_cloudflare_block()
-                    # Para bloqueios Cloudflare, usar um backoff longo e aleatório.
-                    # Ex: 1ª falha: ~2.5 min, 2ª falha: ~5 min, 3ª falha: ~7.5 min
-                    wait_before_next_try = 120 + random.uniform(30, 60) * self._connection_attempts
+                # A sessão de cliente já foi fechada pela biblioteca nesta exceção.
+                # Limpa o estado interno para a próxima tentativa.
+                await self.http.close()
+                self._ready.clear()
+                self._connection.clear()
+
+                if "Cloudflare" in str(e) or e.status == 429 or "1015" in str(e):
+                    # Para bloqueios do Cloudflare, o backoff precisa ser longo e com variação.
+                    # Ex: 1ª falha: ~2.5 min, 2ª falha: ~5 min, etc.
+                    wait_duration = 120 + random.uniform(30, 60) * self._connection_attempts
                     logger.warning(
                         f"Bloqueio do Cloudflare/Rate limit severo detectado. "
-                        f"Tentativa {self._connection_attempts}/{self._max_connection_attempts} falhou."
+                        f"Tentativa {self._connection_attempts} falhou."
                     )
                 else:
-                    # Para outros erros HTTP, usar um backoff exponencial.
-                    wait_before_next_try = (self._connection_delay * (2 ** (self._connection_attempts - 1))) + random.uniform(5, 15)
+                    # Para outros erros HTTP, usa um backoff exponencial padrão.
+                    wait_duration = (self._connection_delay * (2 ** (self._connection_attempts - 1))) + random.uniform(5, 15)
                     logger.error(
                         f"Erro HTTP {e.status} ao conectar. "
-                        f"Tentativa {self._connection_attempts}/{self._max_connection_attempts} falhou.",
-                        exc_info=True
+                        f"Tentativa {self._connection_attempts} falhou.", exc_info=False
                     )
-                
-                if self._connection_attempts >= self._max_connection_attempts:
-                    logger.critical("Máximo de tentativas de conexão atingido devido a erro HTTP. Desistindo.")
-                    raise
-                    
+
             except Exception as e:
-                # Backoff para erros genéricos (ex: problemas de rede, etc.).
-                wait_before_next_try = (self._connection_delay * (2 ** (self._connection_attempts - 1))) + random.uniform(5, 15)
-                logger.error(
-                    f"Erro inesperado ao conectar. "
-                    f"Tentativa {self._connection_attempts}/{self._max_connection_attempts} falhou.",
-                    exc_info=True
-                )
+                # Limpa a conexão em caso de outros erros também.
+                if self.http:
+                    await self.http.close()
+                self._ready.clear()
+                self._connection.clear()
+                
+                # Backoff para erros genéricos (ex: problemas de rede).
+                wait_duration = (self._connection_delay * (2 ** (self._connection_attempts - 1))) + random.uniform(5, 15)
+                logger.error(f"Erro inesperado ao conectar: {e}", exc_info=True)
+
+            finally:
                 if self._connection_attempts >= self._max_connection_attempts:
-                    logger.critical("Máximo de tentativas de conexão atingido devido a erro inesperado. Desistindo.", exc_info=True)
-                    raise
+                    logger.critical("Máximo de tentativas de conexão atingido. Desistindo.")
+                    # Chama o close() final para garantir que tudo seja limpo.
+                    await self.close()
+                    break # Sai do loop while
+                
+                if wait_duration > 0 and not self.is_closed():
+                    logger.info(f"Aguardando {wait_duration:.2f} segundos antes da próxima tentativa de conexão.")
+                    await asyncio.sleep(wait_duration)
     # --- FIM DA CORREÇÃO ---
 
     async def initialize_db(self):
@@ -1867,4 +1878,7 @@ async def main():
             logger.critical(f"Erro ao iniciar o bot: {e}")
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot desligado manualmente.")
