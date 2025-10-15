@@ -408,7 +408,9 @@ class InactivityBot(commands.Bot):
             except discord.HTTPException as e:
                 # A sessão de cliente já foi fechada pela biblioteca nesta exceção.
                 # Limpa o estado interno para a próxima tentativa.
-                await self.http.close()
+                if self.http:
+                    await self.http.close()
+                self.http = discord.http.HTTPClient(self.loop) # <-- CORREÇÃO APLICADA
                 self._ready.clear()
                 self._connection.clear()
 
@@ -432,6 +434,7 @@ class InactivityBot(commands.Bot):
                 # Limpa a conexão em caso de outros erros também.
                 if self.http:
                     await self.http.close()
+                self.http = discord.http.HTTPClient(self.loop) # <-- CORREÇÃO APLICADA
                 self._ready.clear()
                 self._connection.clear()
                 
