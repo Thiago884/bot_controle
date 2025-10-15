@@ -360,7 +360,10 @@ class InactivityBot(commands.Bot):
         # Novos atributos para tratamento de conexão
         self._connection_attempts = 0
         self._max_connection_attempts = 5
-        self._connection_delay = 15.0  # Aumentado para 15 segundos
+        # --- INÍCIO DA CORREÇÃO ---
+        # Aumentado o delay base para ser mais paciente.
+        self._connection_delay = 30.0
+        # --- FIM DA CORREÇÃO ---
         
         # Novos atributos para controle de eventos
         self.event_counter = 0
@@ -379,43 +382,41 @@ class InactivityBot(commands.Bot):
         self.last_reconnect_time = datetime.now(pytz.UTC)
         logger.info("Filas de eventos limpas")
 
+    # --- INÍCIO DA CORREÇÃO ---
+    # O método `start` foi reescrito para usar uma estratégia de backoff muito mais
+    # paciente e robusta, especialmente contra bloqueios do Cloudflare (Error 1015).
     async def start(self, token: str, *, reconnect: bool = True) -> None:
         """Sobrescreve o método start para lidar com rate limits de forma robusta."""
         
-        # O _connection_delay será o tempo de espera *antes* da próxima tentativa.
-        # Inicializado para 0 para a primeira tentativa ser imediata (após o delay inicial no main).
         wait_before_next_try = 0
 
         while self._connection_attempts < self._max_connection_attempts:
             try:
-                # Esperar antes de tentar, exceto na primeira vez.
                 if wait_before_next_try > 0:
                     logger.info(f"Aguardando {wait_before_next_try:.2f} segundos antes da próxima tentativa de conexão.")
                     await asyncio.sleep(wait_before_next_try)
 
-                # A contagem de tentativas é feita antes da chamada
                 self._connection_attempts += 1
                 logger.info(f"Tentando conectar ao Discord (Tentativa {self._connection_attempts}/{self._max_connection_attempts})...")
                 await super().start(token, reconnect=reconnect)
                 
-                # Se super().start() retornar, significa que o bot desconectou.
-                # Quebramos o loop para permitir que o processo termine ou seja reiniciado pelo orquestrador.
                 logger.info("O bot foi desconectado. Encerrando o loop de conexão.")
                 break
 
             except discord.HTTPException as e:
-                # Este bloco lida com erros de conexão HTTP, incluindo rate limits.
+                # Lida com erros de conexão HTTP, incluindo rate limits.
                 if "Cloudflare" in str(e) or "1015" in str(e) or e.status == 429:
                     self.rate_limit_monitor.handle_cloudflare_block()
                     # Para bloqueios Cloudflare, usar um backoff longo e aleatório.
-                    wait_before_next_try = 60 + random.uniform(10, 25) * self._connection_attempts
+                    # Ex: 1ª falha: ~2.5 min, 2ª falha: ~5 min, 3ª falha: ~7.5 min
+                    wait_before_next_try = 120 + random.uniform(30, 60) * self._connection_attempts
                     logger.warning(
                         f"Bloqueio do Cloudflare/Rate limit severo detectado. "
                         f"Tentativa {self._connection_attempts}/{self._max_connection_attempts} falhou."
                     )
                 else:
                     # Para outros erros HTTP, usar um backoff exponencial.
-                    wait_before_next_try = (self._connection_delay * (2 ** (self._connection_attempts - 1))) + random.uniform(0, 5)
+                    wait_before_next_try = (self._connection_delay * (2 ** (self._connection_attempts - 1))) + random.uniform(5, 15)
                     logger.error(
                         f"Erro HTTP {e.status} ao conectar. "
                         f"Tentativa {self._connection_attempts}/{self._max_connection_attempts} falhou.",
@@ -424,11 +425,11 @@ class InactivityBot(commands.Bot):
                 
                 if self._connection_attempts >= self._max_connection_attempts:
                     logger.critical("Máximo de tentativas de conexão atingido devido a erro HTTP. Desistindo.")
-                    raise # Re-levanta a exceção para finalizar a thread do bot.
+                    raise
                     
             except Exception as e:
                 # Backoff para erros genéricos (ex: problemas de rede, etc.).
-                wait_before_next_try = (self._connection_delay * (2 ** (self._connection_attempts - 1))) + random.uniform(0, 5)
+                wait_before_next_try = (self._connection_delay * (2 ** (self._connection_attempts - 1))) + random.uniform(5, 15)
                 logger.error(
                     f"Erro inesperado ao conectar. "
                     f"Tentativa {self._connection_attempts}/{self._max_connection_attempts} falhou.",
@@ -437,6 +438,7 @@ class InactivityBot(commands.Bot):
                 if self._connection_attempts >= self._max_connection_attempts:
                     logger.critical("Máximo de tentativas de conexão atingido devido a erro inesperado. Desistindo.", exc_info=True)
                     raise
+    # --- FIM DA CORREÇÃO ---
 
     async def initialize_db(self):
         """Inicializa a conexão com o banco de dados usando a classe Database."""
@@ -1834,10 +1836,9 @@ async def main():
     DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
     
     # --- INÍCIO DA CORREÇÃO ---
-    # CORREÇÃO: Aumentado o delay inicial e adicionado um fator aleatório para evitar
-    # bloqueios do Cloudflare em ambientes de contêiner (como o Render). Isso dá à rede
-    # tempo para se estabilizar completamente antes da primeira tentativa de conexão.
-    initial_wait = 90 + random.uniform(0, 30)
+    # Aumentado o delay inicial e adicionado um fator aleatório para evitar
+    # bloqueios do Cloudflare em ambientes de contêiner (como o Render).
+    initial_wait = 120 + random.uniform(15, 45)
     logger.info(f"Aguardando {initial_wait:.2f} segundos antes da primeira tentativa de conexão para estabilização do ambiente...")
     await asyncio.sleep(initial_wait)
     # --- FIM DA CORREÇÃO ---
