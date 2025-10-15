@@ -1834,11 +1834,12 @@ async def main():
     DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
     
     # --- INÍCIO DA CORREÇÃO ---
-    # CORREÇÃO: Aumentado o delay inicial para 60 segundos para garantir que o ambiente
-    # Render esteja totalmente estável antes da primeira tentativa de conexão. Isso ajuda
-    # a prevenir a falha inicial que leva a retentativas agressivas e bloqueios do Cloudflare.
-    logger.info("Aguardando 60 segundos antes da primeira tentativa de conexão para estabilização do ambiente...")
-    await asyncio.sleep(60)
+    # CORREÇÃO: Aumentado o delay inicial e adicionado um fator aleatório para evitar
+    # bloqueios do Cloudflare em ambientes de contêiner (como o Render). Isso dá à rede
+    # tempo para se estabilizar completamente antes da primeira tentativa de conexão.
+    initial_wait = 90 + random.uniform(0, 30)
+    logger.info(f"Aguardando {initial_wait:.2f} segundos antes da primeira tentativa de conexão para estabilização do ambiente...")
+    await asyncio.sleep(initial_wait)
     # --- FIM DA CORREÇÃO ---
     
     # Tentar inicializar o banco de dados antes de iniciar o bot
