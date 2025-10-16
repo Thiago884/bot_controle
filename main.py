@@ -1,5 +1,4 @@
 # main.py
-
 import discord
 from discord.ext import commands
 import pytz
@@ -25,14 +24,6 @@ from threading import Thread
 
 # Importe sua classe Database
 from database import Database
-
-# --- INÍCIO DA MODIFICAÇÃO: Exceção customizada para Rate Limits ---
-# Criamos uma exceção específica para facilitar o tratamento de erros de rate limit.
-class RateLimitException(Exception):
-    def __init__(self, message, retry_after: float):
-        super().__init__(message)
-        self.retry_after = retry_after
-# --- FIM DA MODIFICAÇÃO ---
 
 # Configuração do logger
 def setup_logger():
@@ -360,10 +351,7 @@ class InactivityBot(commands.Bot):
         # Novos atributos para tratamento de conexão
         self._connection_attempts = 0
         self._max_connection_attempts = 5
-        # --- INÍCIO DA CORREÇÃO ---
-        # Aumentado o delay base para ser mais paciente.
-        self._connection_delay = 30.0
-        # --- FIM DA CORREÇÃO ---
+        self._connection_delay = 15.0  # Aumentado para 15 segundos
         
         # Novos atributos para controle de eventos
         self.event_counter = 0
@@ -382,77 +370,64 @@ class InactivityBot(commands.Bot):
         self.last_reconnect_time = datetime.now(pytz.UTC)
         logger.info("Filas de eventos limpas")
 
-    # --- INÍCIO DA CORREÇÃO ---
-    # O método `start` foi reescrito para usar uma estratégia de backoff muito mais
-    # paciente e robusta, especialmente contra bloqueios do Cloudflare (Error 1015).
     async def start(self, token: str, *, reconnect: bool = True) -> None:
-        """
-        Sobrescreve o método start para lidar com falhas de conexão de forma robusta,
-        limpando recursos e esperando pacientemente antes de tentar novamente.
-        """
-        while not self.is_closed():
-            self._connection_attempts += 1
-            wait_duration = 0
-            
+        """Sobrescreve o método start para lidar com rate limits de forma robusta."""
+        
+        # O _connection_delay será o tempo de espera *antes* da próxima tentativa.
+        # Inicializado para 0 para a primeira tentativa ser imediata (após o delay inicial no main).
+        wait_before_next_try = 0
+
+        while self._connection_attempts < self._max_connection_attempts:
             try:
-                # Só tenta conectar se não estiver já conectado
-                if not self.is_ready():
-                    logger.info(f"Tentando conectar ao Discord (Tentativa {self._connection_attempts}/{self._max_connection_attempts})...")
-                    await self.login(token)
-                    await self.connect(reconnect=reconnect)
+                # Esperar antes de tentar, exceto na primeira vez.
+                if wait_before_next_try > 0:
+                    logger.info(f"Aguardando {wait_before_next_try:.2f} segundos antes da próxima tentativa de conexão.")
+                    await asyncio.sleep(wait_before_next_try)
+
+                # A contagem de tentativas é feita antes da chamada
+                self._connection_attempts += 1
+                logger.info(f"Tentando conectar ao Discord (Tentativa {self._connection_attempts}/{self._max_connection_attempts})...")
+                await super().start(token, reconnect=reconnect)
                 
-                # Se a conexão for bem-sucedida e depois cair, o loop de reconexão interno do discord.py assume.
-                # Se o bot for encerrado corretamente, saímos do loop.
+                # Se super().start() retornar, significa que o bot desconectou.
+                # Quebramos o loop para permitir que o processo termine ou seja reiniciado pelo orquestrador.
+                logger.info("O bot foi desconectado. Encerrando o loop de conexão.")
                 break
 
             except discord.HTTPException as e:
-                # A sessão de cliente já foi fechada pela biblioteca nesta exceção.
-                # Limpa o estado interno para a próxima tentativa.
-                if self.http:
-                    await self.http.close()
-                self.http = discord.http.HTTPClient(self.loop) # <-- CORREÇÃO APLICADA
-                self._ready.clear()
-                self._connection.clear()
-
-                if "Cloudflare" in str(e) or e.status == 429 or "1015" in str(e):
-                    # Para bloqueios do Cloudflare, o backoff precisa ser longo e com variação.
-                    # Ex: 1ª falha: ~2.5 min, 2ª falha: ~5 min, etc.
-                    wait_duration = 120 + random.uniform(30, 60) * self._connection_attempts
+                # Este bloco lida com erros de conexão HTTP, incluindo rate limits.
+                if "Cloudflare" in str(e) or "1015" in str(e) or e.status == 429:
+                    self.rate_limit_monitor.handle_cloudflare_block()
+                    # Para bloqueios Cloudflare, usar um backoff longo e aleatório.
+                    wait_before_next_try = 60 + random.uniform(10, 25) * self._connection_attempts
                     logger.warning(
                         f"Bloqueio do Cloudflare/Rate limit severo detectado. "
-                        f"Tentativa {self._connection_attempts} falhou."
+                        f"Tentativa {self._connection_attempts}/{self._max_connection_attempts} falhou."
                     )
                 else:
-                    # Para outros erros HTTP, usa um backoff exponencial padrão.
-                    wait_duration = (self._connection_delay * (2 ** (self._connection_attempts - 1))) + random.uniform(5, 15)
+                    # Para outros erros HTTP, usar um backoff exponencial.
+                    wait_before_next_try = (self._connection_delay * (2 ** (self._connection_attempts - 1))) + random.uniform(0, 5)
                     logger.error(
                         f"Erro HTTP {e.status} ao conectar. "
-                        f"Tentativa {self._connection_attempts} falhou.", exc_info=False
+                        f"Tentativa {self._connection_attempts}/{self._max_connection_attempts} falhou.",
+                        exc_info=True
                     )
-
-            except Exception as e:
-                # Limpa a conexão em caso de outros erros também.
-                if self.http:
-                    await self.http.close()
-                self.http = discord.http.HTTPClient(self.loop) # <-- CORREÇÃO APLICADA
-                self._ready.clear()
-                self._connection.clear()
                 
-                # Backoff para erros genéricos (ex: problemas de rede).
-                wait_duration = (self._connection_delay * (2 ** (self._connection_attempts - 1))) + random.uniform(5, 15)
-                logger.error(f"Erro inesperado ao conectar: {e}", exc_info=True)
-
-            finally:
                 if self._connection_attempts >= self._max_connection_attempts:
-                    logger.critical("Máximo de tentativas de conexão atingido. Desistindo.")
-                    # Chama o close() final para garantir que tudo seja limpo.
-                    await self.close()
-                    break # Sai do loop while
-                
-                if wait_duration > 0 and not self.is_closed():
-                    logger.info(f"Aguardando {wait_duration:.2f} segundos antes da próxima tentativa de conexão.")
-                    await asyncio.sleep(wait_duration)
-    # --- FIM DA CORREÇÃO ---
+                    logger.critical("Máximo de tentativas de conexão atingido devido a erro HTTP. Desistindo.")
+                    raise # Re-levanta a exceção para finalizar a thread do bot.
+                    
+            except Exception as e:
+                # Backoff para erros genéricos (ex: problemas de rede, etc.).
+                wait_before_next_try = (self._connection_delay * (2 ** (self._connection_attempts - 1))) + random.uniform(0, 5)
+                logger.error(
+                    f"Erro inesperado ao conectar. "
+                    f"Tentativa {self._connection_attempts}/{self._max_connection_attempts} falhou.",
+                    exc_info=True
+                )
+                if self._connection_attempts >= self._max_connection_attempts:
+                    logger.critical("Máximo de tentativas de conexão atingido devido a erro inesperado. Desistindo.", exc_info=True)
+                    raise
 
     async def initialize_db(self):
         """Inicializa a conexão com o banco de dados usando a classe Database."""
@@ -632,86 +607,46 @@ class InactivityBot(commands.Bot):
             logger.critical("Falha na inicialização do banco de dados. As tarefas não serão iniciadas.")
             self.db_connection_failed = True
     
-    # --- INÍCIO DA MODIFICAÇÃO: Função de envio de mensagens refatorada ---
-    async def _ensure_http_client(self):
-        """Garante que o HTTP client do discord (aiohttp session) esteja operacional.
-        Se a session estiver fechada, tenta fechar com segurança e recriar o HTTPClient.
-        """
-        try:
-            session = getattr(self.http, 'session', None)
-            if session is None or getattr(session, 'closed', True):
-                logger.warning("HTTP session fechada. Reinicializando HTTP client...")
-                try:
-                    await self.http.close()
-                except Exception:
-                    pass
-                # recria o HTTP client
-                try:
-                    self.http = discord.http.HTTPClient(self.loop)
-                except Exception as e:
-                    logger.error(f"Falha ao recriar HTTPClient: {e}", exc_info=True)
-                await asyncio.sleep(0.3)
-                logger.info("HTTP client reiniciado com sucesso.")
-        except Exception as e:
-            logger.error(f"Falha ao garantir HTTP client: {e}", exc_info=True)
-
     async def send_with_fallback(self, destination, content=None, embed=None, file=None):
-        """
-        Envia mensagem com tratamento adicional para 'Session is closed'.
-        Tenta recriar a session e re-enviar uma vez antes de propagar o erro.
-        """
-        # garante que o HTTP client está ok antes de tentar
-        try:
-            await self._ensure_http_client()
-        except Exception:
-            # se falhar aqui, ainda tentamos enviar e deixamos o erro ser tratado abaixo
-            pass
-
-        max_attempts = 2
-        attempt = 0
-
-        while attempt < max_attempts:
-            attempt += 1
+        """Envia mensagens com tratamento de erros e fallback para rate limits."""
+        max_retries = 3
+        base_delay = 2.0
+        
+        for attempt in range(max_retries):
             try:
                 if file:
                     if isinstance(file, BytesIO):
                         file.seek(0)
-                        if not isinstance(file, discord.File):
-                            file = discord.File(file, filename='image.png')
+                        file = discord.File(file, filename='activity_report.png')
                     await destination.send(content=content, embed=embed, file=file)
                 elif embed:
                     await destination.send(embed=embed)
                 elif content:
                     await destination.send(content)
-                return  # sucesso
+                return  # Se enviou com sucesso, sai do loop
+                
             except discord.HTTPException as e:
-                # Rate limit -> propaga como RateLimitException com retry_after
-                retry_after = getattr(e, 'retry_after', None) or getattr(e, 'retry_after_seconds', None)
-                if retry_after is None:
-                    # tentar extrair de e.text se disponível (não garantido)
-                    retry_after = getattr(e, 'retry_after', None)
-                if retry_after is not None:
-                    logger.warning(f"Rate limit ao enviar para {destination}. retry_after={retry_after}")
-                    raise RateLimitException("Rate limited by Discord API", float(retry_after)) from e
-                logger.error(f"Erro HTTP ao enviar para {destination}: {getattr(e, 'text', str(e))}", exc_info=True)
+                if e.status == 429:  # Rate limited (limite de requisições atingido)
+                    # Usar delay exponencial com jitter
+                    delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                    logger.warning(f"Rate limit atingido (tentativa {attempt + 1}/{max_retries}). Tentando novamente em {delay:.2f} segundos")
+                    
+                    # Atualizar monitor de rate limits
+                    self.rate_limit_monitor.adaptive_delay = min(
+                        self.rate_limit_monitor.max_delay,
+                        self.rate_limit_monitor.adaptive_delay * 1.5
+                    )
+                    
+                    await asyncio.sleep(delay)
+                    continue
+                    
+                logger.error(f"Erro HTTP ao enviar mensagem para {destination}: {e}")
                 raise
-            except RuntimeError as e:
-                if "Session is closed" in str(e):
-                    logger.warning(f"Session fechada detectada ao enviar para {destination} (attempt {attempt}/{max_attempts}). Tentando recuperar HTTP client...")
-                    try:
-                        await self._ensure_http_client()
-                        await asyncio.sleep(0.5)
-                        continue
-                    except Exception as rec_e:
-                        logger.error(f"Falha ao recuperar HTTP client durante envio: {rec_e}", exc_info=True)
-                        raise
-                logger.error(f"RuntimeError inesperado ao enviar para {destination}: {e}", exc_info=True)
-                raise
+                
             except Exception as e:
-                logger.error(f"Erro inesperado ao enviar mensagem para {destination}: {e}", exc_info=True)
-                raise
-# --- FIM DA MODIFICAÇÃO ---
-
+                logger.error(f"Erro inesperado ao enviar mensagem para {destination}: {e}")
+                if attempt == max_retries - 1:
+                    raise
 
     async def on_error(self, event, *args, **kwargs):
         """Tratamento de erros genéricos."""
@@ -834,24 +769,18 @@ class InactivityBot(commands.Bot):
             except Exception as e:
                 logger.error(f"Erro no health check: {e}")
                 await asyncio.sleep(60)
-    
-    # --- INÍCIO DA MODIFICAÇÃO: Lógica do processador de filas refatorada ---
+
     async def process_queues(self):
-        """
-        Processador de filas redesenhado para lidar corretamente com rate limits,
-        evitando o erro 'task_done() called too many times'.
-        """
         await self.wait_until_ready()
         while True:
             try:
-                # 1. Checagem global de rate limit antes de processar qualquer coisa
+                # Verificar rate limits antes de processar
                 if self.rate_limit_monitor.should_delay():
                     delay = self.rate_limit_monitor.adaptive_delay
-                    logger.debug(f"Delay global de rate limit ativado. Esperando {delay:.2f} segundos")
+                    logger.debug(f"Delay ativado por rate limit. Esperando {delay:.2f} segundos")
                     await asyncio.sleep(delay)
                     continue
 
-                # 2. Processamento da fila de eventos de voz (sem alterações)
                 if not self.voice_event_queue.empty():
                     batch = []
                     for _ in range(min(self._batch_processing_size, self.voice_event_queue.qsize())):
@@ -861,61 +790,44 @@ class InactivityBot(commands.Bot):
                     
                     for _ in batch:
                         self.voice_event_queue.task_done()
-
-                # 3. Processamento da fila de mensagens (lógica principal corrigida)
+                
                 item, priority = await self.message_queue.get_next_message()
                 if item is None:
-                    await asyncio.sleep(0.2) # Sleep menor quando a fila está vazia
+                    await asyncio.sleep(0.5)  # Aumentado o sleep quando não há mensagens
                     continue
-
-                try:
-                    # Tenta processar o item da fila
-                    destination, content, embed, file = item
-                    if isinstance(destination, (discord.TextChannel, discord.User, discord.Member)):
-                        await self.send_with_fallback(destination, content, embed, file)
-                    else:
-                         logger.warning(f"Destino inválido para mensagem na fila: {type(destination)}")
                     
-                    # Se o envio foi bem-sucedido, marca a tarefa como concluída
-                    self.message_queue.task_done(priority)
-
-                except RateLimitException as e:
-                    # Se um rate limit ocorreu, o item NÃO é concluído.
-                    # Ele é colocado de volta na fila para uma nova tentativa.
-                    logger.warning(f"Rate limit detectado pelo processador. Devolvendo item para a fila. Aguardando {e.retry_after:.2f}s.")
-                    await self.message_queue.put(item, priority)
-                    # O 'get' anterior é balanceado por este 'put', então não chamamos task_done().
-                    await asyncio.sleep(e.retry_after) # Espera o tempo solicitado pela API
-
-                except Exception as e:
-                    # Tratamento especial para 'Session is closed': re-enfileira e tenta recuperar a client.
-                    if isinstance(e, RuntimeError) and "Session is closed" in str(e):
-                        logger.warning("Session fechada detectada ao processar item. Tentando recuperar HTTP client e re-enfileirar item.")
-                        try:
-                            await self._ensure_http_client()
-                            # Re-enfileira o item para tentar novamente
-                            await self.message_queue.put(item, priority)
-                            # Não marcamos como task_done para manter o balanceamento
-                            await asyncio.sleep(1.0)
-                            continue
-                        except Exception as rec_e:
-                            logger.error(f"Falha ao recuperar HTTP client: {rec_e}", exc_info=True)
-                            # Se a recuperação falhar, descartamos para evitar loop infinito
-                            self.message_queue.task_done(priority)
-                            logger.error(f"Item descartado após falha de recuperação: {item}")
+                try:
+                    if isinstance(item, tuple):
+                        if len(item) == 4:
+                            destination, content, embed, file = item
+                            if isinstance(destination, (discord.TextChannel, discord.User, discord.Member)):
+                                await self.send_with_fallback(destination, content, embed, file)
+                            else:
+                                logger.warning(f"Destino inválido para mensagem: {type(destination)}")
+                        elif len(item) == 2:
+                            destination, embed = item
+                            if isinstance(destination, (discord.TextChannel, discord.User, discord.Member)):
+                                await self.send_with_fallback(destination, embed=embed)
+                            else:
+                                logger.warning(f"Destino inválido para mensagem: {type(destination)}")
+                        else:
+                            logger.warning(f"Item da fila em formato desconhecido: {item}")
+                    elif isinstance(item, (discord.TextChannel, discord.User, discord.Member)):
+                        logger.warning(f"Item da fila é um destino direto, mas não há conteúdo: {item}")
                     else:
-                        # Se ocorreu um erro irrecuperável (ex: Forbidden, NotFound), o item é descartado.
-                        logger.error(f"Erro irrecuperável ao processar item da fila: {e}. O item será descartado.", exc_info=True)
-                        # Marcamos como concluído para que não seja tentado novamente.
-                        self.message_queue.task_done(priority)
-
+                        logger.warning(f"Item da fila não é um destino válido: {type(item)}")
+                except Exception as e:
+                    logger.error(f"Erro ao processar item da fila: {e}")
+                    if "Cloudflare" in str(e) or "1015" in str(e):
+                        self.rate_limit_monitor.handle_cloudflare_block()
+                    
+                self.message_queue.task_done(priority)
+                    
             except Exception as e:
-                # Erro no próprio loop do processador (não relacionado a um item específico)
-                logger.critical(f"Erro crítico no loop do processador de filas: {e}", exc_info=True)
+                logger.error(f"Erro no processador de filas: {e}")
                 if "Cloudflare" in str(e) or "1015" in str(e):
                     self.rate_limit_monitor.handle_cloudflare_block()
-                await asyncio.sleep(5)
-    # --- FIM DA MODIFICAÇÃO ---
+                await asyncio.sleep(5)  # Aumentado o tempo de espera em caso de erro
 
     async def _process_voice_batch(self, batch):
         processed = {}
@@ -1912,11 +1824,11 @@ async def main():
     DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
     
     # --- INÍCIO DA CORREÇÃO ---
-    # Aumentado o delay inicial e adicionado um fator aleatório para evitar
-    # bloqueios do Cloudflare em ambientes de contêiner (como o Render).
-    initial_wait = 120 + random.uniform(15, 45)
-    logger.info(f"Aguardando {initial_wait:.2f} segundos antes da primeira tentativa de conexão para estabilização do ambiente...")
-    await asyncio.sleep(initial_wait)
+    # CORREÇÃO: Aumentado o delay inicial para 15 segundos para garantir que o ambiente
+    # Render esteja totalmente estável antes da primeira tentativa de conexão. Isso ajuda
+    # a prevenir a falha inicial que leva a retentativas agressivas e bloqueios do Cloudflare.
+    logger.info("Aguardando 15 segundos antes da primeira tentativa de conexão para estabilização do ambiente...")
+    await asyncio.sleep(15)
     # --- FIM DA CORREÇÃO ---
     
     # Tentar inicializar o banco de dados antes de iniciar o bot
@@ -1943,7 +1855,4 @@ async def main():
             logger.critical(f"Erro ao iniciar o bot: {e}")
 
 if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Bot desligado manualmente.")
+    asyncio.run(main())
