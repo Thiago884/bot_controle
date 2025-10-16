@@ -633,39 +633,85 @@ class InactivityBot(commands.Bot):
             self.db_connection_failed = True
     
     # --- INÍCIO DA MODIFICAÇÃO: Função de envio de mensagens refatorada ---
-    async def send_with_fallback(self, destination, content=None, embed=None, file=None):
-        """
-        Envia mensagens com tratamento de erro, mas sem loop de retry interno.
-        Ele agora propaga o erro de rate limit para o chamador.
+    async def _ensure_http_client(self):
+        """Garante que o HTTP client do discord (aiohttp session) esteja operacional.
+        Se a session estiver fechada, tenta fechar com segurança e recriar o HTTPClient.
         """
         try:
-            if file:
-                # Garante que o buffer do arquivo está no início
-                if isinstance(file, BytesIO):
-                    file.seek(0)
-                    # A conversão para discord.File deve ser feita aqui se ainda não foi
-                    if not isinstance(file, discord.File):
-                         file = discord.File(file, filename='image.png') # Nome de arquivo genérico
-                await destination.send(content=content, embed=embed, file=file)
-            elif embed:
-                await destination.send(embed=embed)
-            elif content:
-                await destination.send(content)
-                
-        except discord.HTTPException as e:
-            if e.status == 429:  # Rate limited
-                retry_after = e.retry_after or self.rate_limit_monitor.adaptive_delay
-                logger.warning(f"Rate limit atingido ao enviar para {destination}. O chamador irá tratar.")
-                # Propaga o erro com a informação de retry_after
-                raise RateLimitException(f"Rate limited by Discord API", retry_after) from e
-            else:
-                logger.error(f"Erro HTTP {e.status} não tratável ao enviar mensagem para {destination}: {e.text}")
-                raise  # Propaga outros erros HTTP
-                
+            session = getattr(self.http, 'session', None)
+            if session is None or getattr(session, 'closed', True):
+                logger.warning("HTTP session fechada. Reinicializando HTTP client...")
+                try:
+                    await self.http.close()
+                except Exception:
+                    pass
+                # recria o HTTP client
+                try:
+                    self.http = discord.http.HTTPClient(self.loop)
+                except Exception as e:
+                    logger.error(f"Falha ao recriar HTTPClient: {e}", exc_info=True)
+                await asyncio.sleep(0.3)
+                logger.info("HTTP client reiniciado com sucesso.")
         except Exception as e:
-            logger.error(f"Erro inesperado ao enviar mensagem para {destination}: {e}", exc_info=True)
-            raise # Propaga outros erros
-    # --- FIM DA MODIFICAÇÃO ---
+            logger.error(f"Falha ao garantir HTTP client: {e}", exc_info=True)
+
+    async def send_with_fallback(self, destination, content=None, embed=None, file=None):
+        """
+        Envia mensagem com tratamento adicional para 'Session is closed'.
+        Tenta recriar a session e re-enviar uma vez antes de propagar o erro.
+        """
+        # garante que o HTTP client está ok antes de tentar
+        try:
+            await self._ensure_http_client()
+        except Exception:
+            # se falhar aqui, ainda tentamos enviar e deixamos o erro ser tratado abaixo
+            pass
+
+        max_attempts = 2
+        attempt = 0
+
+        while attempt < max_attempts:
+            attempt += 1
+            try:
+                if file:
+                    if isinstance(file, BytesIO):
+                        file.seek(0)
+                        if not isinstance(file, discord.File):
+                            file = discord.File(file, filename='image.png')
+                    await destination.send(content=content, embed=embed, file=file)
+                elif embed:
+                    await destination.send(embed=embed)
+                elif content:
+                    await destination.send(content)
+                return  # sucesso
+            except discord.HTTPException as e:
+                # Rate limit -> propaga como RateLimitException com retry_after
+                retry_after = getattr(e, 'retry_after', None) or getattr(e, 'retry_after_seconds', None)
+                if retry_after is None:
+                    # tentar extrair de e.text se disponível (não garantido)
+                    retry_after = getattr(e, 'retry_after', None)
+                if retry_after is not None:
+                    logger.warning(f"Rate limit ao enviar para {destination}. retry_after={retry_after}")
+                    raise RateLimitException("Rate limited by Discord API", float(retry_after)) from e
+                logger.error(f"Erro HTTP ao enviar para {destination}: {getattr(e, 'text', str(e))}", exc_info=True)
+                raise
+            except RuntimeError as e:
+                if "Session is closed" in str(e):
+                    logger.warning(f"Session fechada detectada ao enviar para {destination} (attempt {attempt}/{max_attempts}). Tentando recuperar HTTP client...")
+                    try:
+                        await self._ensure_http_client()
+                        await asyncio.sleep(0.5)
+                        continue
+                    except Exception as rec_e:
+                        logger.error(f"Falha ao recuperar HTTP client durante envio: {rec_e}", exc_info=True)
+                        raise
+                logger.error(f"RuntimeError inesperado ao enviar para {destination}: {e}", exc_info=True)
+                raise
+            except Exception as e:
+                logger.error(f"Erro inesperado ao enviar mensagem para {destination}: {e}", exc_info=True)
+                raise
+# --- FIM DA MODIFICAÇÃO ---
+
 
     async def on_error(self, event, *args, **kwargs):
         """Tratamento de erros genéricos."""
@@ -842,11 +888,27 @@ class InactivityBot(commands.Bot):
                     await asyncio.sleep(e.retry_after) # Espera o tempo solicitado pela API
 
                 except Exception as e:
-                    # Se ocorreu um erro irrecuperável (ex: Forbidden, NotFound), o item é descartado.
-                    logger.error(f"Erro irrecuperável ao processar item da fila: {e}. O item será descartado.", exc_info=True)
-                    # Marcamos como concluído para que não seja tentado novamente.
-                    self.message_queue.task_done(priority)
-            
+                    # Tratamento especial para 'Session is closed': re-enfileira e tenta recuperar a client.
+                    if isinstance(e, RuntimeError) and "Session is closed" in str(e):
+                        logger.warning("Session fechada detectada ao processar item. Tentando recuperar HTTP client e re-enfileirar item.")
+                        try:
+                            await self._ensure_http_client()
+                            # Re-enfileira o item para tentar novamente
+                            await self.message_queue.put(item, priority)
+                            # Não marcamos como task_done para manter o balanceamento
+                            await asyncio.sleep(1.0)
+                            continue
+                        except Exception as rec_e:
+                            logger.error(f"Falha ao recuperar HTTP client: {rec_e}", exc_info=True)
+                            # Se a recuperação falhar, descartamos para evitar loop infinito
+                            self.message_queue.task_done(priority)
+                            logger.error(f"Item descartado após falha de recuperação: {item}")
+                    else:
+                        # Se ocorreu um erro irrecuperável (ex: Forbidden, NotFound), o item é descartado.
+                        logger.error(f"Erro irrecuperável ao processar item da fila: {e}. O item será descartado.", exc_info=True)
+                        # Marcamos como concluído para que não seja tentado novamente.
+                        self.message_queue.task_done(priority)
+
             except Exception as e:
                 # Erro no próprio loop do processador (não relacionado a um item específico)
                 logger.critical(f"Erro crítico no loop do processador de filas: {e}", exc_info=True)
