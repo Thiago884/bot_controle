@@ -65,116 +65,83 @@ def log_with_context(message, level=logging.INFO, guild_id=None, user_id=None):
     extra = {'guild_id': guild_id or 'N/A', 'user_id': user_id or 'N/A'}
     logger.log(level, message, extra=extra)
 
+# CORREÇÃO: A implementação antiga do RateLimitMonitor foi substituída pela versão injetada, que é mais robusta.
 class RateLimitMonitor:
     def __init__(self):
+        # Rastreia os limites por 'bucket' (rota da API)
         self.buckets = {}
-        self.global_limits = {
-            'limit': 50,
-            'remaining': 50,
-            'reset_at': 0
-        }
-        self.last_updated = 0
-        self.history = deque(maxlen=100)  # Mantém histórico dos últimos 100 eventos
+        # Mantém um histórico recente de requisições para análise
+        self.history = deque(maxlen=100)
+        # Delay adaptativo que aumenta sob pressão e diminui gradualmente
         self.adaptive_delay = 1.0
         self.max_delay = 30.0  # Aumentado para 30 segundos
+        # Timestamps para saber quando o bot deve entrar em modo de resfriamento
         self.cooldown_until = 0
         self.cloudflare_blocked_until = 0
-    
-    def update_from_headers(self, headers):
+
+    def update_from_headers(self, headers: dict):
+        """Atualiza os limites com base nos headers de uma resposta da API do Discord.
+        Este método é o cérebro da operação, sendo chamado a cada requisição."""
         now = time.time()
-        bucket = headers.get('X-RateLimit-Bucket', 'global')
-        limit = int(headers.get('X-RateLimit-Limit', 50))
-        remaining = int(headers.get('X-RateLimit-Remaining', limit))
-        reset_at = float(headers.get('X-RateLimit-Reset', now + 60))
+        bucket = headers.get('X-RateLimit-Bucket')
+
+        if not bucket:
+            return  # Não é uma requisição com headers de rate limit
+
+        remaining = headers.get('X-RateLimit-Remaining')
+        reset_after = headers.get('X-RateLimit-Reset-After')
+
+        if remaining is None or reset_after is None:
+            return
+
+        try:
+            remaining_i = int(remaining)
+            reset_after_f = float(reset_after)
+        except Exception:
+            # Valores inesperados — não atualiza
+            return
+
+        self.buckets[bucket] = {
+            'remaining': remaining_i,
+            'reset_at': now + reset_after_f
+        }
+        self.history.append({'time': now, 'bucket': bucket, 'remaining': remaining_i})
         
-        if bucket == 'global':
-            self.global_limits = {
-                'limit': limit,
-                'remaining': remaining,
-                'reset_at': reset_at
-            }
-        else:
-            self.buckets[bucket] = {
-                'limit': limit,
-                'remaining': remaining,
-                'reset_at': reset_at,
-                'last_updated': now
-            }
-        
-        self.last_updated = now
-        self.history.append({
-            'time': now,
-            'bucket': bucket,
-            'remaining': remaining,
-            'endpoint': str(headers.get('endpoint', 'unknown'))
-        })
-    
-    def handle_cloudflare_block(self):
-        """Lida com bloqueio do Cloudflare (Error 1015)"""
-        now = time.time()
-        self.cloudflare_blocked_until = now + 60  # Bloqueio por 1 minuto
-        self.adaptive_delay = min(self.max_delay, self.adaptive_delay * 2)
-        logger.warning("Bloqueio do Cloudflare detectado. Entrando em modo de resfriamento por 60 segundos.")
-    
-    def should_delay(self):
-        now = time.time()
-        
-        # Verificar se estamos bloqueados pelo Cloudflare
-        if now < self.cloudflare_blocked_until:
-            return True
-            
-        if now < self.cooldown_until:
-            return True
-        
-        # Lógica proativa: se restarem poucas requisições, espere um pouco
-        if self.global_limits['remaining'] < 5:
-            # Calcula um pequeno delay para distribuir as requisições restantes
-            time_to_reset = self.global_limits['reset_at'] - now
-            if time_to_reset > 0:
-                # Espera uma fração do tempo restante
-                proactive_delay = time_to_reset / (self.global_limits['remaining'] + 1)
-                logger.info(f"Rate limit global baixo ({self.global_limits['remaining']}). Ativando delay proativo de {proactive_delay:.2f}s.")
-                time.sleep(proactive_delay)
-        
-        # Lógica reativa (original) - Mantenha para o caso de estourar o limite mesmo assim
-        if self.global_limits['remaining'] < 5 and now < self.global_limits['reset_at']:
+        # Lógica proativa: se estamos com poucas requisições, começamos a desacelerar
+        if remaining_i < 3:
+            # Aumenta o delay adaptativo um pouco mais agressivamente
             self.adaptive_delay = min(self.max_delay, self.adaptive_delay * 1.5)
             self.cooldown_until = now + self.adaptive_delay
-            return True
-        
-        # Verificar outros buckets importantes
-        for bucket, data in self.buckets.items():
-            if data['remaining'] < 2 and now < data['reset_at']:
-                self.adaptive_delay = min(self.max_delay, self.adaptive_delay * 1.2)
-                self.cooldown_until = now + self.adaptive_delay
-                return True
-        
-        # Reduzir gradualmente o delay quando não há rate limits
-        if self.adaptive_delay > 1.0:
-            self.adaptive_delay = max(1.0, self.adaptive_delay * 0.9)
-        
-        return False
-    
-    def get_status_report(self):
+            logger.warning(f"Rate limit baixo no bucket {bucket} ({remaining_i} restantes). Delay adaptativo aumentado para {self.adaptive_delay:.2f}s.")
+
+    def handle_cloudflare_block(self):
+        """Ativado ao receber um erro 1015 do Cloudflare.
+        Aumenta drasticamente o delay para evitar um ban temporário."""
         now = time.time()
-        report = {
-            'global': {
-                **self.global_limits,
-                'seconds_until_reset': max(0, self.global_limits['reset_at'] - now)
-            },
-            'adaptive_delay': self.adaptive_delay,
-            'cooldown_until': max(0, self.cooldown_until - now),
-            'buckets': {}
-        }
+        # Entra em modo de resfriamento por 60 segundos + um tempo aleatório
+        self.cloudflare_blocked_until = now + 60 + random.uniform(5, 15)
+        self.adaptive_delay = self.max_delay  # Define o delay para o máximo
+        logger.critical(f"BLOQUEIO DO CLOUDFLARE DETECTADO! Entrando em modo de resfriamento por {self.cloudflare_blocked_until - now:.2f} segundos.")
+
+    def get_delay(self) -> float:
+        """Calcula o delay necessário antes da próxima operação.
+        Retorna 0 se nenhuma ação for necessária."""
+        now = time.time()
         
-        for bucket, data in self.buckets.items():
-            report['buckets'][bucket] = {
-                'limit': data['limit'],
-                'remaining': data['remaining'],
-                'seconds_until_reset': max(0, data['reset_at'] - now)
-            }
+        # 1. Verifica bloqueio do Cloudflare (mais crítico)
+        if now < self.cloudflare_blocked_until:
+            return self.cloudflare_blocked_until - now
+
+        # 2. Verifica se estamos em resfriamento por baixo número de requisições
+        if now < self.cooldown_until:
+            # Reduz o delay adaptativo gradualmente a cada verificação
+            self.adaptive_delay = max(1.0, self.adaptive_delay * 0.95)
+            return self.cooldown_until - now
+
+        # 3. Reseta o delay adaptativo se não houver mais pressão
+        self.adaptive_delay = max(1.0, self.adaptive_delay * 0.9)
         
-        return report
+        return 0.0
 
 # Configurações iniciais
 CONFIG_FILE = 'config.json'
@@ -186,7 +153,7 @@ DEFAULT_CONFIG = {
     "tracked_roles": [],
     "log_channel": None,
     "notification_channel": None,
-    "notification_roles_dm": [],  # <-- NOVO CAMPO ADICIONADO
+    "notification_roles_dm": [],
     "timezone": "America/Sao_Paulo",
     "absence_channel": None,
     "allowed_roles": [],
@@ -261,17 +228,14 @@ class SmartPriorityQueue:
 
 class InactivityBot(commands.Bot):
     def __init__(self, *args, **kwargs):
-        # Configuração do cache de membros otimizada para reduzir o uso de RAM,
-        # mas garantindo que o `members intent` seja totalmente aproveitado.
-        # A flag `chunk_guilds_at_startup` já existente é crucial e será mantida.
         member_cache_flags = discord.MemberCacheFlags.from_intents(kwargs.get('intents'))
-        member_cache_flags.voice = True  # Garante que estados de voz sejam sempre cacheados.
-        member_cache_flags.joined = True # Garante que a data de entrada seja sempre cacheada.
+        member_cache_flags.voice = True
+        member_cache_flags.joined = True
         
         kwargs.update({
             'max_messages': 100,
-            'chunk_guilds_at_startup': True, # Esta linha é VITAL para popular o cache na inicialização.
-            'member_cache_flags': member_cache_flags, # Utiliza a flag otimizada
+            'chunk_guilds_at_startup': True,
+            'member_cache_flags': member_cache_flags,
             'enable_debug_events': False,
             'heartbeat_timeout': 120.0,
             'guild_ready_timeout': 30.0,
@@ -284,14 +248,9 @@ class InactivityBot(commands.Bot):
         })
         super().__init__(*args, **kwargs)
         
-        # Configurações iniciais
-        self.config = DEFAULT_CONFIG  # Inicializa com configuração padrão
+        self.config = DEFAULT_CONFIG
         self.timezone = pytz.timezone('America/Sao_Paulo')
-        
-        # Adicione esta linha para inicializar o atributo _ready
         self._ready = asyncio.Event()
-        
-        # Configurações do bot
         self.db = None
         self.db_connection_failed = False
         self.active_sessions = {}
@@ -300,14 +259,6 @@ class InactivityBot(commands.Bot):
         self.voice_event_processor_task = None
         self.queue_processor_task = None
         self.command_processor_task = None
-        self.rate_limited = False
-        self.last_rate_limit = None
-        self.rate_limit_delay = 2.0
-        self.max_rate_limit_delay = 30.0
-        self.rate_limit_retry_after = 1.0
-        self.last_rate_limit_time = None
-        self.rate_limit_count = 0
-        self.max_rate_limit_retries = 3
         self.db_backup = None
         self.pool_monitor_task = None
         self._setup_complete = False
@@ -320,92 +271,65 @@ class InactivityBot(commands.Bot):
         self.audio_check_task = None
         self.health_check_task = None
         self._tasks_started = False
-        self._is_initialized = False  # Nova flag para controle de inicialização
+        self._is_initialized = False
         
-        # Monitor de rate limits
         self.rate_limit_monitor = RateLimitMonitor()
         self.last_rate_limit_report = 0
         self.rate_limit_report_interval = 300
         
-        # Melhorias no tratamento de rate limit
-        self.rate_limit_buckets = {
-            'global': {
-                'limit': 50,
-                'remaining': 50,
-                'reset_at': 0,
-                'last_update': 0
-            },
-            'messages': {
-                'limit': 10,
-                'remaining': 10,
-                'reset_at': 0,
-                'last_update': 0
-            }
-        }
-        self.message_cache = {
-            'embeds': defaultdict(dict),
-            'responses': defaultdict(dict)
-        }
         self.cache_ttl = 300
         
-        # Novos atributos para tratamento de conexão
         self._connection_attempts = 0
         self._max_connection_attempts = 5
-        self._connection_delay = 15.0  # Aumentado para 15 segundos
+        self._connection_delay = 15.0
         
-        # Novos atributos para controle de eventos
         self.event_counter = 0
         self.last_reconnect_time = None
 
     def generate_event_id(self):
-        """Gera um ID único para cada evento"""
         self.event_counter += 1
         return f"{int(time.time())}_{self.event_counter}"
         
     async def clear_queues(self):
-        """Limpa todas as filas de eventos"""
         self.voice_event_queue = asyncio.Queue(maxsize=500)
         self.message_queue = SmartPriorityQueue()
         self.event_counter = 0
         self.last_reconnect_time = datetime.now(pytz.UTC)
         logger.info("Filas de eventos limpas")
 
+    # CORREÇÃO: Lógica de reconexão aprimorada com backoff mais longo e aleatório para evitar bloqueios do Cloudflare.
     async def start(self, token: str, *, reconnect: bool = True) -> None:
         """Sobrescreve o método start para lidar com rate limits de forma robusta."""
-        
-        # O _connection_delay será o tempo de espera *antes* da próxima tentativa.
-        # Inicializado para 0 para a primeira tentativa ser imediata (após o delay inicial no main).
         wait_before_next_try = 0
 
         while self._connection_attempts < self._max_connection_attempts:
             try:
-                # Esperar antes de tentar, exceto na primeira vez.
                 if wait_before_next_try > 0:
                     logger.info(f"Aguardando {wait_before_next_try:.2f} segundos antes da próxima tentativa de conexão.")
                     await asyncio.sleep(wait_before_next_try)
 
-                # A contagem de tentativas é feita antes da chamada
                 self._connection_attempts += 1
                 logger.info(f"Tentando conectar ao Discord (Tentativa {self._connection_attempts}/{self._max_connection_attempts})...")
+                
                 await super().start(token, reconnect=reconnect)
                 
-                # Se super().start() retornar, significa que o bot desconectou.
-                # Quebramos o loop para permitir que o processo termine ou seja reiniciado pelo orquestrador.
                 logger.info("O bot foi desconectado. Encerrando o loop de conexão.")
                 break
 
             except discord.HTTPException as e:
-                # Este bloco lida com erros de conexão HTTP, incluindo rate limits.
                 if "Cloudflare" in str(e) or "1015" in str(e) or e.status == 429:
                     self.rate_limit_monitor.handle_cloudflare_block()
-                    # Para bloqueios Cloudflare, usar um backoff longo e aleatório.
-                    wait_before_next_try = 60 + random.uniform(10, 25) * self._connection_attempts
+                    
+                    base_wait = 120
+                    random_factor = random.uniform(30, 90)
+                    attempt_multiplier = self._connection_attempts
+                    wait_before_next_try = base_wait + (random_factor * attempt_multiplier)
+                    
                     logger.warning(
                         f"Bloqueio do Cloudflare/Rate limit severo detectado. "
                         f"Tentativa {self._connection_attempts}/{self._max_connection_attempts} falhou."
                     )
                 else:
-                    # Para outros erros HTTP, usar um backoff exponencial.
                     wait_before_next_try = (self._connection_delay * (2 ** (self._connection_attempts - 1))) + random.uniform(0, 5)
                     logger.error(
                         f"Erro HTTP {e.status} ao conectar. "
@@ -415,10 +339,9 @@ class InactivityBot(commands.Bot):
                 
                 if self._connection_attempts >= self._max_connection_attempts:
                     logger.critical("Máximo de tentativas de conexão atingido devido a erro HTTP. Desistindo.")
-                    raise # Re-levanta a exceção para finalizar a thread do bot.
+                    raise
                     
             except Exception as e:
-                # Backoff para erros genéricos (ex: problemas de rede, etc.).
                 wait_before_next_try = (self._connection_delay * (2 ** (self._connection_attempts - 1))) + random.uniform(0, 5)
                 logger.error(
                     f"Erro inesperado ao conectar. "
@@ -444,12 +367,10 @@ class InactivityBot(commands.Bot):
 
             logger.info("Conexão com o banco de dados (via asyncpg) estabelecida com sucesso.")
 
-            # Inicializar o backup após o banco estar pronto
             from database import DatabaseBackup
             self.db_backup = DatabaseBackup(self.db)
             logger.info("Backup do banco de dados inicializado")
 
-            # Verificar se a conexão está realmente funcionando
             try:
                 async with self.db.pool.acquire() as conn:
                     await asyncio.wait_for(conn.execute("SELECT 1"), timeout=10)
@@ -460,7 +381,6 @@ class InactivityBot(commands.Bot):
 
             self._is_initialized = True
 
-            # Carregar configuração após inicializar o banco
             await self.load_config()
 
             return True
@@ -468,7 +388,6 @@ class InactivityBot(commands.Bot):
         except Exception as e:
             logger.critical(f"Falha crítica ao inicializar o banco de dados: {e}", exc_info=True)
             self.db_connection_failed = True
-            # Criar instância vazia para evitar erros de NoneType
             try:
                 self.db = Database()
                 self.db.pool = None
@@ -479,7 +398,6 @@ class InactivityBot(commands.Bot):
     async def load_config(self, guild_id: int = None):
         """Carrega configuração de forma assíncrona com tratamento melhorado"""
         try:
-            # Primeiro tentar carregar do arquivo local
             if os.path.exists(CONFIG_FILE):
                 try:
                     with open(CONFIG_FILE, 'r') as f:
@@ -494,10 +412,8 @@ class InactivityBot(commands.Bot):
                     logger.error(f"Erro ao carregar configuração do arquivo: {e}")
                     self._update_config(DEFAULT_CONFIG)
                 
-            # Depois tentar carregar do banco de dados se estiver disponível
             if hasattr(self, 'db') and self.db and hasattr(self.db, 'load_config'):
                 try:
-                    # Se guild_id foi especificado, carregar apenas essa
                     if guild_id is not None:
                         try:
                             db_config = await self.db.load_config(guild_id)
@@ -508,7 +424,6 @@ class InactivityBot(commands.Bot):
                         except Exception as e:
                             logger.warning(f"Erro ao carregar configuração para guild {guild_id}: {e}")
                     
-                    # Se não, carregar para todas as guilds
                     for guild in self.guilds:
                         try:
                             db_config = await self.db.load_config(guild.id)
@@ -522,7 +437,6 @@ class InactivityBot(commands.Bot):
                 except Exception as db_error:
                     logger.error(f"Erro ao carregar do banco: {db_error}")
             
-            # Fallback para padrão se nenhuma configuração for encontrada
             if not hasattr(self, 'config') or not self.config:
                 self._update_config(DEFAULT_CONFIG)
                 with open(CONFIG_FILE, 'w') as f:
@@ -538,15 +452,12 @@ class InactivityBot(commands.Bot):
 
     def _update_config(self, new_config: dict):
         """Atualiza a configuração garantindo que todas as chaves necessárias existam"""
-        # Garantir que todas as chaves padrão existam
         for key, value in DEFAULT_CONFIG.items():
             if key not in new_config:
                 new_config[key] = value
         
-        # Atualizar timezone
         self.timezone = pytz.timezone(new_config.get('timezone', 'America/Sao_Paulo'))
         
-        # Atualizar configuração
         self.config = new_config
         logger.info("Configuração atualizada com sucesso")
 
@@ -556,20 +467,16 @@ class InactivityBot(commands.Bot):
             return
             
         try:
-            # Salvar no arquivo local
             with open(CONFIG_FILE, 'w') as f:
                 json.dump(self.config, f, indent=4)
             
-            # Salvar no banco de dados para cada guild relevante
             if hasattr(self, 'db') and self.db and self.db._is_initialized:
-                # Se guild_id não foi especificado, salvar para todas as guilds do bot
                 guilds_to_save = [guild_id] if guild_id is not None else [guild.id for guild in self.guilds]
                 
                 for gid in guilds_to_save:
                     await self.db.save_config(gid, self.config)
                     logger.info(f"Configuração salva no banco para guild {gid}")
                 
-                # Verificar se o método sync_task_periods existe antes de chamá-lo
                 if hasattr(self.db, 'sync_task_periods'):
                     monitoring_period = self.config.get('monitoring_period')
                     if monitoring_period:
@@ -584,13 +491,9 @@ class InactivityBot(commands.Bot):
         if self._setup_complete:
             return
         
-        # Carregar configurações de forma assíncrona
         await self.load_config()
-        
-        # Inicializar banco de dados
         await self.initialize_db()
         
-        # Prossiga apenas se a conexão com o DB for bem-sucedida
         if self.db and not self.db_connection_failed:
             try:
                 synced = await self.tree.sync()
@@ -598,7 +501,6 @@ class InactivityBot(commands.Bot):
             except Exception as e:
                 logger.error(f"Erro ao sincronizar comandos slash: {e}")
 
-            # Adicionar task de processamento de eventos de voz
             self.voice_event_processor_task = self.loop.create_task(self.process_voice_events(), name='voice_event_processor')
 
             self._setup_complete = True
@@ -623,15 +525,13 @@ class InactivityBot(commands.Bot):
                     await destination.send(embed=embed)
                 elif content:
                     await destination.send(content)
-                return  # Se enviou com sucesso, sai do loop
+                return
                 
             except discord.HTTPException as e:
-                if e.status == 429:  # Rate limited (limite de requisições atingido)
-                    # Usar delay exponencial com jitter
+                if e.status == 429:
                     delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
                     logger.warning(f"Rate limit atingido (tentativa {attempt + 1}/{max_retries}). Tentando novamente em {delay:.2f} segundos")
                     
-                    # Atualizar monitor de rate limits
                     self.rate_limit_monitor.adaptive_delay = min(
                         self.rate_limit_monitor.max_delay,
                         self.rate_limit_monitor.adaptive_delay * 1.5
@@ -676,7 +576,6 @@ class InactivityBot(commands.Bot):
                             audio_key = (member.id, guild.id)
                             current_audio_state = member.voice.self_deaf or member.voice.deaf
                             
-                            # Se não há sessão ativa, criar uma
                             if audio_key not in self.active_sessions:
                                 self.active_sessions[audio_key] = {
                                     'start_time': datetime.now(pytz.UTC),
@@ -687,14 +586,11 @@ class InactivityBot(commands.Bot):
                                 }
                                 continue
                                 
-                            # Verificar mudanças no estado de áudio
                             if current_audio_state and not self.active_sessions[audio_key]['audio_disabled']:
-                                # Áudio foi desligado
                                 self.active_sessions[audio_key]['audio_disabled'] = True
                                 self.active_sessions[audio_key]['audio_off_time'] = datetime.now(pytz.UTC)
                                 
                             elif not current_audio_state and self.active_sessions[audio_key]['audio_disabled']:
-                                # Áudio foi ligado
                                 self.active_sessions[audio_key]['audio_disabled'] = False
                                 if 'audio_off_time' in self.active_sessions[audio_key]:
                                     audio_off_duration = (datetime.now(pytz.UTC) - self.active_sessions[audio_key]['audio_off_time']).total_seconds()
@@ -716,7 +612,6 @@ class InactivityBot(commands.Bot):
                         if pool_status:
                             logger.debug(f"Status do pool de conexões: {pool_status}")
                             
-                            # Se o pool estiver sobrecarregado, aumentar o tamanho
                             if pool_status['freesize'] == 0 and pool_status['used'] >= pool_status['maxsize'] - 2:
                                 logger.warning("Pool de conexões sobrecarregado - aumentando tamanho")
                                 await self.db.pool.set_max_size(min(100, pool_status['maxsize'] + 10))
@@ -770,19 +665,23 @@ class InactivityBot(commands.Bot):
                 logger.error(f"Erro no health check: {e}")
                 await asyncio.sleep(60)
 
+    # CORREÇÃO: O método process_queues antigo foi substituído pela versão injetada, que é mais inteligente.
     async def process_queues(self):
+        """Processa as filas de mensagens e eventos com controle de rate limit inteligente."""
         await self.wait_until_ready()
         while True:
             try:
-                # Verificar rate limits antes de processar
-                if self.rate_limit_monitor.should_delay():
-                    delay = self.rate_limit_monitor.adaptive_delay
-                    logger.debug(f"Delay ativado por rate limit. Esperando {delay:.2f} segundos")
+                # 1. Verificar se precisamos de um delay
+                delay = self.rate_limit_monitor.get_delay()
+                if delay > 0:
+                    logger.info(f"Rate limit proativo: aguardando {delay:.2f} segundos.")
                     await asyncio.sleep(delay)
                     continue
 
+                # 2. Processar a fila de eventos de voz (se houver)
                 if not self.voice_event_queue.empty():
                     batch = []
+                    # Pega um lote de eventos da fila
                     for _ in range(min(self._batch_processing_size, self.voice_event_queue.qsize())):
                         batch.append(await self.voice_event_queue.get())
                     
@@ -790,52 +689,70 @@ class InactivityBot(commands.Bot):
                     
                     for _ in batch:
                         self.voice_event_queue.task_done()
-                
+                    # Continue para o próximo ciclo para reavaliar o delay
+                    continue
+
+                # 3. Processar a fila de mensagens (se a de voz estiver vazia)
                 item, priority = await self.message_queue.get_next_message()
                 if item is None:
-                    await asyncio.sleep(0.5)  # Aumentado o sleep quando não há mensagens
+                    await asyncio.sleep(0.5)  # Fila vazia, aguarda um pouco
                     continue
                     
                 try:
                     if isinstance(item, tuple):
-                        if len(item) == 4:
-                            destination, content, embed, file = item
-                            if isinstance(destination, (discord.TextChannel, discord.User, discord.Member)):
-                                await self.send_with_fallback(destination, content, embed, file)
-                            else:
-                                logger.warning(f"Destino inválido para mensagem: {type(destination)}")
-                        elif len(item) == 2:
-                            destination, embed = item
-                            if isinstance(destination, (discord.TextChannel, discord.User, discord.Member)):
-                                await self.send_with_fallback(destination, embed=embed)
-                            else:
-                                logger.warning(f"Destino inválido para mensagem: {type(destination)}")
+                        destination, content, embed, file = (None, None, None, None)
+                        try:
+                            if len(item) == 4:
+                                destination, content, embed, file = item
+                            elif len(item) == 3:
+                                destination, content, embed = item
+                                file = None
+                            elif len(item) == 2:
+                                destination, embed = item
+                                content, file = None, None
+                        except Exception:
+                            try:
+                                destination, content = item
+                            except Exception:
+                                logger.warning(f"Formato inesperado de item da fila: {item}")
+                        
+                        if isinstance(destination, (discord.TextChannel, discord.User, discord.Member)):
+                            await self.send_with_fallback(destination, content, embed, file)
                         else:
-                            logger.warning(f"Item da fila em formato desconhecido: {item}")
-                    elif isinstance(item, (discord.TextChannel, discord.User, discord.Member)):
-                        logger.warning(f"Item da fila é um destino direto, mas não há conteúdo: {item}")
+                            logger.warning(f"Destino inválido para mensagem: {type(destination)}")
                     else:
-                        logger.warning(f"Item da fila não é um destino válido: {type(item)}")
-                except Exception as e:
-                    logger.error(f"Erro ao processar item da fila: {e}")
-                    if "Cloudflare" in str(e) or "1015" in str(e):
+                        logger.warning(f"Item da fila em formato desconhecido: {item}")
+
+                except discord.HTTPException as e:
+                    status = getattr(e, 'status', None)
+                    if status == 429:
+                        retry_after = getattr(e, 'retry_after', None)
+                        logger.warning(f"Atingido rate limit (429). Headers: {getattr(e, 'response', None)}")
+                        if retry_after:
+                            self.rate_limit_monitor.cooldown_until = time.time() + retry_after
+                            self.rate_limit_monitor.adaptive_delay = min(self.rate_limit_monitor.max_delay, self.rate_limit_monitor.adaptive_delay * 2)
+                    elif "Cloudflare" in str(e) or "1015" in str(getattr(e, 'text', '')):
                         self.rate_limit_monitor.handle_cloudflare_block()
-                    
-                self.message_queue.task_done(priority)
+                except Exception as e:
+                    logger.error(f"Erro ao processar item da fila: {e}", exc_info=True)
+                finally:    
+                    try:
+                        self.message_queue.task_done(priority)
+                    except Exception:
+                        try:
+                            self.message_queue.task_done()
+                        except Exception:
+                            pass
                     
             except Exception as e:
-                logger.error(f"Erro no processador de filas: {e}")
-                if "Cloudflare" in str(e) or "1015" in str(e):
-                    self.rate_limit_monitor.handle_cloudflare_block()
-                await asyncio.sleep(5)  # Aumentado o tempo de espera em caso de erro
+                logger.error(f"Erro crítico no processador de filas: {e}", exc_info=True)
+                await asyncio.sleep(5)
 
     async def _process_voice_batch(self, batch):
         processed = {}
         
         for event in batch:
             try:
-                # CORREÇÃO: Unpack dos 4 primeiros elementos, ignorando os extras.
-                # Isso resolve o erro "too many values to unpack" lidando com os dois formatos de evento (4 e 6 elementos).
                 event_type, member, before, after = event[:4]
                 
                 key = (member.id, member.guild.id)
@@ -866,7 +783,6 @@ class InactivityBot(commands.Bot):
         
         for before, after in events:
             try:
-                # Ignorar bots
                 if member.bot:
                     continue
 
@@ -876,14 +792,12 @@ class InactivityBot(commands.Bot):
                 
                 audio_key = (member.id, member.guild.id)
                 
-                # Se for uma sessão estimada e o usuário realmente saiu, ajustar o tempo
                 if audio_key in self.active_sessions and self.active_sessions[audio_key].get('estimated'):
                     if before.channel is not None and after.channel is None:
-                        # Ajustar o tempo inicial para refletir melhor a realidade
                         estimated_start = self.active_sessions[audio_key]['start_time']
-                        actual_start = max(estimated_start, datetime.now(pytz.UTC) - timedelta(hours=1))  # No máximo 1 hora
+                        actual_start = max(estimated_start, datetime.now(pytz.UTC) - timedelta(hours=1))
                         self.active_sessions[audio_key]['start_time'] = actual_start
-                        self.active_sessions[audio_key]['estimated'] = False  # Não é mais estimada
+                        self.active_sessions[audio_key]['estimated'] = False
                 
                 if before.channel is None and after.channel is not None and after.channel.id != absence_channel_id:
                     await self._handle_voice_join(member, after)
@@ -903,7 +817,6 @@ class InactivityBot(commands.Bot):
 
     async def _handle_voice_join(self, member, after):
         try:
-            # Registrar entrada no banco de dados
             await self.db.log_voice_join(member.id, member.guild.id)
             
             self.active_sessions[(member.id, member.guild.id)] = {
@@ -911,7 +824,7 @@ class InactivityBot(commands.Bot):
                 'last_audio_time': datetime.now(pytz.UTC),
                 'audio_disabled': after.self_deaf or after.deaf,
                 'total_audio_off_time': 0,
-                'estimated': False  # Nova flag para indicar sessões estimadas
+                'estimated': False
             }
             
             embed = discord.Embed(
@@ -942,27 +855,22 @@ class InactivityBot(commands.Bot):
             return
 
         try:
-            # Calcular tempo total e tempo sem áudio
             now = datetime.now(pytz.UTC)
             total_time = (now - session_data['start_time']).total_seconds()
             audio_off_time = session_data.get('total_audio_off_time', 0)
             
-            # Verificar se o áudio estava desligado e calcular o tempo
             if 'audio_off_time' in session_data:
                 audio_off_duration = (now - session_data['audio_off_time']).total_seconds()
                 audio_off_time += audio_off_duration
             
-            # Calcular tempo efetivo (total - tempo sem áudio)
             effective_time = max(0, total_time - audio_off_time)
             
-            # Registrar saída no banco de dados
             try:
                 await self.db.log_voice_leave(member.id, member.guild.id, int(effective_time))
             except Exception as e:
                 logger.error(f"Erro ao registrar saída de voz: {e}")
                 await self.log_action("Erro DB - Saída de voz", member, str(e))
             
-            # Logar a saída
             channel_name = before.channel.name if before.channel else "Canal desconhecido"
             embed = discord.Embed(
                 title="🚪 Saiu de Voz",
@@ -984,13 +892,11 @@ class InactivityBot(commands.Bot):
         except Exception as e:
             logger.error(f"Erro ao processar saída de voz: {e}")
         finally:
-            # Garantir que a sessão seja removida
             self.active_sessions.pop((member.id, member.guild.id), None)
 
     async def _handle_voice_move(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState, absence_channel_id: int):
         audio_key = (member.id, member.guild.id)
         
-        # Caso 1: Entrando no canal de ausência a partir de outro canal
         if (before.channel is not None and 
             before.channel.id != absence_channel_id and 
             after.channel is not None and 
@@ -1003,7 +909,7 @@ class InactivityBot(commands.Bot):
                     'paused': True,
                     'paused_time': datetime.now(pytz.UTC),
                     'pre_pause_duration': current_duration,
-                    'paused_channel_id': before.channel.id  # Armazena o canal original
+                    'paused_channel_id': before.channel.id
                 })
                 
                 embed = discord.Embed(
@@ -1021,53 +927,34 @@ class InactivityBot(commands.Bot):
                 
                 await self.log_action(None, None, embed=embed)
         
-        # Caso 2: Saindo completamente do canal de voz (incluindo da ausência)
         elif (before.channel is not None and 
               after.channel is None):
             
-            # Se estava na ausência e tem sessão ativa
             if before.channel.id == absence_channel_id and audio_key in self.active_sessions:
-                # Se a sessão estava pausada, tratar como saída normal do canal original
                 if self.active_sessions[audio_key].get('paused'):
-                    # Obter o canal original antes de pausar
                     original_channel_id = self.active_sessions[audio_key].get('paused_channel_id')
                     original_channel = member.guild.get_channel(original_channel_id) if original_channel_id else None
                     
-                    # Se encontrou o canal original, criar estado fictício
                     if original_channel:
                         before_state_data = {
-                            'channel_id': original_channel.id,
-                            'self_deaf': before.self_deaf,
-                            'deaf': before.deaf,
-                            'self_mute': before.self_mute,
-                            'mute': before.mute,
-                            'self_stream': False,
-                            'self_video': False,
-                            'suppress': False,
-                            'requested_to_speak_at': None
+                            'channel_id': original_channel.id, 'self_deaf': before.self_deaf, 'deaf': before.deaf,
+                            'self_mute': before.self_mute, 'mute': before.mute, 'self_stream': False,
+                            'self_video': False, 'suppress': False, 'requested_to_speak_at': None
                         }
                         
-                        before_state = discord.VoiceState(
-                            data=before_state_data,
-                            channel=original_channel
-                        )
+                        before_state = discord.VoiceState(data=before_state_data, channel=original_channel)
                         
                         await self._handle_voice_leave(member, before_state)
                     else:
-                        # Se não encontrou o canal original, usar o canal de ausência
                         await self._handle_voice_leave(member, before)
                     
-                    # Limpar estado pausado
                     for key in ['paused', 'paused_time', 'pre_pause_duration', 'paused_channel_id']:
                         self.active_sessions[audio_key].pop(key, None)
                 else:
-                    # Se não estava pausada, tratar como saída normal
                     await self._handle_voice_leave(member, before)
             else:
-                # Saída normal (não estava na ausência)
                 await self._handle_voice_leave(member, before)
         
-        # Caso 3: Voltando da ausência para outro canal
         elif (before.channel is not None and 
               before.channel.id == absence_channel_id and 
               after.channel is not None and 
@@ -1076,11 +963,9 @@ class InactivityBot(commands.Bot):
             if audio_key in self.active_sessions and self.active_sessions[audio_key].get('paused'):
                 pause_duration = (datetime.now(pytz.UTC) - self.active_sessions[audio_key]['paused_time']).total_seconds()
                 
-                # Restaurar tempo de sessão
                 self.active_sessions[audio_key]['start_time'] = datetime.now(pytz.UTC) - timedelta(
                     seconds=self.active_sessions[audio_key]['pre_pause_duration'])
                 
-                # Limpar estado pausado
                 for key in ['paused', 'paused_time', 'pre_pause_duration', 'paused_channel_id']:
                     self.active_sessions[audio_key].pop(key, None)
                 
@@ -1099,7 +984,6 @@ class InactivityBot(commands.Bot):
                 
                 await self.log_action(None, None, embed=embed)
         
-        # Caso 4: Movimento entre outros canais (não envolvendo ausência)
         elif (before.channel is not None and 
               after.channel is not None and 
               before.channel != after.channel and
@@ -1117,7 +1001,6 @@ class InactivityBot(commands.Bot):
                 embed.set_footer(text=f"ID: {member.id}")
                 await self.log_action(None, None, embed=embed)
         
-        # Caso 5: Mudança de estado no mesmo canal (ex: mute/deafen)
         elif (before.channel is not None and 
               after.channel is not None and 
               before.channel == after.channel):
@@ -1127,7 +1010,6 @@ class InactivityBot(commands.Bot):
     async def _handle_audio_change(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
         audio_key = (member.id, member.guild.id)
         
-        # Se não há sessão ativa e o usuário está em um canal, criar uma
         if audio_key not in self.active_sessions and after.channel is not None:
             await self._handle_voice_join(member, after)
             return
@@ -1138,7 +1020,6 @@ class InactivityBot(commands.Bot):
         audio_was_off = before.self_deaf or before.deaf
         audio_is_off = after.self_deaf or after.deaf
 
-        # Se o áudio foi desligado
         if not audio_was_off and audio_is_off:
             self.active_sessions[audio_key]['audio_disabled'] = True
             self.active_sessions[audio_key]['audio_off_time'] = datetime.now(pytz.UTC)
@@ -1159,7 +1040,6 @@ class InactivityBot(commands.Bot):
             
             await self.log_action(None, None, embed=embed)
         
-        # Se o áudio foi reativado
         elif audio_was_off and not audio_is_off:
             self.active_sessions[audio_key]['audio_disabled'] = False
             if 'audio_off_time' in self.active_sessions[audio_key]:
@@ -1194,14 +1074,12 @@ class InactivityBot(commands.Bot):
             try:
                 event = await self.voice_event_queue.get()
                 
-                # Verificar se o evento é válido (tem todos os campos esperados)
-                if len(event) < 6:  # Evento antigo não timestamp/ID
+                if len(event) < 6:
                     self.voice_event_queue.task_done()
                     continue
                     
                 _, member, before, after, event_id, event_time = event
                 
-                # Ignorar eventos muito antigos
                 if (datetime.now(pytz.UTC) - event_time) > timedelta(minutes=5):
                     logger.debug(f"Ignorando evento antigo: {event_id}")
                     self.voice_event_queue.task_done()
@@ -1319,15 +1197,12 @@ class InactivityBot(commands.Bot):
             logger.warning("notify_admins_dm chamada sem guilda.")
             return
 
-        # Usar um conjunto para evitar enviar DMs duplicadas
         members_to_notify = set()
 
-        # 1. Adicionar todos os administradores
         for member in guild.members:
             if not member.bot and member.guild_permissions.administrator:
                 members_to_notify.add(member)
 
-        # 2. Adicionar membros com os cargos de notificação
         notification_role_ids = self.config.get('notification_roles_dm', [])
         if notification_role_ids:
             for role_id in notification_role_ids:
@@ -1345,7 +1220,6 @@ class InactivityBot(commands.Bot):
 
         for member in members_to_notify:
             try:
-                # Usa o método send_dm que enfileira a mensagem
                 await self.send_dm(member, message_content=None, embed=embed)
                 logger.debug(f"DM de notificação de administrador/cargo enfileirada para {member.display_name} ({member.id}).")
             except Exception as e:
@@ -1353,7 +1227,6 @@ class InactivityBot(commands.Bot):
 
     async def send_dm(self, member: discord.Member, message_content: str, embed: discord.Embed):
         try:
-            # A prioridade para DMs de admin será alta
             priority = 'high' if embed and (embed.title.startswith("🚨") or embed.title.startswith("👢")) else 'low'
             await self.message_queue.put((
                 member,
@@ -1369,7 +1242,7 @@ class InactivityBot(commands.Bot):
                 "O usuário provavelmente desabilitou DMs de membros do servidor."
             )
         except discord.HTTPException as e:
-            if e.code == 50007:  # Não é possível enviar mensagens para este usuário
+            if e.code == 50007:
                 logger.warning(f"Não foi possível enviar DM para {member.display_name}. (DMs desabilitadas)")
             else:
                 logger.error(f"Erro ao enviar DM para {member}: {e}")
@@ -1386,7 +1259,6 @@ class InactivityBot(commands.Bot):
                 logger.warning(f"Template de mensagem de aviso para '{warning_type}' não encontrado.")
                 return
 
-            # Obter informações do período atual
             last_check = None
             try:
                 if hasattr(self, 'db') and self.db:
@@ -1400,12 +1272,10 @@ class InactivityBot(commands.Bot):
                 'required_minutes': self.config.get('required_minutes', 'N/A'),
                 'required_days': self.config.get('required_days', 'N/A'),
                 'guild': member.guild.name,
-                'days_remaining': 'N/A'  # Valor padrão
+                'days_remaining': 'N/A'
             }
             
-            # Calcular dias restantes para todos os avisos
             if last_check:
-                # last_check pode ser um dict ou um objeto; tente acessar de forma segura
                 period_end = None
                 if isinstance(last_check, dict):
                     period_end = last_check.get('period_end')
@@ -1415,7 +1285,6 @@ class InactivityBot(commands.Bot):
                 if period_end:
                     now = datetime.now(pytz.UTC)
                     
-                    # Garantir timezone
                     if getattr(period_end, 'tzinfo', None) is None:
                         try:
                             period_end = period_end.replace(tzinfo=pytz.UTC)
@@ -1427,7 +1296,6 @@ class InactivityBot(commands.Bot):
                     except Exception:
                         days_remaining = 0
                     
-                    # Formatar para mensagem amigável
                     if days_remaining == 0:
                         format_args['days_remaining'] = "HOJE"
                     elif days_remaining == 1:
@@ -1458,7 +1326,6 @@ class InactivityBot(commands.Bot):
             
             await self.send_dm(member, message, embed)
             
-            # Registrar aviso no banco de dados
             try:
                 if hasattr(self, 'db') and self.db:
                     await self.db.log_warning(member.id, member.guild.id, warning_type)
@@ -1467,7 +1334,6 @@ class InactivityBot(commands.Bot):
             
             await self.log_action(f"Aviso Enviado ({warning_type})", member)
             
-            # Notificar administradores se for primeiro ou segundo aviso
             if warning_type in ['first', 'second']:
                 admin_embed = discord.Embed(
                     title=f"🔔 Relatório de Aviso: {warning_type.capitalize()}",
@@ -1517,23 +1383,17 @@ bot = InactivityBot(
 
 @bot.event
 async def on_member_update(before: discord.Member, after: discord.Member):
-    """Evento que detecta quando membros recebem cargos e verifica se são devoluções por inatividade"""
     if before.roles == after.roles:
         return
 
-    # Verificar se há cargos monitorados na configuração
     if not hasattr(bot, 'config') or not bot.config.get('tracked_roles'):
         return
 
     tracked_roles = set(bot.config['tracked_roles'])
 
-    # Encontrar cargos adicionados
     added_roles = [role for role in after.roles if role not in before.roles and role.id in tracked_roles]
 
     if added_roles:
-        # Sempre que um cargo monitorado é adicionado, o histórico do usuário é resetado.
-        # Isso cria um "novo começo" e previne que o bot remova o cargo imediatamente
-        # com base em um período de inatividade anterior onde o usuário não possuía o cargo.
         if hasattr(bot, 'db') and bot.db:
             await bot.db.reset_user_tracking(after.id, after.guild.id)
             logger.info(f"Acompanhamento de inatividade resetado para {after.display_name} após receber um cargo monitorado.")
@@ -1543,7 +1403,6 @@ async def on_member_update(before: discord.Member, after: discord.Member):
                 try:
                     last_removal = None
                     if hasattr(bot, 'db') and bot.db:
-                        # CORREÇÃO: Chama a nova função para verificar a remoção do cargo específico.
                         last_removal = await bot.db.get_last_specific_role_removal(after.id, after.guild.id, role.id)
                 except Exception as e:
                     logger.error(f"Erro ao obter histórico de remoções do DB: {e}")
@@ -1564,16 +1423,9 @@ async def on_member_update(before: discord.Member, after: discord.Member):
                     time_since_removal = datetime.now(pytz.UTC) - removal_date
 
                     if time_since_removal <= timedelta(days=30):
-                        # *** INÍCIO DA CORREÇÃO ***
-                        # Ajusta a chamada para a nova assinatura da função, passando o cargo como uma lista.
                         await send_forgiveness_message(after, [role])
-                        # *** FIM DA CORREÇÃO ***
-                        
-                        # O 'break' aqui é mantido para enviar apenas uma mensagem de perdão,
-                        # mesmo que múltiplos cargos sejam devolvidos de uma vez.
                         break
 
-            # Registrar a atribuição de cada cargo novo, independentemente de ser uma devolução ou não.
             for role in added_roles:
                 try:
                     if hasattr(bot, 'db') and bot.db:
@@ -1584,16 +1436,12 @@ async def on_member_update(before: discord.Member, after: discord.Member):
         except Exception as e:
             logger.error(f"Erro ao processar atualização de membro: {e}")
 
-# *** INÍCIO DA CORREÇÃO ***
-# Função atualizada para aceitar uma lista de cargos e enviar uma única DM consolidada.
 async def send_forgiveness_message(member: discord.Member, roles: List[discord.Role]):
     """Envia UMA mensagem de perdão quando um ou mais cargos são devolvidos."""
     if not roles:
         return
 
     try:
-        # Pega o primeiro cargo da lista para a verificação no DB,
-        # assumindo que uma mensagem por devolução é suficiente para o controle de spam.
         role_for_db_check = roles[0]
         last_message = None
         try:
@@ -1617,12 +1465,10 @@ async def send_forgiveness_message(member: discord.Member, roles: List[discord.R
             except Exception:
                 pass
 
-        # Obter configurações atuais
         required_minutes = bot.config.get('required_minutes', 15)
         required_days = bot.config.get('required_days', 2)
         monitoring_period = bot.config.get('monitoring_period', 14)
 
-        # Formata a lista de cargos para a mensagem
         roles_text = "\n".join(f"• **{role.name}**" for role in roles)
         title = "🎉 Cargo Devolvido!" if len(roles) == 1 else "🎉 Cargos Devolvidos!"
         
@@ -1648,7 +1494,6 @@ async def send_forgiveness_message(member: discord.Member, roles: List[discord.R
         await bot.send_dm(member, None, embed)
         logger.info(f"Mensagem de perdão enviada para {member.display_name} pelos cargos: {', '.join(r.name for r in roles)}")
 
-        # Registrar o envio da mensagem de perdão (usando o primeiro cargo como referência)
         try:
             if hasattr(bot, 'db') and bot.db:
                 await bot.db.log_forgiveness_message(member.id, member.guild.id, role_for_db_check.id)
@@ -1663,8 +1508,6 @@ async def send_forgiveness_message(member: discord.Member, roles: List[discord.R
 
     except Exception as e:
         logger.error(f"Erro ao enviar mensagem de perdão para {member}: {e}")
-# *** FIM DA CORREÇÃO ***
-
 
 @bot.event
 async def on_ready():
@@ -1677,10 +1520,7 @@ async def on_ready():
         logger.info(f'Bot conectado como {bot.user}')
         logger.info(f"Latência: {round(bot.latency * 1000)}ms")
 
-
-        # --- ETAPA 1: INICIALIZAÇÃO CRÍTICA ---
         try:
-            # Garante que o banco de dados e a configuração estão prontos.
             if not hasattr(bot, 'db') or not bot.db or not getattr(bot.db, '_is_initialized', False):
                 logger.error("Banco de dados não foi inicializado corretamente. Tentando novamente...")
                 if not await bot.initialize_db():
@@ -1689,7 +1529,7 @@ async def on_ready():
 
             logger.info("Carregando e validando configurações...")
             await bot.load_config()
-            await bot.save_config()  # Garante que a configuração está sincronizada com o DB.
+            await bot.save_config()
             
             if hasattr(bot, 'db') and getattr(bot.db, 'sync_task_periods', None):
                 monitoring_period = bot.config.get('monitoring_period')
@@ -1701,9 +1541,6 @@ async def on_ready():
             return
 
         logger.info("Inicialização crítica concluída.")
-
-        # --- ETAPA 2: INICIAR TAREFAS DE FUNDO E PROCESSOS NÃO CRÍTICOS ---
-        # Estas tarefas podem levar tempo e rodarão em segundo plano.
 
         if not bot._tasks_started:
             logger.info("Iniciando tarefas de fundo...")
@@ -1724,7 +1561,6 @@ async def on_ready():
                 await asyncio.sleep(delay)
                 bot.loop.create_task(task_coro, name=name)
 
-            # Agendar tarefas principais com um pequeno atraso para não sobrecarregar a inicialização
             await start_task_with_jitter(register_role_assignments_wrapper(), 'register_role_assignments_wrapper')
             await start_task_with_jitter(inactivity_check(), 'inactivity_check_wrapper')
             await start_task_with_jitter(cleanup_members(), 'cleanup_members_wrapper')
@@ -1734,7 +1570,6 @@ async def on_ready():
             await start_task_with_jitter(report_metrics(), 'report_metrics_wrapper')
             await start_task_with_jitter(health_check(), 'health_check_wrapper')
             
-            # Tarefas de processamento contínuo
             bot.loop.create_task(process_pending_voice_events(), name='process_pending_voice_events')
             bot.loop.create_task(check_current_voice_members(), name='check_current_voice_members')
             bot.loop.create_task(detect_missing_voice_leaves(), name='detect_missing_voice_leaves')
@@ -1751,7 +1586,6 @@ async def on_ready():
             bot._tasks_started = True
             logger.info("Todas as tarefas de fundo foram agendadas com sucesso.")
 
-        # Enviar log de inicialização
         try:
             embed = discord.Embed(
                 title="✅ Bot de Controle de Atividades Online",
@@ -1780,7 +1614,6 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
         event_id = bot.generate_event_id()
         event_time = datetime.now(pytz.UTC)
         
-        # Se acabamos de reconectar, ignorar eventos muito antigos
         if bot.last_reconnect_time and (event_time - bot.last_reconnect_time) < timedelta(seconds=10):
             logger.debug(f"Ignorando evento pós-reconexão: {event_id}")
             return
@@ -1801,20 +1634,16 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    # Retorna uma resposta simples para o UptimeRobot
     return "Bot de Controle de Atividade está online."
 
 def run():
-    # O Render define a porta através da variável de ambiente PORT
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
 def start_web_server():
-    # Inicia o servidor Flask em um thread separado
     t = Thread(target=run)
     t.daemon = True
     t.start()
-# --- FIM DO CÓDIGO DO SERVIDOR WEB ---
 
 # Importar comandos
 from bot_commands import *
@@ -1823,15 +1652,9 @@ async def main():
     load_dotenv()
     DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
     
-    # --- INÍCIO DA CORREÇÃO ---
-    # CORREÇÃO: Aumentado o delay inicial para 15 segundos para garantir que o ambiente
-    # Render esteja totalmente estável antes da primeira tentativa de conexão. Isso ajuda
-    # a prevenir a falha inicial que leva a retentativas agressivas e bloqueios do Cloudflare.
     logger.info("Aguardando 15 segundos antes da primeira tentativa de conexão para estabilização do ambiente...")
     await asyncio.sleep(15)
-    # --- FIM DA CORREÇÃO ---
     
-    # Tentar inicializar o banco de dados antes de iniciar o bot
     try:
         if not hasattr(bot, 'initialize_db'):
             raise AttributeError("Método initialize_db não encontrado na classe InactivityBot")
@@ -1845,7 +1668,6 @@ async def main():
         logger.critical(f"Falha crítica ao inicializar o banco de dados: {e}")
         return
 
-    # Inicia o servidor web ANTES de iniciar o bot
     start_web_server()
         
     async with bot:
@@ -1854,207 +1676,19 @@ async def main():
         except Exception as e:
             logger.critical(f"Erro ao iniciar o bot: {e}")
 
-if __name__ == '__main__':
-    asyncio.run(main())
-
-
-
-# -------------------- INJEÇÃO: RateLimitMonitor Melhorado e Métodos Proativos --------------------
-# Esta seção foi adicionada para substituir/atualizar o comportamento de rate limit
-from collections import deque as _deque
-import time as _time
-import random as _random
-
-class RateLimitMonitor:
-    def __init__(self):
-        # Rastreia os limites por 'bucket' (rota da API)
-        self.buckets = {}
-        # Mantém um histórico recente de requisições para análise
-        self.history = _deque(maxlen=100)
-        # Delay adaptativo que aumenta sob pressão e diminui gradualmente
-        self.adaptive_delay = 1.0
-        self.max_delay = 30.0  # Aumentado para 30 segundos
-        # Timestamps para saber quando o bot deve entrar em modo de resfriamento
-        self.cooldown_until = 0
-        self.cloudflare_blocked_until = 0
-
-    def update_from_headers(self, headers: dict):
-        """Atualiza os limites com base nos headers de uma resposta da API do Discord.
-        Este método é o cérebro da operação, sendo chamado a cada requisição."""
-        now = _time.time()
-        bucket = headers.get('X-RateLimit-Bucket')
-
-        if not bucket:
-            return  # Não é uma requisição com headers de rate limit
-
-        remaining = headers.get('X-RateLimit-Remaining')
-        reset_after = headers.get('X-RateLimit-Reset-After')
-
-        if remaining is None or reset_after is None:
-            return
-
-        try:
-            remaining_i = int(remaining)
-            reset_after_f = float(reset_after)
-        except Exception:
-            # Valores inesperados — não atualiza
-            return
-
-        self.buckets[bucket] = {
-            'remaining': remaining_i,
-            'reset_at': now + reset_after_f
-        }
-        self.history.append({'time': now, 'bucket': bucket, 'remaining': remaining_i})
-        
-        # Lógica proativa: se estamos com poucas requisições, começamos a desacelerar
-        if remaining_i < 3:
-            # Aumenta o delay adaptativo um pouco mais agressivamente
-            self.adaptive_delay = min(self.max_delay, self.adaptive_delay * 1.5)
-            self.cooldown_until = now + self.adaptive_delay
-            logger.warning(f"Rate limit baixo no bucket {bucket} ({remaining_i} restantes). Delay adaptativo aumentado para {self.adaptive_delay:.2f}s.")
-
-    def handle_cloudflare_block(self):
-        """Ativado ao receber um erro 1015 do Cloudflare.
-        Aumenta drasticamente o delay para evitar um ban temporário."""
-        now = _time.time()
-        # Entra em modo de resfriamento por 60 segundos + um tempo aleatório
-        self.cloudflare_blocked_until = now + 60 + _random.uniform(5, 15)
-        self.adaptive_delay = self.max_delay  # Define o delay para o máximo
-        logger.critical(f"BLOQUEIO DO CLOUDFLARE DETECTADO! Entrando em modo de resfriamento por {self.cloudflare_blocked_until - now:.2f} segundos.")
-
-    def get_delay(self) -> float:
-        """Calcula o delay necessário antes da próxima operação.
-        Retorna 0 se nenhuma ação for necessária."""
-        now = _time.time()
-        
-        # 1. Verifica bloqueio do Cloudflare (mais crítico)
-        if now < self.cloudflare_blocked_until:
-            return self.cloudflare_blocked_until - now
-
-        # 2. Verifica se estamos em resfriamento por baixo número de requisições
-        if now < self.cooldown_until:
-            # Reduz o delay adaptativo gradualmente a cada verificação
-            self.adaptive_delay = max(1.0, self.adaptive_delay * 0.95)
-            return self.cooldown_until - now
-
-        # 3. Reseta o delay adaptativo se não houver mais pressão
-        self.adaptive_delay = max(1.0, self.adaptive_delay * 0.9)
-        
-        return 0.0
-
-# Método reativo: quando houver erro 429/Cloudflare em outra parte do código,
-# continue chamando rate_limit_monitor.handle_cloudflare_block() para ativar cooldowns.
-
-# Adiciona um listener proativo para coletar headers de cada requisição HTTP
-async def _injected_on_http_request_completed(self, route, response):
-    """Evento chamado após cada requisição HTTP que o bot faz.
-    É a fonte de dados perfeita para nosso monitor de rate limit."""
+# CORREÇÃO: A lógica injetada foi integrada diretamente nas classes/métodos acima.
+# Apenas a função de monkey-patching para o listener HTTP é necessária aqui.
+async def on_http_request_completed(self, route, response):
+    """Evento chamado após cada requisição HTTP que o bot faz."""
     try:
-        # Alimenta o monitor com os headers da resposta
-        # response.headers deve ser um Mapping; normalizar chaves em str
-        headers = {}
-        try:
-            for k, v in response.headers.items():
-                headers[k] = v
-        except Exception:
-            headers = dict(response.headers)
+        headers = {k: v for k, v in response.headers.items()}
         self.rate_limit_monitor.update_from_headers(headers)
     except Exception as e:
         logger.error(f"Erro ao processar headers de rate limit: {e}")
 
-# Substitui o processamento de filas por uma versão que usa get_delay()
-async def _injected_process_queues(self):
-    """Processa as filas de mensagens e eventos com controle de rate limit inteligente."""
-    await self.wait_until_ready()
-    while True:
-        try:
-            # 1. Verificar se precisamos de um delay
-            delay = self.rate_limit_monitor.get_delay()
-            if delay > 0:
-                logger.info(f"Rate limit proativo: aguardando {delay:.2f} segundos.")
-                await asyncio.sleep(delay)
-                continue
+# Injeta o método na classe InactivityBot
+InactivityBot.on_http_request_completed = on_http_request_completed
 
-            # 2. Processar a fila de eventos de voz (se houver)
-            if not self.voice_event_queue.empty():
-                batch = []
-                # Pega um lote de eventos da fila
-                for _ in range(min(self._batch_processing_size, self.voice_event_queue.qsize())):
-                    batch.append(await self.voice_event_queue.get())
-                
-                await self._process_voice_batch(batch)
-                
-                for _ in batch:
-                    self.voice_event_queue.task_done()
-                # Continue para o próximo ciclo para reavaliar o delay
-                continue
 
-            # 3. Processar a fila de mensagens (se a de voz estiver vazia)
-            item, priority = await self.message_queue.get_next_message()
-            if item is None:
-                await asyncio.sleep(0.5)  # Fila vazia, aguarda um pouco
-                continue
-                
-            try:
-                # O seu código de processamento de item da fila existente vai aqui
-                if isinstance(item, tuple):
-                    # ... (lógica para desempacotar e enviar a mensagem)
-                    destination, content, embed, file = (None, None, None, None)
-                    try:
-                        if len(item) == 4:
-                            destination, content, embed, file = item
-                        elif len(item) == 3:
-                            destination, content, embed = item
-                            file = None
-                        elif len(item) == 2:
-                            destination, embed = item
-                            content, file = None, None
-                    except Exception:
-                        # Se falhar ao desempacotar, tenta usar o item como (destination, content)
-                        try:
-                            destination, content = item
-                        except Exception:
-                            logger.warning(f"Formato inesperado de item da fila: {item}")
-                    
-                    if isinstance(destination, (discord.TextChannel, discord.User, discord.Member)):
-                        await self.send_with_fallback(destination, content, embed, file)
-                    else:
-                        logger.warning(f"Destino inválido para mensagem: {type(destination)}")
-                else:
-                    logger.warning(f"Item da fila em formato desconhecido: {item}")
-
-            except discord.HTTPException as e:
-                # Se, mesmo com a prevenção, um erro 429 ou 1015 ocorrer, reagimos.
-                status = getattr(e, 'status', None)
-                if status == 429:
-                    # Tentar extrair retry_after (padrão do discord.py)
-                    retry_after = getattr(e, 'retry_after', None)
-                    logger.warning(f"Atingido rate limit (429). Headers: {getattr(e, 'response', None)}")
-                    if retry_after:
-                        self.rate_limit_monitor.cooldown_until = time.time() + retry_after
-                        self.rate_limit_monitor.adaptive_delay = min(self.rate_limit_monitor.max_delay, self.rate_limit_monitor.adaptive_delay * 2)
-                elif "Cloudflare" in str(e) or "1015" in str(getattr(e, 'text', '')):
-                    self.rate_limit_monitor.handle_cloudflare_block()
-            except Exception as e:
-                logger.error(f"Erro ao processar item da fila: {e}", exc_info=True)
-            finally:    
-                # marca tarefa como finalizada (se o queue suportar prioridade)
-                try:
-                    self.message_queue.task_done(priority)
-                except Exception:
-                    # fallback: tentar finalizar qualquer fila
-                    try:
-                        self.message_queue.task_done()
-                    except Exception:
-                        pass
-                
-        except Exception as e:
-            logger.error(f"Erro crítico no processador de filas: {e}", exc_info=True)
-            await asyncio.sleep(5)
-
-# Injeta (substitui) os métodos na classe InactivityBot já definida no arquivo.
-# Atribuições dinâmicas permitem manter todas as outras funções/classes intactas.
-InactivityBot.on_http_request_completed = _injected_on_http_request_completed
-InactivityBot.process_queues = _injected_process_queues
-
-# -------------------- FIM DA INJEÇÃO --------------------
+if __name__ == '__main__':
+    asyncio.run(main())
