@@ -1856,3 +1856,205 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
+
+
+
+# -------------------- INJEÇÃO: RateLimitMonitor Melhorado e Métodos Proativos --------------------
+# Esta seção foi adicionada para substituir/atualizar o comportamento de rate limit
+from collections import deque as _deque
+import time as _time
+import random as _random
+
+class RateLimitMonitor:
+    def __init__(self):
+        # Rastreia os limites por 'bucket' (rota da API)
+        self.buckets = {}
+        # Mantém um histórico recente de requisições para análise
+        self.history = _deque(maxlen=100)
+        # Delay adaptativo que aumenta sob pressão e diminui gradualmente
+        self.adaptive_delay = 1.0
+        self.max_delay = 30.0  # Aumentado para 30 segundos
+        # Timestamps para saber quando o bot deve entrar em modo de resfriamento
+        self.cooldown_until = 0
+        self.cloudflare_blocked_until = 0
+
+    def update_from_headers(self, headers: dict):
+        """Atualiza os limites com base nos headers de uma resposta da API do Discord.
+        Este método é o cérebro da operação, sendo chamado a cada requisição."""
+        now = _time.time()
+        bucket = headers.get('X-RateLimit-Bucket')
+
+        if not bucket:
+            return  # Não é uma requisição com headers de rate limit
+
+        remaining = headers.get('X-RateLimit-Remaining')
+        reset_after = headers.get('X-RateLimit-Reset-After')
+
+        if remaining is None or reset_after is None:
+            return
+
+        try:
+            remaining_i = int(remaining)
+            reset_after_f = float(reset_after)
+        except Exception:
+            # Valores inesperados — não atualiza
+            return
+
+        self.buckets[bucket] = {
+            'remaining': remaining_i,
+            'reset_at': now + reset_after_f
+        }
+        self.history.append({'time': now, 'bucket': bucket, 'remaining': remaining_i})
+        
+        # Lógica proativa: se estamos com poucas requisições, começamos a desacelerar
+        if remaining_i < 3:
+            # Aumenta o delay adaptativo um pouco mais agressivamente
+            self.adaptive_delay = min(self.max_delay, self.adaptive_delay * 1.5)
+            self.cooldown_until = now + self.adaptive_delay
+            logger.warning(f"Rate limit baixo no bucket {bucket} ({remaining_i} restantes). Delay adaptativo aumentado para {self.adaptive_delay:.2f}s.")
+
+    def handle_cloudflare_block(self):
+        """Ativado ao receber um erro 1015 do Cloudflare.
+        Aumenta drasticamente o delay para evitar um ban temporário."""
+        now = _time.time()
+        # Entra em modo de resfriamento por 60 segundos + um tempo aleatório
+        self.cloudflare_blocked_until = now + 60 + _random.uniform(5, 15)
+        self.adaptive_delay = self.max_delay  # Define o delay para o máximo
+        logger.critical(f"BLOQUEIO DO CLOUDFLARE DETECTADO! Entrando em modo de resfriamento por {self.cloudflare_blocked_until - now:.2f} segundos.")
+
+    def get_delay(self) -> float:
+        """Calcula o delay necessário antes da próxima operação.
+        Retorna 0 se nenhuma ação for necessária."""
+        now = _time.time()
+        
+        # 1. Verifica bloqueio do Cloudflare (mais crítico)
+        if now < self.cloudflare_blocked_until:
+            return self.cloudflare_blocked_until - now
+
+        # 2. Verifica se estamos em resfriamento por baixo número de requisições
+        if now < self.cooldown_until:
+            # Reduz o delay adaptativo gradualmente a cada verificação
+            self.adaptive_delay = max(1.0, self.adaptive_delay * 0.95)
+            return self.cooldown_until - now
+
+        # 3. Reseta o delay adaptativo se não houver mais pressão
+        self.adaptive_delay = max(1.0, self.adaptive_delay * 0.9)
+        
+        return 0.0
+
+# Método reativo: quando houver erro 429/Cloudflare em outra parte do código,
+# continue chamando rate_limit_monitor.handle_cloudflare_block() para ativar cooldowns.
+
+# Adiciona um listener proativo para coletar headers de cada requisição HTTP
+async def _injected_on_http_request_completed(self, route, response):
+    """Evento chamado após cada requisição HTTP que o bot faz.
+    É a fonte de dados perfeita para nosso monitor de rate limit."""
+    try:
+        # Alimenta o monitor com os headers da resposta
+        # response.headers deve ser um Mapping; normalizar chaves em str
+        headers = {}
+        try:
+            for k, v in response.headers.items():
+                headers[k] = v
+        except Exception:
+            headers = dict(response.headers)
+        self.rate_limit_monitor.update_from_headers(headers)
+    except Exception as e:
+        logger.error(f"Erro ao processar headers de rate limit: {e}")
+
+# Substitui o processamento de filas por uma versão que usa get_delay()
+async def _injected_process_queues(self):
+    """Processa as filas de mensagens e eventos com controle de rate limit inteligente."""
+    await self.wait_until_ready()
+    while True:
+        try:
+            # 1. Verificar se precisamos de um delay
+            delay = self.rate_limit_monitor.get_delay()
+            if delay > 0:
+                logger.info(f"Rate limit proativo: aguardando {delay:.2f} segundos.")
+                await asyncio.sleep(delay)
+                continue
+
+            # 2. Processar a fila de eventos de voz (se houver)
+            if not self.voice_event_queue.empty():
+                batch = []
+                # Pega um lote de eventos da fila
+                for _ in range(min(self._batch_processing_size, self.voice_event_queue.qsize())):
+                    batch.append(await self.voice_event_queue.get())
+                
+                await self._process_voice_batch(batch)
+                
+                for _ in batch:
+                    self.voice_event_queue.task_done()
+                # Continue para o próximo ciclo para reavaliar o delay
+                continue
+
+            # 3. Processar a fila de mensagens (se a de voz estiver vazia)
+            item, priority = await self.message_queue.get_next_message()
+            if item is None:
+                await asyncio.sleep(0.5)  # Fila vazia, aguarda um pouco
+                continue
+                
+            try:
+                # O seu código de processamento de item da fila existente vai aqui
+                if isinstance(item, tuple):
+                    # ... (lógica para desempacotar e enviar a mensagem)
+                    destination, content, embed, file = (None, None, None, None)
+                    try:
+                        if len(item) == 4:
+                            destination, content, embed, file = item
+                        elif len(item) == 3:
+                            destination, content, embed = item
+                            file = None
+                        elif len(item) == 2:
+                            destination, embed = item
+                            content, file = None, None
+                    except Exception:
+                        # Se falhar ao desempacotar, tenta usar o item como (destination, content)
+                        try:
+                            destination, content = item
+                        except Exception:
+                            logger.warning(f"Formato inesperado de item da fila: {item}")
+                    
+                    if isinstance(destination, (discord.TextChannel, discord.User, discord.Member)):
+                        await self.send_with_fallback(destination, content, embed, file)
+                    else:
+                        logger.warning(f"Destino inválido para mensagem: {type(destination)}")
+                else:
+                    logger.warning(f"Item da fila em formato desconhecido: {item}")
+
+            except discord.HTTPException as e:
+                # Se, mesmo com a prevenção, um erro 429 ou 1015 ocorrer, reagimos.
+                status = getattr(e, 'status', None)
+                if status == 429:
+                    # Tentar extrair retry_after (padrão do discord.py)
+                    retry_after = getattr(e, 'retry_after', None)
+                    logger.warning(f"Atingido rate limit (429). Headers: {getattr(e, 'response', None)}")
+                    if retry_after:
+                        self.rate_limit_monitor.cooldown_until = time.time() + retry_after
+                        self.rate_limit_monitor.adaptive_delay = min(self.rate_limit_monitor.max_delay, self.rate_limit_monitor.adaptive_delay * 2)
+                elif "Cloudflare" in str(e) or "1015" in str(getattr(e, 'text', '')):
+                    self.rate_limit_monitor.handle_cloudflare_block()
+            except Exception as e:
+                logger.error(f"Erro ao processar item da fila: {e}", exc_info=True)
+            finally:    
+                # marca tarefa como finalizada (se o queue suportar prioridade)
+                try:
+                    self.message_queue.task_done(priority)
+                except Exception:
+                    # fallback: tentar finalizar qualquer fila
+                    try:
+                        self.message_queue.task_done()
+                    except Exception:
+                        pass
+                
+        except Exception as e:
+            logger.error(f"Erro crítico no processador de filas: {e}", exc_info=True)
+            await asyncio.sleep(5)
+
+# Injeta (substitui) os métodos na classe InactivityBot já definida no arquivo.
+# Atribuições dinâmicas permitem manter todas as outras funções/classes intactas.
+InactivityBot.on_http_request_completed = _injected_on_http_request_completed
+InactivityBot.process_queues = _injected_process_queues
+
+# -------------------- FIM DA INJEÇÃO --------------------
