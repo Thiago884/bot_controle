@@ -320,9 +320,9 @@ class InactivityBot(commands.Bot):
                 # --- INÍCIO DA CORREÇÃO ---
                 # Garante que a sessão HTTP interna seja fechada entre as tentativas
                 # para evitar o warning 'Unclosed client session'.
-                if hasattr(self, 'http') and self.http._session:
+                if hasattr(self, 'http') and self.http.session:
                     try:
-                        await self.http._session.close()
+                        await self.http.session.close()
                         logger.info("Sessão HTTP interna fechada após falha na conexão.")
                     except Exception as close_err:
                         logger.warning(f"Erro ao fechar sessão HTTP interna: {close_err}")
@@ -355,9 +355,9 @@ class InactivityBot(commands.Bot):
             except Exception as e:
                 # --- INÍCIO DA CORREÇÃO ---
                 # Garante que a sessão HTTP interna seja fechada entre as tentativas
-                if hasattr(self, 'http') and self.http._session:
+                if hasattr(self, 'http') and self.http.session:
                     try:
-                        await self.http._session.close()
+                        await self.http.session.close()
                         logger.info("Sessão HTTP interna fechada após falha inesperada na conexão.")
                     except Exception as close_err:
                         logger.warning(f"Erro ao fechar sessão HTTP interna: {close_err}")
