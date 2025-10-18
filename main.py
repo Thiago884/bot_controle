@@ -320,9 +320,9 @@ class InactivityBot(commands.Bot):
                 # --- INÍCIO DA CORREÇÃO ---
                 # Garante que a sessão HTTP interna seja fechada entre as tentativas
                 # para evitar o warning 'Unclosed client session'.
-                if hasattr(self, 'http') and self.http.session:
+                if hasattr(self, 'http') and self.http._session:
                     try:
-                        await self.http.session.close()
+                        await self.http._session.close()
                         logger.info("Sessão HTTP interna fechada após falha na conexão.")
                     except Exception as close_err:
                         logger.warning(f"Erro ao fechar sessão HTTP interna: {close_err}")
@@ -349,15 +349,15 @@ class InactivityBot(commands.Bot):
                     )
                 
                 if self._connection_attempts >= self._max_connection_attempts:
-                    logger.critical("Máximo de tentativas de conexão atingido devido a erro HTTP. Desistindo.")
+                    logger.critical("Máximo de tentativas de conexão atingido due a erro HTTP. Desistindo.")
                     raise
                     
             except Exception as e:
                 # --- INÍCIO DA CORREÇÃO ---
                 # Garante que a sessão HTTP interna seja fechada entre as tentativas
-                if hasattr(self, 'http') and self.http.session:
+                if hasattr(self, 'http') and self.http._session:
                     try:
-                        await self.http.session.close()
+                        await self.http._session.close()
                         logger.info("Sessão HTTP interna fechada após falha inesperada na conexão.")
                     except Exception as close_err:
                         logger.warning(f"Erro ao fechar sessão HTTP interna: {close_err}")
@@ -370,7 +370,7 @@ class InactivityBot(commands.Bot):
                     exc_info=True
                 )
                 if self._connection_attempts >= self._max_connection_attempts:
-                    logger.critical("Máximo de tentativas de conexão atingido devido a erro inesperado. Desistindo.", exc_info=True)
+                    logger.critical("Máximo de tentativas de conexão atingido due a erro inesperado. Desistindo.", exc_info=True)
                     raise
 
     async def initialize_db(self):
