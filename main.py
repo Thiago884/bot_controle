@@ -317,6 +317,17 @@ class InactivityBot(commands.Bot):
                 break
 
             except discord.HTTPException as e:
+                # --- INÍCIO DA CORREÇÃO ---
+                # Garante que a sessão HTTP interna seja fechada entre as tentativas
+                # para evitar o warning 'Unclosed client session'.
+                if hasattr(self, 'http') and self.http.session:
+                    try:
+                        await self.http.session.close()
+                        logger.info("Sessão HTTP interna fechada após falha na conexão.")
+                    except Exception as close_err:
+                        logger.warning(f"Erro ao fechar sessão HTTP interna: {close_err}")
+                # --- FIM DA CORREÇÃO ---
+
                 if "Cloudflare" in str(e) or "1015" in str(e) or e.status == 429:
                     self.rate_limit_monitor.handle_cloudflare_block()
                     
@@ -342,6 +353,16 @@ class InactivityBot(commands.Bot):
                     raise
                     
             except Exception as e:
+                # --- INÍCIO DA CORREÇÃO ---
+                # Garante que a sessão HTTP interna seja fechada entre as tentativas
+                if hasattr(self, 'http') and self.http.session:
+                    try:
+                        await self.http.session.close()
+                        logger.info("Sessão HTTP interna fechada após falha inesperada na conexão.")
+                    except Exception as close_err:
+                        logger.warning(f"Erro ao fechar sessão HTTP interna: {close_err}")
+                # --- FIM DA CORREÇÃO ---
+                
                 wait_before_next_try = (self._connection_delay * (2 ** (self._connection_attempts - 1))) + random.uniform(0, 5)
                 logger.error(
                     f"Erro inesperado ao conectar. "
