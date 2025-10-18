@@ -190,7 +190,8 @@ class BatchProcessor:
                 return_exceptions=True
             )
             results.extend(batch_results)
-            await asyncio.sleep(self.bot.rate_limit_delay)  # Delay entre lotes
+            # CORREÇÃO APLICADA AQUI
+            await asyncio.sleep(self.bot._api_request_delay)  # Delay entre lotes
             
         return results
 
@@ -830,7 +831,8 @@ async def _cleanup_members(force_check: bool = False):
             
             members_kicked += sum(results)  # Soma os resultados booleanos (True = 1, False = 0)
             
-            await asyncio.sleep(bot.rate_limit_delay)
+            # CORREÇÃO APLICADA AQUI
+            await asyncio.sleep(bot._api_request_delay)
     
     logger.info(f"Limpeza de membros concluída. Membros expulsos: {members_kicked}")
 
@@ -1126,7 +1128,8 @@ async def _monitor_rate_limits():
                 "Monitoramento de Rate Limits",
                 None,
                 notification_message + 
-                f"Delay atual: {bot.rate_limit_delay:.2f}s"
+                # CORREÇÃO APLICADA AQUI
+                f"Delay atual: {bot._api_request_delay:.2f}s"
             )
             
     except Exception as e:
