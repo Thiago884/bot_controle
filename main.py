@@ -509,8 +509,13 @@ class InactivityBot(commands.Bot):
             logger.critical("Falha na inicialização do banco de dados. As tarefas não serão iniciadas.")
             self.db_connection_failed = True
     
+    # --- INÍCIO DA CORREÇÃO 1 ---
+    # A função send_with_fallback foi modificada para NÃO tratar erros 429 (rate limit).
+    # Ela agora re-levanta a exceção 429 para que o processador de filas (process_queues)
+    # possa lidar com isso de forma centralizada, evitando o bloqueio da fila.
+    # Ela ainda tentará reenviar em caso de outros erros (ex: 500 - Erro de Servidor).
     async def send_with_fallback(self, destination, content=None, embed=None, file=None):
-        """Envia mensagens com tratamento de erros e fallback para rate limits."""
+        """Envia mensagens com tratamento de erros. O rate limit (429) é tratado pelo chamador (process_queues)."""
         max_retries = 3
         base_delay = 2.0
         
@@ -525,28 +530,36 @@ class InactivityBot(commands.Bot):
                     await destination.send(embed=embed)
                 elif content:
                     await destination.send(content)
-                return
+                return # Sucesso
                 
             except discord.HTTPException as e:
                 if e.status == 429:
-                    delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
-                    logger.warning(f"Rate limit atingido (tentativa {attempt + 1}/{max_retries}). Tentando novamente em {delay:.2f} segundos")
-                    
-                    self.rate_limit_monitor.adaptive_delay = min(
-                        self.rate_limit_monitor.max_delay,
-                        self.rate_limit_monitor.adaptive_delay * 1.5
-                    )
-                    
-                    await asyncio.sleep(delay)
-                    continue
-                    
-                logger.error(f"Erro HTTP ao enviar mensagem para {destination}: {e}")
-                raise
+                    # Rate limit deve ser tratado pelo process_queues, que gerencia o monitor
+                    logger.warning(f"Rate limit (429) detectado. Deixando process_queues lidar.")
+                    raise # Re-levanta a exceção para o process_queues capturar
+                
+                # Outros erros HTTP (ex: 403 Forbidden, 404 Not Found, 500 Server Error)
+                logger.error(f"Erro HTTP {e.status} ao enviar mensagem para {destination} (tentativa {attempt + 1}/{max_retries}): {e}")
+                
+                # Para erros não-429, podemos tentar novamente
+                delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                await asyncio.sleep(delay)
+                continue # Tenta novamente
                 
             except Exception as e:
-                logger.error(f"Erro inesperado ao enviar mensagem para {destination}: {e}")
+                logger.error(f"Erro inesperado ao enviar mensagem para {destination} (tentativa {attempt + 1}/{max_retries}): {e}")
                 if attempt == max_retries - 1:
-                    raise
+                    raise # Desiste após max_retries
+                
+                delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                await asyncio.sleep(delay)
+                continue
+        
+        # Se saiu do loop (falhou 3x com erros que não são 429)
+        logger.error(f"Falha ao enviar mensagem para {destination} após {max_retries} tentativas.")
+        # Levanta um erro que será pego pelo process_queues e descartará a mensagem
+        raise ConnectionError(f"Falha ao enviar mensagem para {destination} após {max_retries} tentativas.")
+    # --- FIM DA CORREÇÃO 1 ---
 
     async def on_error(self, event, *args, **kwargs):
         """Tratamento de erros genéricos."""
@@ -665,7 +678,13 @@ class InactivityBot(commands.Bot):
                 logger.error(f"Erro no health check: {e}")
                 await asyncio.sleep(60)
 
-    # CORREÇÃO: O método process_queues antigo foi substituído pela versão injetada, que é mais inteligente.
+    # --- INÍCIO DA CORREÇÃO 2 ---
+    # A função process_queues foi reescrita para:
+    # 1. Capturar o erro 429 (rate limit) que agora é levantado pela send_with_fallback.
+    # 2. Ao capturar um 429, ela define o cooldown global (como já fazia).
+    # 3. CRUCIAL: Ela agora coloca a mensagem com falha DE VOLTA na fila (await self.message_queue.put).
+    # 4. Ela então marca o 'get' original como concluído (self.message_queue.task_done) para a fila interna.
+    # 5. Ela descarta mensagens que falham por outros motivos (ex: 404, 403) após as tentativas da send_with_fallback.
     async def process_queues(self):
         """Processa as filas de mensagens e eventos com controle de rate limit inteligente."""
         await self.wait_until_ready()
@@ -717,36 +736,51 @@ class InactivityBot(commands.Bot):
                                 logger.warning(f"Formato inesperado de item da fila: {item}")
                         
                         if isinstance(destination, (discord.TextChannel, discord.User, discord.Member)):
+                            # Esta função agora vai RE-LANÇAR 429
                             await self.send_with_fallback(destination, content, embed, file)
                         else:
                             logger.warning(f"Destino inválido para mensagem: {type(destination)}")
                     else:
                         logger.warning(f"Item da fila em formato desconhecido: {item}")
+                    
+                    # Se chegou aqui, a mensagem foi enviada com sucesso
+                    self.message_queue.task_done(priority)
 
                 except discord.HTTPException as e:
                     status = getattr(e, 'status', None)
                     if status == 429:
-                        retry_after = getattr(e, 'retry_after', None)
-                        logger.warning(f"Atingido rate limit (429). Headers: {getattr(e, 'response', None)}")
-                        if retry_after:
-                            self.rate_limit_monitor.cooldown_until = time.time() + retry_after
-                            self.rate_limit_monitor.adaptive_delay = min(self.rate_limit_monitor.max_delay, self.rate_limit_monitor.adaptive_delay * 2)
+                        retry_after = getattr(e, 'retry_after', 5.0) # Default 5s
+                        logger.warning(f"Atingido rate limit (429). Headers: {getattr(e, 'response', None)}. Tentando novamente em {retry_after}s.")
+                        
+                        # Define o cooldown global
+                        self.rate_limit_monitor.cooldown_until = time.time() + retry_after
+                        self.rate_limit_monitor.adaptive_delay = min(self.rate_limit_monitor.max_delay, self.rate_limit_monitor.adaptive_delay * 2)
+                        
+                        # Devolve o item à fila
+                        await self.message_queue.put(item, priority)
+                        self.message_queue.task_done(priority) # Marca o 'get' original como 'done'
+                        logger.info("Item de mensagem devolvido à fila devido ao rate limit.")
+                        
                     elif "Cloudflare" in str(e) or "1015" in str(getattr(e, 'text', '')):
                         self.rate_limit_monitor.handle_cloudflare_block()
-                except Exception as e:
-                    logger.error(f"Erro ao processar item da fila: {e}", exc_info=True)
-                finally:    
-                    try:
+                        # Devolve o item à fila
+                        await self.message_queue.put(item, priority)
                         self.message_queue.task_done(priority)
-                    except Exception:
-                        try:
-                            self.message_queue.task_done()
-                        except Exception:
-                            pass
+                        logger.info("Item de mensagem devolvido à fila due ao bloqueio do Cloudflare.")
+                    else:
+                        # Outro erro HTTP (ex: 403, 404). A mensagem falhou permanentemente.
+                        logger.error(f"Erro HTTP {status} ao processar item da fila (descartando): {e}", exc_info=True)
+                        self.message_queue.task_done(priority) # Descarta o item
+
+                except Exception as e:
+                    # Erro geral (ex: ConnectionError do send_with_fallback)
+                    logger.error(f"Erro ao processar item da fila (descartando): {e}", exc_info=True)
+                    self.message_queue.task_done(priority) # Descarta o item
                     
             except Exception as e:
                 logger.error(f"Erro crítico no processador de filas: {e}", exc_info=True)
                 await asyncio.sleep(5)
+    # --- FIM DA CORREÇÃO 2 ---
 
     async def _process_voice_batch(self, batch):
         processed = {}
