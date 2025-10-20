@@ -1718,11 +1718,16 @@ async def _cleanup_old_bot_messages():
             # A função purge é muito eficiente para apagar múltiplas mensagens
             # Ela apaga mensagens que são ANTERIORES à data de corte (`before`)
             # e que passam na verificação (`check`), que no nosso caso é se o autor é o próprio bot.
+            
+            # --- CORREÇÃO APLICADA AQUI ---
+            # limit=None estava causando o rate limit 1015 do Cloudflare.
+            # Limitamos para 100 mensagens por execução, o que é seguro.
             deleted_messages = await channel.purge(
-                limit=None,  # Sem limite, apaga todas que corresponderem
+                limit=100,  # Alterado de None para 100
                 before=cutoff_date,
                 check=lambda m: m.author == bot.user
             )
+            # --- FIM DA CORREÇÃO ---
             
             if deleted_messages:
                 count = len(deleted_messages)
@@ -1752,6 +1757,13 @@ async def cleanup_old_bot_messages():
     @loop.before_loop
     async def before_cleanup_loop():
         await bot.wait_until_ready()
+        
+        # --- CORREÇÃO APLICADA AQUI ---
+        # Adiciona uma espera de 5 minutos (300 segundos) antes da PRIMEIRA execução.
+        # Isso impede que a tarefa rode imediatamente no startup e cause um rate limit.
+        logger.info("Task cleanup_old_bot_messages: Aguardando 5 minutos iniciais para estabilização...")
+        await asyncio.sleep(300) 
+        # --- FIM DA CORREÇÃO ---
 
     # Inicia a task
     loop.start()
