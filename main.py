@@ -749,7 +749,28 @@ class InactivityBot(commands.Bot):
                 except discord.HTTPException as e:
                     status = getattr(e, 'status', None)
                     if status == 429:
-                        retry_after = getattr(e, 'retry_after', 5.0) # Default 5s
+                        # --- INÍCIO DA CORREÇÃO ---
+                        # Tenta obter o retry_after do JSON (padrão do discord.py)
+                        retry_after = getattr(e, 'retry_after', None) 
+                        
+                        # Se falhar (ex: resposta HTML do Cloudflare), tenta pegar do HEADER
+                        if retry_after is None and hasattr(e, 'response') and e.response and hasattr(e.response, 'headers'):
+                            try:
+                                # O header 'Retry-After' é o que o Cloudflare/Discord envia
+                                retry_after_header = e.response.headers.get('Retry-After')
+                                if retry_after_header:
+                                    retry_after = float(retry_after_header)
+                                    logger.info(f"Rate limit (429) - Valor 'Retry-After' lido do HEADER: {retry_after}s")
+                                else:
+                                    retry_after = 5.0 # Fallback se o header não existir
+                            except (ValueError, TypeError):
+                                retry_after = 5.0 # Fallback se o header for inválido
+                        
+                        # Fallback final se tudo mais falhar
+                        if retry_after is None:
+                            retry_after = 5.0
+                        # --- FIM DA CORREÇÃO ---
+
                         logger.warning(f"Atingido rate limit (429). Headers: {getattr(e, 'response', None)}. Tentando novamente em {retry_after}s.")
                         
                         # Define o cooldown global
