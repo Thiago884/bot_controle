@@ -84,7 +84,10 @@ async def list_allowed_roles(
             description="Ocorreu um erro ao listar os cargos. Por favor, tente novamente.",
             color=discord.Color.red()
         )
-        await interaction.response.send_message(embed=embed)
+        if not interaction.response.is_done():
+            await interaction.response.send_message(embed=embed)
+        else:
+            await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="set_inactivity", description="Define o número de dias do período de monitoramento")
 @allowed_roles_only()
@@ -126,7 +129,10 @@ async def set_inactivity(interaction: discord.Interaction, days: int):
             description="Ocorreu um erro ao atualizar a configuração. Por favor, tente novamente.",
             color=discord.Color.red()
         )
-        await interaction.response.send_message(embed=embed)
+        if not interaction.response.is_done():
+            await interaction.response.send_message(embed=embed)
+        else:
+            await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="set_requirements", description="Define os requisitos de atividade (minutos e dias)")
 @allowed_roles_only()
@@ -172,7 +178,10 @@ async def set_requirements(interaction: discord.Interaction, minutes: int, days:
             description="Ocorreu um erro ao atualizar a configuração. Por favor, tente novamente.",
             color=discord.Color.red()
         )
-        await interaction.response.send_message(embed=embed)
+        if not interaction.response.is_done():
+            await interaction.response.send_message(embed=embed)
+        else:
+            await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="set_kick_days", description="Define após quantos dias sem cargo o membro será expulso")
 @allowed_roles_only()
@@ -214,7 +223,10 @@ async def set_kick_days(interaction: discord.Interaction, days: int):
             description="Ocorreu um erro ao definir o canal. Por favor, tente novamente.",
             color=discord.Color.red()
         )
-        await interaction.response.send_message(embed=embed)
+        if not interaction.response.is_done():
+            await interaction.response.send_message(embed=embed)
+        else:
+            await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="whitelist_manage", description="Gerencia la whitelist de usuários e cargos")
 @app_commands.describe(
@@ -292,7 +304,10 @@ async def whitelist_manage(
             description="Ocorreu um erro ao atualizar la whitelist. Por favor, tente novamente.",
             color=discord.Color.red()
         )
-        await interaction.response.send_message(embed=embed)
+        if not interaction.response.is_done():
+            await interaction.response.send_message(embed=embed)
+        else:
+            await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="manage_tracked_roles", description="Gerencia cargos monitorados por inatividade")
 @app_commands.describe(
@@ -384,7 +399,10 @@ async def manage_tracked_roles(
             description="Ocorreu um erro ao atualizar os cargos monitorados. Por favor, tente novamente.",
             color=discord.Color.red()
         )
-        await interaction.response.send_message(embed=embed)
+        if not interaction.response.is_done():
+            await interaction.response.send_message(embed=embed)
+        else:
+            await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="manage_dm_notification_roles", description="Gerencia cargos que recebem notificações por DM")
 @app_commands.describe(
@@ -455,7 +473,10 @@ async def manage_dm_notification_roles(
             description="Ocorreu um erro ao atualizar a configuração. Por favor, tente novamente.",
             color=discord.Color.red()
         )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        if not interaction.response.is_done():
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+        else:
+            await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="force_role_assignment_log", description="Força o registro de atribuição para membros sem data registrada.")
@@ -578,7 +599,10 @@ async def set_notification_channel(interaction: discord.Interaction, channel: di
             description="Ocorreu um erro ao definir o canal. Por favor, tente novamente.",
             color=discord.Color.red()
         )
-        await interaction.response.send_message(embed=embed)
+        if not interaction.response.is_done():
+            await interaction.response.send_message(embed=embed)
+        else:
+            await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="set_warning_days", description="Define os dias para os avisos de inatividade")
 @allowed_roles_only()
@@ -625,7 +649,10 @@ async def set_warning_days(interaction: discord.Interaction, first: int, second:
             description="Ocorreu um erro ao configurar os avisos. Por favor, tente novamente.",
             color=discord.Color.red()
         )
-        await interaction.response.send_message(embed=embed)
+        if not interaction.response.is_done():
+            await interaction.response.send_message(embed=embed)
+        else:
+            await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="set_warning_message", description="Define a mensagem para um tipo de aviso")
 @allowed_roles_only()
@@ -684,7 +711,10 @@ async def set_warning_message(interaction: discord.Interaction, warning_type: st
             description="Ocorreu um erro ao atualizar la mensagem. Por favor, tente novamente.",
             color=discord.Color.red()
         )
-        await interaction.response.send_message(embed=embed)
+        if not interaction.response.is_done():
+            await interaction.response.send_message(embed=embed)
+        else:
+            await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="show_warning_messages", description="Mostra as mensagens de aviso atuais")
 @allowed_roles_only()
@@ -724,7 +754,10 @@ async def show_warning_messages(interaction: discord.Interaction):
             description="Ocorreu um erro ao exibir as mensagens de aviso.",
             color=discord.Color.red()
         )
-        await interaction.response.send_message(embed=embed)
+        if not interaction.response.is_done():
+            await interaction.response.send_message(embed=embed)
+        else:
+            await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="set_absence_channel", description="Define o canal de voz de ausência")
 @allowed_roles_only()
@@ -757,7 +790,10 @@ async def set_absence_channel(interaction: discord.Interaction, channel: discord
             description="Ocorreu um erro ao definir o canal de ausência. Por favor, tente novamente.",
             color=discord.Color.red()
         )
-        await interaction.response.send_message(embed=embed)
+        if not interaction.response.is_done():
+            await interaction.response.send_message(embed=embed)
+        else:
+            await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="show_config", description="Mostra a configuração atual do bot")
 @allowed_roles_only()
@@ -867,7 +903,10 @@ async def show_config(interaction: discord.Interaction):
             description="Ocorreu um erro ao mostrar a configuração. Por favor, tente novamente.",
             color=discord.Color.red()
         )
-        await interaction.response.send_message(embed=embed)
+        if not interaction.response.is_done():
+            await interaction.response.send_message(embed=embed)
+        else:
+            await interaction.followup.send(embed=embed)
 
 
 @bot.tree.command(name="user_activity", description="Verifica as estatísticas de atividade de um usuário")
@@ -878,222 +917,219 @@ async def show_config(interaction: discord.Interaction):
 @allowed_roles_only()
 async def user_activity(interaction: discord.Interaction, member: discord.Member, days: int = 14):
     """Verifica as estatísticas completas de atividade de um usuário"""
+    # *** INÍCIO DA CORREÇÃO ***
+    # Removido o try...except Exception genérico para permitir que erros
+    # (como 429) sejam tratados pelo listener de erro global do bot
+    # ou por um tratador @user_activity.error dedicado, se existir.
+    
+    await interaction.response.defer(thinking=True)
+
+    if days < 1 or days > 30:
+        await interaction.followup.send("⚠️ O período deve ser entre 1 e 30 dias.", ephemeral=True)
+        return
+
+    if not await check_db_connection(interaction):
+        return
+
+    end_date_param = datetime.now(pytz.utc)
+    start_date_param = end_date_param - timedelta(days=days)
+
     try:
-        await interaction.response.defer(thinking=True)
+        async with bot.db.pool.acquire() as conn:
+            voice_sessions_param = await conn.fetch(
+                "SELECT * FROM voice_sessions WHERE user_id = $1 AND guild_id = $2 AND join_time < $4 AND leave_time > $3 ORDER BY join_time DESC",
+                member.id, member.guild.id, start_date_param, end_date_param
+            )
+            
+            total_time = sum(session['duration'] for session in voice_sessions_param)
+            total_minutes = total_time / 60
+            sessions_count = len(voice_sessions_param)
+            avg_session_duration = total_minutes / sessions_count if sessions_count else 0
+            most_active_days = calculate_most_active_days(voice_sessions_param, days)
 
-        if days < 1 or days > 30:
-            await interaction.followup.send("⚠️ O período deve ser entre 1 e 30 dias.", ephemeral=True)
-            return
-
-        if not await check_db_connection(interaction):
-            return
-
-        end_date_param = datetime.now(pytz.utc)
-        start_date_param = end_date_param - timedelta(days=days)
-
-        try:
-            async with bot.db.pool.acquire() as conn:
-                voice_sessions_param = await conn.fetch(
-                    "SELECT * FROM voice_sessions WHERE user_id = $1 AND guild_id = $2 AND join_time < $4 AND leave_time > $3 ORDER BY join_time DESC",
-                    member.id, member.guild.id, start_date_param, end_date_param
-                )
-                
-                total_time = sum(session['duration'] for session in voice_sessions_param)
-                total_minutes = total_time / 60
-                sessions_count = len(voice_sessions_param)
-                avg_session_duration = total_minutes / sessions_count if sessions_count else 0
-                most_active_days = calculate_most_active_days(voice_sessions_param, days)
-
-                active_days_text = "Nenhum dia com atividade"
-                if most_active_days:
-                    active_days_text = "\n".join(
-                        f"• {day_name} ({date_str}): {total} min (⌀ {avg} min/sessão)"
-                        for day_name, date_str, total, avg in most_active_days[:3]
-                    )
-
-                required_min = bot.config['required_minutes']
-                required_days = bot.config['required_days']
-                monitoring_period = bot.config['monitoring_period']
-
-                embed = discord.Embed(
-                    title=f"📊 Atividade de {member.display_name} (últimos {days} dias)",
-                    color=discord.Color.blue(),
-                    timestamp=datetime.now(pytz.utc)
-                )
-                embed.set_thumbnail(url=member.display_avatar.url)
-
-                embed.add_field(
-                    name="📈 Estatísticas Gerais",
-                    value=(
-                        f"**Sessões:** {sessions_count}\n"
-                        f"**Tempo Total:** {int(total_minutes)} min\n"
-                        f"**Duração Média:** {int(avg_session_duration)} min/sessão\n"
-                        f"**Dias Mais Ativos:**\n{active_days_text}\n"
-                        f"**Última Atividade:** {voice_sessions_param[0]['join_time'].strftime('%d/%m %H:%M') if voice_sessions_param else 'N/D'}"
-                    ),
-                    inline=True
+            active_days_text = "Nenhum dia com atividade"
+            if most_active_days:
+                active_days_text = "\n".join(
+                    f"• {day_name} ({date_str}): {total} min (⌀ {avg} min/sessão)"
+                    for day_name, date_str, total, avg in most_active_days[:3]
                 )
 
-                embed.add_field(
-                    name="📋 Requisitos do Servidor",
-                    value=(
-                        f"**Minutos necessários:** {required_min} min\n"
-                        f"**Dias necessários:** {required_days} dias\n"
-                        f"**Período de monitoramento:** {monitoring_period} dias"
-                    ),
-                    inline=True
-                )
-                
-                now = datetime.now(pytz.utc)
-                period_duration_days = bot.config.get('monitoring_period', 14)
-                period_start = None
-                anchor_date = None
+            required_min = bot.config['required_minutes']
+            required_days = bot.config['required_days']
+            monitoring_period = bot.config['monitoring_period']
 
-                # Tenta obter a data de atribuição do cargo como âncora principal
-                tracked_roles_ids = bot.config.get('tracked_roles', [])
-                member_tracked_roles = [role for role in member.roles if role.id in tracked_roles_ids]
-                
-                if member_tracked_roles:
-                    assigned_times = await asyncio.gather(*[
-                        bot.db.get_role_assigned_time(member.id, member.guild.id, role.id) for role in member_tracked_roles
-                    ])
-                    valid_times = [t for t in assigned_times if t is not None]
-                    if valid_times:
-                        # A âncora é a data de atribuição MAIS RECENTE
-                        anchor_date = max(valid_times)
-                        if anchor_date.tzinfo is None:
-                             anchor_date = anchor_date.replace(tzinfo=pytz.utc)
+            embed = discord.Embed(
+                title=f"📊 Atividade de {member.display_name} (últimos {days} dias)",
+                color=discord.Color.blue(),
+                timestamp=datetime.now(pytz.utc)
+            )
+            embed.set_thumbnail(url=member.display_avatar.url)
 
-                # Se não encontrou data de atribuição, usa a última verificação como fallback
-                if not anchor_date:
-                    last_check = await conn.fetchrow(
-                        "SELECT period_start FROM checked_periods WHERE user_id = $1 AND guild_id = $2 ORDER BY period_start DESC LIMIT 1",
-                        member.id, member.guild.id
-                    )
-                    if last_check and last_check['period_start']:
-                        anchor_date = last_check['period_start']
-                        if anchor_date.tzinfo is None:
-                            anchor_date = anchor_date.replace(tzinfo=pytz.utc)
+            embed.add_field(
+                name="📈 Estatísticas Gerais",
+                value=(
+                    f"**Sessões:** {sessions_count}\n"
+                    f"**Tempo Total:** {int(total_minutes)} min\n"
+                    f"**Duração Média:** {int(avg_session_duration)} min/sessão\n"
+                    f"**Dias Mais Ativos:**\n{active_days_text}\n"
+                    f"**Última Atividade:** {voice_sessions_param[0]['join_time'].strftime('%d/%m %H:%M') if voice_sessions_param else 'N/D'}"
+                ),
+                inline=True
+            )
 
-                if anchor_date:
-                    # Cálculo direto para encontrar o período atual
-                    time_since_anchor = now - anchor_date
-                    periods_passed = time_since_anchor.days // period_duration_days
-                    
-                    period_start = anchor_date + timedelta(days=periods_passed * period_duration_days)
-                    period_end = period_start + timedelta(days=period_duration_days)
+            embed.add_field(
+                name="📋 Requisitos do Servidor",
+                value=(
+                    f"**Minutos necessários:** {required_min} min\n"
+                    f"**Dias necessários:** {required_days} dias\n"
+                    f"**Período de monitoramento:** {monitoring_period} dias"
+                ),
+                inline=True
+            )
+            
+            now = datetime.now(pytz.utc)
+            period_duration_days = bot.config.get('monitoring_period', 14)
+            period_start = None
+            anchor_date = None
 
-                    # Obter sessões de voz para o período atual calculado
-                    valid_days_current_period = set()
-                    current_period_sessions = await conn.fetch(
-                        "SELECT join_time, duration FROM voice_sessions WHERE user_id = $1 AND guild_id = $2 AND join_time >= $3 AND join_time < $4",
-                        member.id, member.guild.id, period_start, period_end
-                    )
-                    
-                    for session in current_period_sessions:
-                        # O requisito de minutos deve ser aplicado por sessão, não por dia
-                        if session['duration'] >= (required_min * 60):
-                            valid_days_current_period.add(session['join_time'].date())
+            # Tenta obter a data de atribuição do cargo como âncora principal
+            tracked_roles_ids = bot.config.get('tracked_roles', [])
+            member_tracked_roles = [role for role in member.roles if role.id in tracked_roles_ids]
+            
+            if member_tracked_roles:
+                assigned_times = await asyncio.gather(*[
+                    bot.db.get_role_assigned_time(member.id, member.guild.id, role.id) for role in member_tracked_roles
+                ])
+                valid_times = [t for t in assigned_times if t is not None]
+                if valid_times:
+                    # A âncora é a data de atribuição MAIS RECENTE
+                    anchor_date = max(valid_times)
+                    if anchor_date.tzinfo is None:
+                         anchor_date = anchor_date.replace(tzinfo=pytz.utc)
 
-                    is_complying = len(valid_days_current_period) >= required_days
-                    status_emoji = "✅" if is_complying else "⚠️"
-                    status_text = "Cumprindo" if is_complying else "Não cumprindo"
-                    days_remaining = max(0, (period_end - now).days)
-
-                    embed.add_field(
-                        name="🔄 Status Atual",
-                        value=(
-                            f"{status_emoji} **{status_text}** os requisitos\n"
-                            f"**Período:** {period_start.strftime('%d/%m/%Y')} a {period_end.strftime('%d/%m/%Y')}\n"
-                            f"**Dias Restantes:** {days_remaining}"
-                        ),
-                        inline=True
-                    )
-
-                    progress = min(1.0, len(valid_days_current_period) / required_days) if required_days > 0 else 1.0
-                    progress_bar = "[" + "█" * int(progress * 10) + " " * (10 - int(progress * 10)) + "]"
-                    progress_text = f"{progress*100:.0f}% ({len(valid_days_current_period)}/{required_days} dias)"
-
-                    embed.add_field(
-                        name="📊 Progresso no Período",
-                        value=f"{progress_bar}\n{progress_text}",
-                        inline=False
-                    )
-                else:
-                    # Fallback caso o membro não tenha cargos rastreados ou histórico de verificação
-                     embed.add_field(
-                        name="🔄 Status Atual",
-                        value="Não foi possível determinar o período (sem cargos monitorados ou histórico).",
-                        inline=True
-                    )
-
-                all_warnings = await conn.fetch(
-                    "SELECT warning_type, warning_date FROM user_warnings WHERE user_id = $1 AND guild_id = $2 ORDER BY warning_date DESC LIMIT 3",
+            # Se não encontrou data de atribuição, usa a última verificação como fallback
+            if not anchor_date:
+                last_check = await conn.fetchrow(
+                    "SELECT period_start FROM checked_periods WHERE user_id = $1 AND guild_id = $2 ORDER BY period_start DESC LIMIT 1",
                     member.id, member.guild.id
                 )
+                if last_check and last_check['period_start']:
+                    anchor_date = last_check['period_start']
+                    if anchor_date.tzinfo is None:
+                        anchor_date = anchor_date.replace(tzinfo=pytz.utc)
 
-                if all_warnings:
-                    warnings_text = "\n".join(
-                        f"• {warn['warning_type'].capitalize()} - {warn['warning_date'].strftime('%d/%m/%Y %H:%M')} (UTC)"
-                        for warn in all_warnings
+            if anchor_date:
+                # Cálculo direto para encontrar o período atual
+                time_since_anchor = now - anchor_date
+                periods_passed = time_since_anchor.days // period_duration_days
+                
+                period_start = anchor_date + timedelta(days=periods_passed * period_duration_days)
+                period_end = period_start + timedelta(days=period_duration_days)
+
+                # Obter sessões de voz para o período atual calculado
+                valid_days_current_period = set()
+                current_period_sessions = await conn.fetch(
+                    "SELECT join_time, duration FROM voice_sessions WHERE user_id = $1 AND guild_id = $2 AND join_time >= $3 AND join_time < $4",
+                    member.id, member.guild.id, period_start, period_end
+                )
+                
+                for session in current_period_sessions:
+                    # O requisito de minutos deve ser aplicado por sessão, não por dia
+                    if session['duration'] >= (required_min * 60):
+                        valid_days_current_period.add(session['join_time'].date())
+
+                is_complying = len(valid_days_current_period) >= required_days
+                status_emoji = "✅" if is_complying else "⚠️"
+                status_text = "Cumprindo" if is_complying else "Não cumprindo"
+                days_remaining = max(0, (period_end - now).days)
+
+                embed.add_field(
+                    name="🔄 Status Atual",
+                    value=(
+                        f"{status_emoji} **{status_text}** os requisitos\n"
+                        f"**Período:** {period_start.strftime('%d/%m/%Y')} a {period_end.strftime('%d/%m/%Y')}\n"
+                        f"**Dias Restantes:** {days_remaining}"
+                    ),
+                    inline=True
+                )
+
+                progress = min(1.0, len(valid_days_current_period) / required_days) if required_days > 0 else 1.0
+                progress_bar = "[" + "█" * int(progress * 10) + " " * (10 - int(progress * 10)) + "]"
+                progress_text = f"{progress*100:.0f}% ({len(valid_days_current_period)}/{required_days} dias)"
+
+                embed.add_field(
+                    name="📊 Progresso no Período",
+                    value=f"{progress_bar}\n{progress_text}",
+                    inline=False
+                )
+            else:
+                # Fallback caso o membro não tenha cargos rastreados ou histórico de verificação
+                 embed.add_field(
+                    name="🔄 Status Atual",
+                    value="Não foi possível determinar o período (sem cargos monitorados ou histórico).",
+                    inline=True
+                )
+
+            all_warnings = await conn.fetch(
+                "SELECT warning_type, warning_date FROM user_warnings WHERE user_id = $1 AND guild_id = $2 ORDER BY warning_date DESC LIMIT 3",
+                member.id, member.guild.id
+            )
+
+            if all_warnings:
+                warnings_text = "\n".join(
+                    f"• {warn['warning_type'].capitalize()} - {warn['warning_date'].strftime('%d/%m/%Y %H:%M')} (UTC)"
+                    for warn in all_warnings
+                )
+                embed.add_field(
+                    name="⚠️ Histórico de Avisos",
+                    value=warnings_text,
+                    inline=False
+                )
+
+            tracked_roles = [role for role in member.roles if role.id in bot.config['tracked_roles']]
+            if tracked_roles:
+                embed.add_field(
+                    name="🎖️ Cargos Monitorados",
+                    value="\n".join(role.mention for role in tracked_roles),
+                    inline=True
+                )
+                assignment_info = []
+                for role in tracked_roles:
+                    assigned_at = await conn.fetchval(
+                        "SELECT assigned_at FROM role_assignments WHERE user_id = $1 AND guild_id = $2 AND role_id = $3",
+                        member.id, member.guild.id, role.id
                     )
-                    embed.add_field(
-                        name="⚠️ Histórico de Avisos",
-                        value=warnings_text,
-                        inline=False
-                    )
+                    if assigned_at:
+                        assignment_info.append(f"• {role.mention}: {assigned_at.strftime('%d/%m/%Y')}")
+                    else:
+                        assignment_info.append(f"• {role.mention}: Data desconhecida")
 
-                tracked_roles = [role for role in member.roles if role.id in bot.config['tracked_roles']]
-                if tracked_roles:
-                    embed.add_field(
-                        name="🎖️ Cargos Monitorados",
-                        value="\n".join(role.mention for role in tracked_roles),
-                        inline=True
-                    )
-                    assignment_info = []
-                    for role in tracked_roles:
-                        assigned_at = await conn.fetchval(
-                            "SELECT assigned_at FROM role_assignments WHERE user_id = $1 AND guild_id = $2 AND role_id = $3",
-                            member.id, member.guild.id, role.id
-                        )
-                        if assigned_at:
-                            assignment_info.append(f"• {role.mention}: {assigned_at.strftime('%d/%m/%Y')}")
-                        else:
-                            assignment_info.append(f"• {role.mention}: Data desconhecida")
+                embed.add_field(
+                    name="📅 Data de Atribuição",
+                    value="\n".join(assignment_info),
+                    inline=True
+                )
 
-                    embed.add_field(
-                        name="📅 Data de Atribuição",
-                        value="\n".join(assignment_info),
-                        inline=True
-                    )
+            if voice_sessions_param:
+                try:
+                    report_file = await generate_activity_report(member, voice_sessions_param, days)
+                    if report_file:
+                        await interaction.followup.send(embed=embed, file=report_file)
+                        return
+                except Exception as e:
+                    logger.error(f"Erro ao gerar gráfico: {e}")
 
-                if voice_sessions_param:
-                    try:
-                        report_file = await generate_activity_report(member, voice_sessions_param, days)
-                        if report_file:
-                            await interaction.followup.send(embed=embed, file=report_file)
-                            return
-                    except Exception as e:
-                        logger.error(f"Erro ao gerar gráfico: {e}")
+            await interaction.followup.send(embed=embed)
 
-                await interaction.followup.send(embed=embed)
-
-        except asyncpg.PostgresError as db_error:
-            logger.error(f"Erro de banco de dados: {db_error}")
-            await interaction.followup.send(
-                "❌ Erro ao acessar o banco de dados. Tente novamente mais tarde.",
-                ephemeral=True)
-            return
-
-    except Exception as e:
-        logger.error(f"Erro no comando user_activity: {e}", exc_info=True)
-        if not interaction.response.is_done():
-            await interaction.response.send_message("❌ Ocorreu um erro inesperado.", ephemeral=True)
-        else:
-            try:
-                await interaction.followup.send("❌ Ocorreu um erro inesperado.", ephemeral=True)
-            except:
-                pass
+    except asyncpg.PostgresError as db_error:
+        logger.error(f"Erro de banco de dados: {db_error}")
+        await interaction.followup.send(
+            "❌ Erro ao acessar o banco de dados. Tente novamente mais tarde.",
+            ephemeral=True)
+        return
+    # *** FIM DA CORREÇÃO ***
+    # O bloco "except Exception as e:" foi removido.
+    
 
 @bot.tree.command(name="activity_ranking", description="Mostra o ranking dos usuários mais ativos")
 @app_commands.describe(
@@ -1104,139 +1140,136 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
 @app_commands.checks.cooldown(1, 60.0, key=lambda i: (i.guild_id, i.user.id))
 async def activity_ranking(interaction: discord.Interaction, days: int = 7, limit: int = 5):
     """Mostra os usuários mais ativos no servidor"""
-    try:
-        # Validar parâmetros
-        if days < 1 or days > 30:
-            await interaction.response.send_message(
-                "⚠️ O período deve ser entre 1 e 30 dias.", ephemeral=True)
-            return
+    # *** INÍCIO DA CORREÇÃO ***
+    # Removido o try...except Exception genérico para permitir que o
+    # tratador @activity_ranking.error lide com o erro 429.
+    
+    # Validar parâmetros
+    if days < 1 or days > 30:
+        await interaction.response.send_message(
+            "⚠️ O período deve ser entre 1 e 30 dias.", ephemeral=True)
+        return
 
-        if limit < 3 or limit > 20:
-            await interaction.response.send_message(
-                "⚠️ O limite deve ser entre 3 e 20 usuários.", ephemeral=True)
-            return
+    if limit < 3 or limit > 20:
+        await interaction.response.send_message(
+            "⚠️ O limite deve ser entre 3 e 20 usuários.", ephemeral=True)
+        return
 
-        await interaction.response.defer(thinking=True)
+    await interaction.response.defer(thinking=True)
 
-        # Verificar se o banco está disponível
-        if not await check_db_connection(interaction):
-            return
+    # Verificar se o banco está disponível
+    if not await check_db_connection(interaction):
+        return
 
-        # Definir período de análise em UTC
-        end_date = datetime.now(pytz.utc)
-        start_date = end_date - timedelta(days=days)
+    # Definir período de análise em UTC
+    end_date = datetime.now(pytz.utc)
+    start_date = end_date - timedelta(days=days)
 
-        async with bot.db.pool.acquire() as conn:
-            # Consulta otimizada para buscar apenas o top N de usuários
-            top_results = await conn.fetch('''
-                SELECT
-                    user_id,
-                    SUM(duration) as total_time,
-                    COUNT(DISTINCT DATE(join_time)) as active_days,
-                    COUNT(*) as session_count,
-                    AVG(duration) as avg_duration
-                FROM voice_sessions
-                WHERE guild_id = $1
-                AND join_time >= $2
-                AND leave_time <= $3
-                GROUP BY user_id
-                ORDER BY total_time DESC
-                LIMIT $4
-            ''', interaction.guild.id, start_date, end_date, limit)
+    async with bot.db.pool.acquire() as conn:
+        # Consulta otimizada para buscar apenas o top N de usuários
+        top_results = await conn.fetch('''
+            SELECT
+                user_id,
+                SUM(duration) as total_time,
+                COUNT(DISTINCT DATE(join_time)) as active_days,
+                COUNT(*) as session_count,
+                AVG(duration) as avg_duration
+            FROM voice_sessions
+            WHERE guild_id = $1
+            AND join_time >= $2
+            AND leave_time <= $3
+            GROUP BY user_id
+            ORDER BY total_time DESC
+            LIMIT $4
+        ''', interaction.guild.id, start_date, end_date, limit)
 
-            # Consulta para obter as estatísticas gerais de todos os usuários no período
-            general_stats = await conn.fetchrow('''
-                SELECT
-                    COUNT(DISTINCT user_id) as total_users,
-                    COUNT(*) as total_sessions,
-                    SUM(duration) as total_time
-                FROM voice_sessions
-                WHERE guild_id = $1
-                AND join_time >= $2
-                AND leave_time <= $3
-            ''', interaction.guild.id, start_date, end_date)
+        # Consulta para obter as estatísticas gerais de todos os usuários no período
+        general_stats = await conn.fetchrow('''
+            SELECT
+                COUNT(DISTINCT user_id) as total_users,
+                COUNT(*) as total_sessions,
+                SUM(duration) as total_time
+            FROM voice_sessions
+            WHERE guild_id = $1
+            AND join_time >= $2
+            AND leave_time <= $3
+        ''', interaction.guild.id, start_date, end_date)
 
-        # Processar resultados
-        if not top_results:
-            embed = discord.Embed(
-                title=f"🏆 Ranking de Atividade (últimos {days} dias)",
-                description=f"ℹ️ Nenhuma sessão de voz registrada nos últimos {days} dias.",
-                color=discord.Color.blue()
-            )
-            await interaction.followup.send(embed=embed)
-            return
-
-        # --- INÍCIO DA CORREÇÃO DE RATE LIMIT ---
-        #
-        # Em vez de iterar e fazer fetch_member (chamada de API) para quem não
-        # está no cache, vamos apenas usar o cache (get_member) e, se falhar,
-        # usar a menção do ID do usuário, que não custa nenhuma chamada de API.
-
-        ranking = []
-        for idx, row in enumerate(top_results, 1):
-            user_id = row['user_id']
-            # Tenta obter o membro do cache (rápido, sem API)
-            member = interaction.guild.get_member(user_id) 
-
-            if member:
-                # Se encontrou no cache, usa o nome de exibição
-                member_name = member.display_name
-            else:
-                # Se não encontrou (provavelmente saiu do servidor), usa a menção do ID
-                # Isso evita completamente a chamada `fetch_member` e o rate limit.
-                member_name = f"<@{user_id}>"
-
-            total_hours = row['total_time'] / 3600
-            avg_session = row['avg_duration'] / 60
-
-            ranking.append(
-                f"**{idx}.** {member_name} - "
-                f"**{total_hours:.1f}h** total "
-                f"({row['active_days']} dias ativos, "
-                f"{row['session_count']} sessões, "
-                f"⌀ {avg_session:.1f} min/sessão)"
-            )
-        # --- FIM DA CORREÇÃO DE RATE LIMIT ---
-
-        # Calcular estatísticas gerais a partir da segunda consulta
-        total_users_active = general_stats['total_users'] if general_stats else 0
-        total_sessions_all = general_stats['total_sessions'] if general_stats else 0
-        total_time_all = general_stats['total_time'] if general_stats else 0
-        avg_time_per_user = total_time_all / total_users_active if total_users_active > 0 else 0
-
-        # Criar embed
+    # Processar resultados
+    if not top_results:
         embed = discord.Embed(
             title=f"🏆 Ranking de Atividade (últimos {days} dias)",
-            description="\n".join(ranking),
-            color=discord.Color.gold(),
-            timestamp=datetime.now(pytz.utc))
-
-        # Adicionar estatísticas gerais
-        embed.add_field(
-            name="📊 Estatísticas Gerais",
-            value=(
-                f"**Total de usuários ativos:** {total_users_active}\n"
-                f"**Total de sessões:** {total_sessions_all}\n"
-                f"**Tempo total em voz:** {total_time_all/3600:.1f}h\n"
-                f"**Média por usuário:** {avg_time_per_user/3600:.1f}h"
-            ),
-            inline=False
+            description=f"ℹ️ Nenhuma sessão de voz registrada nos últimos {days} dias.",
+            color=discord.Color.blue()
         )
-
-        embed.set_footer(text=f"Top {limit} usuários mais ativos | Período: {days} dias")
-
-        # O tratador de erros `activity_ranking_error` já lida com
-        # rate limits de envio (429), então esta parte está segura.
         await interaction.followup.send(embed=embed)
+        return
 
-    except Exception as e:
-        logger.error(f"Erro ao gerar ranking de atividade: {e}")
-        try:
-            await interaction.followup.send(
-                "❌ Ocorreu um erro ao gerar o ranking. Por favor, tente novamente mais tarde.",
-                ephemeral=True)
-        except:
-            pass
+    # --- INÍCIO DA CORREÇÃO DE RATE LIMIT ---
+    #
+    # Em vez de iterar e fazer fetch_member (chamada de API) para quem não
+    # está no cache, vamos apenas usar o cache (get_member) e, se falhar,
+    # usar a menção do ID do usuário, que não custa nenhuma chamada de API.
+
+    ranking = []
+    for idx, row in enumerate(top_results, 1):
+        user_id = row['user_id']
+        # Tenta obter o membro do cache (rápido, sem API)
+        member = interaction.guild.get_member(user_id) 
+
+        if member:
+            # Se encontrou no cache, usa o nome de exibição
+            member_name = member.display_name
+        else:
+            # Se não encontrou (provavelmente saiu do servidor), usa a menção do ID
+            # Isso evita completamente a chamada `fetch_member` e o rate limit.
+            member_name = f"<@{user_id}>"
+
+        total_hours = row['total_time'] / 3600
+        avg_session = row['avg_duration'] / 60
+
+        ranking.append(
+            f"**{idx}.** {member_name} - "
+            f"**{total_hours:.1f}h** total "
+            f"({row['active_days']} dias ativos, "
+            f"{row['session_count']} sessões, "
+            f"⌀ {avg_session:.1f} min/sessão)"
+        )
+    # --- FIM DA CORREÇÃO DE RATE LIMIT ---
+
+    # Calcular estatísticas gerais a partir da segunda consulta
+    total_users_active = general_stats['total_users'] if general_stats else 0
+    total_sessions_all = general_stats['total_sessions'] if general_stats else 0
+    total_time_all = general_stats['total_time'] if general_stats else 0
+    avg_time_per_user = total_time_all / total_users_active if total_users_active > 0 else 0
+
+    # Criar embed
+    embed = discord.Embed(
+        title=f"🏆 Ranking de Atividade (últimos {days} dias)",
+        description="\n".join(ranking),
+        color=discord.Color.gold(),
+        timestamp=datetime.now(pytz.utc))
+
+    # Adicionar estatísticas gerais
+    embed.add_field(
+        name="📊 Estatísticas Gerais",
+        value=(
+            f"**Total de usuários ativos:** {total_users_active}\n"
+            f"**Total de sessões:** {total_sessions_all}\n"
+            f"**Tempo total em voz:** {total_time_all/3600:.1f}h\n"
+            f"**Média por usuário:** {avg_time_per_user/3600:.1f}h"
+        ),
+        inline=False
+    )
+
+    embed.set_footer(text=f"Top {limit} usuários mais ativos | Período: {days} dias")
+
+    # O tratador de erros `activity_ranking_error` já lida com
+    # rate limits de envio (429), então esta parte está segura.
+    await interaction.followup.send(embed=embed)
+
+    # *** FIM DA CORREÇÃO ***
+    # O bloco "except Exception as e:" foi removido.
 
 @activity_ranking.error
 async def activity_ranking_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
@@ -1280,127 +1313,127 @@ async def activity_ranking_error(interaction: discord.Interaction, error: app_co
 @commands.has_permissions(administrator=True)
 async def force_check(interaction: discord.Interaction, member: discord.Member):
     """Força uma verificação imediata de inatividade para um usuário específico"""
-    try:
-        await interaction.response.defer(thinking=True)
+    # *** INÍCIO DA CORREÇÃO ***
+    # Removido o try...except Exception genérico para permitir que o
+    # tratador @force_check.error lide com os erros.
+    
+    await interaction.response.defer(thinking=True)
 
-        # Verificar se o banco está disponível
-        if not await check_db_connection(interaction):
-            return
+    # Verificar se o banco está disponível
+    if not await check_db_connection(interaction):
+        return
 
-        # Usar UTC para todas as datas
-        now = datetime.now(pytz.utc)
-        period_end = now
-        period_start = now - timedelta(days=bot.config['monitoring_period'])
+    # Usar UTC para todas as datas
+    now = datetime.now(pytz.utc)
+    period_end = now
+    period_start = now - timedelta(days=bot.config['monitoring_period'])
 
-        from tasks import _execute_force_check
-        result = await _execute_force_check(member)
+    from tasks import _execute_force_check
+    result = await _execute_force_check(member)
 
-        # Verificar se o usuário tem cargos monitorados
-        tracked_roles = bot.config['tracked_roles']
-        member_tracked_roles = [role for role in member.roles if role.id in tracked_roles]
+    # Verificar se o usuário tem cargos monitorados
+    tracked_roles = bot.config['tracked_roles']
+    member_tracked_roles = [role for role in member.roles if role.id in tracked_roles]
 
-        embed = discord.Embed(
-            title=f"Verificação de Atividade - {member.display_name}",
-            color=discord.Color.blue()
+    embed = discord.Embed(
+        title=f"Verificação de Atividade - {member.display_name}",
+        color=discord.Color.blue()
+    )
+
+    if result['meets_requirements']:
+        embed.description = f"✅ {member.mention} está cumprindo os requisitos de atividade."
+        embed.color = discord.Color.green()
+        await interaction.followup.send(embed=embed)
+    else:
+        embed.description = (
+            f"⚠️ {member.mention} não está cumprindo os requisitos de atividade.\n"
+            f"**Dias válidos:** {result['valid_days']}/{result['required_days']}\n"
+            f"**Sessões no período:** {result['sessions_count']}"
+        )
+        embed.color = discord.Color.orange()
+
+        # Adicionar informações sobre o período
+        embed.add_field(
+            name="Período Analisado",
+            value=(
+                f"**Início:** {result['period_start'].strftime('%d/%m/%Y')}\n"
+                f"**Término:** {result['period_end'].strftime('%d/%m/%Y')}\n"
+                f"**Dias:** {bot.config['monitoring_period']}"
+            ),
+            inline=True
         )
 
-        if result['meets_requirements']:
-            embed.description = f"✅ {member.mention} está cumprindo os requisitos de atividade."
-            embed.color = discord.Color.green()
-            await interaction.followup.send(embed=embed)
+        # Adicionar informações sobre os requisitos
+        embed.add_field(
+            name="Requisitos do Servidor",
+            value=(
+                f"**Minutos necessários:** {bot.config['required_minutes']}\n"
+                f"**Dias necessários:** {bot.config['required_days']}"
+            ),
+            inline=True
+        )
+
+        # Criar view com botões se o usuário tiver cargos monitorados e não cumprir requisitos
+        if member_tracked_roles:
+            view = discord.ui.View()
+            button = discord.ui.Button(
+                style=discord.ButtonStyle.danger,
+                label="Remover Cargos Monitorados",
+                custom_id=f"remove_roles_{member.id}"
+            )
+
+            async def button_callback(interaction: discord.Interaction):
+                if not any(role.id in bot.config['allowed_roles'] for role in interaction.user.roles):
+                    await interaction.response.send_message(
+                        "❌ Você não tem permissão para executar esta ação.",
+                        ephemeral=True)
+                    return
+
+                try:
+                    start_time = time.time()
+                    await member.remove_roles(*member_tracked_roles)
+                    perf_metrics.record_api_call(time.time() - start_time)
+
+                    start_time = time.time()
+                    await bot.db.log_removed_roles(member.id, member.guild.id, [r.id for r in member_tracked_roles])
+                    perf_metrics.record_db_query(time.time() - start_time)
+
+                    removed_roles = ", ".join([f"`{role.name}`" for role in member_tracked_roles])
+                    await interaction.response.send_message(
+                        f"✅ Cargos removidos com sucesso: {removed_roles}",
+                        ephemeral=True)
+
+                    # Atualizar a mensagem original
+                    embed.color = discord.Color.red()
+                    embed.description = f"🚨 Cargos removidos de {member.mention} por inatividade."
+                    await interaction.message.edit(embed=embed, view=None)
+
+                    await bot.log_action(
+                        "Cargo Removido (Forçado)",
+                        interaction.user,
+                        f"Cargos removidos de {member.mention}: {removed_roles}"
+                    )
+
+                except Exception as e:
+                    logger.error(f"Erro ao remover cargos: {e}")
+                    await interaction.response.send_message(
+                        "❌ Ocorreu um erro ao remover os cargos.",
+                        ephemeral=True)
+
+            button.callback = button_callback
+            view.add_item(button)
+            await interaction.followup.send(embed=embed, view=view)
         else:
-            embed.description = (
-                f"⚠️ {member.mention} não está cumprindo os requisitos de atividade.\n"
-                f"**Dias válidos:** {result['valid_days']}/{result['required_days']}\n"
-                f"**Sessões no período:** {result['sessions_count']}"
-            )
-            embed.color = discord.Color.orange()
+            await interaction.followup.send(embed=embed)
 
-            # Adicionar informações sobre o período
-            embed.add_field(
-                name="Período Analisado",
-                value=(
-                    f"**Início:** {result['period_start'].strftime('%d/%m/%Y')}\n"
-                    f"**Término:** {result['period_end'].strftime('%d/%m/%Y')}\n"
-                    f"**Dias:** {bot.config['monitoring_period']}"
-                ),
-                inline=True
-            )
-
-            # Adicionar informações sobre os requisitos
-            embed.add_field(
-                name="Requisitos do Servidor",
-                value=(
-                    f"**Minutos necessários:** {bot.config['required_minutes']}\n"
-                    f"**Dias necessários:** {bot.config['required_days']}"
-                ),
-                inline=True
-            )
-
-            # Criar view com botões se o usuário tiver cargos monitorados e não cumprir requisitos
-            if member_tracked_roles:
-                view = discord.ui.View()
-                button = discord.ui.Button(
-                    style=discord.ButtonStyle.danger,
-                    label="Remover Cargos Monitorados",
-                    custom_id=f"remove_roles_{member.id}"
-                )
-
-                async def button_callback(interaction: discord.Interaction):
-                    if not any(role.id in bot.config['allowed_roles'] for role in interaction.user.roles):
-                        await interaction.response.send_message(
-                            "❌ Você não tem permissão para executar esta ação.",
-                            ephemeral=True)
-                        return
-
-                    try:
-                        start_time = time.time()
-                        await member.remove_roles(*member_tracked_roles)
-                        perf_metrics.record_api_call(time.time() - start_time)
-
-                        start_time = time.time()
-                        await bot.db.log_removed_roles(member.id, member.guild.id, [r.id for r in member_tracked_roles])
-                        perf_metrics.record_db_query(time.time() - start_time)
-
-                        removed_roles = ", ".join([f"`{role.name}`" for role in member_tracked_roles])
-                        await interaction.response.send_message(
-                            f"✅ Cargos removidos com sucesso: {removed_roles}",
-                            ephemeral=True)
-
-                        # Atualizar a mensagem original
-                        embed.color = discord.Color.red()
-                        embed.description = f"🚨 Cargos removidos de {member.mention} por inatividade."
-                        await interaction.message.edit(embed=embed, view=None)
-
-                        await bot.log_action(
-                            "Cargo Removido (Forçado)",
-                            interaction.user,
-                            f"Cargos removidos de {member.mention}: {removed_roles}"
-                        )
-
-                    except Exception as e:
-                        logger.error(f"Erro ao remover cargos: {e}")
-                        await interaction.response.send_message(
-                            "❌ Ocorreu um erro ao remover os cargos.",
-                            ephemeral=True)
-
-                button.callback = button_callback
-                view.add_item(button)
-                await interaction.followup.send(embed=embed, view=view)
-            else:
-                await interaction.followup.send(embed=embed)
-
-        await bot.log_action(
-            "Verificação Forçada",
-            interaction.user,
-            f"Verificação manual executada para {member.mention}\n"
-            f"Resultado: {'Cumpre' if result['meets_requirements'] else 'Não cumpre'} requisitos"
-        )
-    except Exception as e:
-        logger.error(f"Erro no force_check: {e}")
-        await interaction.followup.send(
-            "❌ Ocorreu um erro ao executar la verificação.",
-            ephemeral=True)
+    await bot.log_action(
+        "Verificação Forçada",
+        interaction.user,
+        f"Verificação manual executada para {member.mention}\n"
+        f"Resultado: {'Cumpre' if result['meets_requirements'] else 'Não cumpre'} requisitos"
+    )
+    # *** FIM DA CORREÇÃO ***
+    # O bloco "except Exception as e:" foi removido.
 
 @force_check.error
 async def force_check_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
@@ -1524,7 +1557,10 @@ async def set_log_channel(interaction: discord.Interaction, channel: discord.Tex
             description="Ocorreu um erro ao definir o canal de logs. Por favor, tente novamente.",
             color=discord.Color.red()
         )
-        await interaction.response.send_message(embed=embed)
+        if not interaction.response.is_done():
+            await interaction.response.send_message(embed=embed)
+        else:
+            await interaction.followup.send(embed=embed)
 
 # --- INÍCIO DO NOVO COMANDO INTELIGENTE DE DEVOLUÇÃO DE CARGOS ---
 
@@ -1583,7 +1619,13 @@ class SmartRestoreView(discord.ui.View):
                 description=f"Progresso: {processed_count}/{total_members} membros processados.",
                 color=discord.Color.blue()
             )
-            await interaction.edit_original_response(embed=progress_embed, view=None)
+            # Use followup.edit_original_response se a interação original já foi respondida
+            if interaction.response.is_done():
+                await interaction.edit_original_response(embed=progress_embed, view=None)
+            else:
+                # Se for a primeira atualização, responda à interação
+                await interaction.response.edit_message(embed=progress_embed, view=None)
+
 
             for member, roles in batch:
                 try:
@@ -1652,14 +1694,18 @@ class SmartRestoreView(discord.ui.View):
         # Desativa os botões na mensagem original
         await self.disable_buttons()
         # Confirma a interação e informa que o processo começou
+        # Esta é uma nova resposta, pois a original foi a mensagem com botões
         await interaction.response.send_message("✅ Confirmação recebida. Iniciando processo em segundo plano...", ephemeral=True)
         # Inicia o processo de restauração, que enviará seu próprio feedback
-        asyncio.create_task(self._run_restore_process(interaction))
+        # Passamos a *interação original* (self.message.interaction) ou uma forma de editar a *mensagem original*
+        # Vamos editar a mensagem original da view
+        asyncio.create_task(self._run_restore_process(self.message.channel.last_message.edit))
+
 
     @discord.ui.button(label="Cancelar", style=discord.ButtonStyle.red)
     async def cancel_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.disable_buttons()
-        await interaction.response.send_message("❌ Operação cancelada.", ephemeral=True)
+        await interaction.response.edit_message(embed=discord.Embed(title="❌ Operação Cancelada", color=discord.Color.red()), view=None)
 
 
 @bot.tree.command(name="devolver_cargos", description="Devolve cargos removidos por inatividade em um período recente.")

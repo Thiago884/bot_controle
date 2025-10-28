@@ -1736,6 +1736,15 @@ async def _cleanup_old_bot_messages():
 
         except discord.Forbidden:
             logger.error(f"Não tenho permissão para apagar mensagens no canal com ID {channel_id}.")
+        
+        # --- INÍCIO DA CORREÇÃO PARA O ERRO 10008 ---
+        except discord.NotFound as e:
+            # Isso é uma condição de corrida (race condition)
+            # A mensagem já foi apagada, mas o purge() tentou apagá-la de novo
+            # ao deletar mensagens com mais de 14 dias (uma por uma).
+            logger.warning(f"Erro 'NotFound' (10008) ao limpar canal {channel_id}. Isso é normal se mensagens são apagadas rapidamente. Erro: {e}")
+        # --- FIM DA CORREÇÃO PARA O ERRO 10008 ---
+
         except Exception as e:
             logger.error(f"Ocorreu um erro ao limpar mensagens no canal ID {channel_id}: {e}", exc_info=True)
         
