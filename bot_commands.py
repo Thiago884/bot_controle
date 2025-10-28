@@ -1166,23 +1166,25 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
             await interaction.followup.send(embed=embed)
             return
 
-        # Obter informações dos membros de forma mais eficiente
-        member_ids = [row['user_id'] for row in top_results]
-        members = {member.id: member for member in interaction.guild.members if member.id in member_ids}
+        # --- INÍCIO DA CORREÇÃO DE RATE LIMIT ---
+        #
+        # Em vez de iterar e fazer fetch_member (chamada de API) para quem não
+        # está no cache, vamos apenas usar o cache (get_member) e, se falhar,
+        # usar a menção do ID do usuário, que não custa nenhuma chamada de API.
 
-        # Construir ranking
         ranking = []
         for idx, row in enumerate(top_results, 1):
-            member = members.get(row['user_id'])
+            user_id = row['user_id']
+            # Tenta obter o membro do cache (rápido, sem API)
+            member = interaction.guild.get_member(user_id) 
+
             if member:
+                # Se encontrou no cache, usa o nome de exibição
                 member_name = member.display_name
             else:
-                # Se o membro não foi encontrado, tentar buscar do cache ou API
-                try:
-                    member = await interaction.guild.fetch_member(row['user_id'])
-                    member_name = member.display_name
-                except:
-                    member_name = f"Usuário ID: {row['user_id']}"
+                # Se não encontrou (provavelmente saiu do servidor), usa a menção do ID
+                # Isso evita completamente a chamada `fetch_member` e o rate limit.
+                member_name = f"<@{user_id}>"
 
             total_hours = row['total_time'] / 3600
             avg_session = row['avg_duration'] / 60
@@ -1194,6 +1196,7 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
                 f"{row['session_count']} sessões, "
                 f"⌀ {avg_session:.1f} min/sessão)"
             )
+        # --- FIM DA CORREÇÃO DE RATE LIMIT ---
 
         # Calcular estatísticas gerais a partir da segunda consulta
         total_users_active = general_stats['total_users'] if general_stats else 0
@@ -1222,16 +1225,9 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
 
         embed.set_footer(text=f"Top {limit} usuários mais ativos | Período: {days} dias")
 
-        try:
-            await interaction.followup.send(embed=embed)
-        except discord.errors.HTTPException as e:
-            if e.status == 429:
-                retry_after = float(e.response.headers.get('Retry-After', 60))
-                logger.warning(f"Rate limit ao enviar ranking. Tentando novamente em {retry_after} segundos")
-                await asyncio.sleep(retry_after)
-                await interaction.followup.send(embed=embed)
-            else:
-                raise
+        # O tratador de erros `activity_ranking_error` já lida com
+        # rate limits de envio (429), então esta parte está segura.
+        await interaction.followup.send(embed=embed)
 
     except Exception as e:
         logger.error(f"Erro ao gerar ranking de atividade: {e}")
