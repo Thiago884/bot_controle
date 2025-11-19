@@ -43,7 +43,6 @@ async def list_allowed_roles(
         logger.info(f"Comando list_allowed_roles acionado por {interaction.user}")
 
         if role:
-            # Mostrar informações sobre um cargo específico
             is_allowed = role.id in bot.config['allowed_roles']
             embed = discord.Embed(
                 title=f"ℹ️ Informações do Cargo {role.name}",
@@ -54,7 +53,6 @@ async def list_allowed_roles(
             await interaction.response.send_message(embed=embed)
             return
 
-        # Código original para listar todos os cargos
         if not bot.config['allowed_roles']:
             embed = discord.Embed(
                 title="ℹ️ Cargos Permitidos",
@@ -330,7 +328,6 @@ async def manage_tracked_roles(
                 bot.config['tracked_roles'].append(role.id)
                 await bot.save_config()
 
-                # Registrar atribuição do cargo para todos os membros que o possuem
                 members_with_role = [member for member in interaction.guild.members if role in member.roles]
                 for member in members_with_role:
                     try:
@@ -511,13 +508,11 @@ async def force_role_assignment_log(interaction: discord.Interaction, role: disc
             async with conn.transaction():
                 for member in members_with_role:
                     try:
-                        # Verificar se já existe uma data de atribuição
                         existing_time = await conn.fetchval(
                             "SELECT assigned_at FROM role_assignments WHERE user_id = $1 AND guild_id = $2 AND role_id = $3",
                             member.id, interaction.guild.id, role.id
                         )
 
-                        # Se não existir, registrar agora
                         if existing_time is None:
                             await conn.execute(
                                 "INSERT INTO role_assignments (user_id, guild_id, role_id, assigned_at) VALUES ($1, $2, $3, NOW())",
@@ -671,7 +666,6 @@ async def set_warning_message(interaction: discord.Interaction, warning_type: st
             await interaction.response.send_message(embed=embed)
             return
 
-        # Verificar placeholders necessários
         required_placeholders = {
             'first': ['{days}', '{required_minutes}', '{required_days}'],
             'second': ['{required_minutes}', '{required_days}'],
@@ -730,7 +724,6 @@ async def show_warning_messages(interaction: discord.Interaction):
         )
 
         for msg_type, message in messages.items():
-            # Substituir placeholders com valores atuais para visualização
             preview = message.format(
                 days=warnings_config.get('first_warning', 3),
                 monitoring_period=bot.config.get('monitoring_period', 14),
@@ -807,7 +800,6 @@ async def show_config(interaction: discord.Interaction):
 
         config = bot.config
         
-        # Helper function to get role names/mentions
         def get_role_mentions(role_ids: list) -> str:
             mentions = []
             for role_id in role_ids:
@@ -839,7 +831,6 @@ async def show_config(interaction: discord.Interaction):
             color=discord.Color.blue()
         )
 
-        # Seção de Requisitos
         embed.add_field(
             name="📊 Requisitos de Atividade",
             value=(
@@ -851,7 +842,6 @@ async def show_config(interaction: discord.Interaction):
             inline=False
         )
 
-        # Seção de Canais
         notification_channel_mention = f"<#{config['notification_channel']}>" if config.get('notification_channel') else "Não definido"
         log_channel_mention = f"<#{config['log_channel']}>" if config.get('log_channel') else "Não definido"
         absence_channel_mention = f"<#{config['absence_channel']}>" if config.get('absence_channel') else "Não definido"
@@ -866,12 +856,10 @@ async def show_config(interaction: discord.Interaction):
             inline=False
         )
 
-        # Seção de Cargos
         embed.add_field(name="Monitorados por Inatividade", value=tracked_roles_mentions, inline=True)
         embed.add_field(name="Permissão de Comandos", value=allowed_roles_mentions, inline=True)
         embed.add_field(name="Notificações por DM", value=dm_notification_roles_mentions, inline=True)
         
-        # Seção de Whitelist
         whitelist_users_text = "\n".join(whitelist_users) if whitelist_users else "Nenhum"
         whitelist_roles_text = "\n".join(whitelist_roles) if whitelist_roles else "Nenhum"
         embed.add_field(
@@ -883,7 +871,6 @@ async def show_config(interaction: discord.Interaction):
             inline=False
         )
         
-        # Seção de Avisos
         if warnings_config:
             embed.add_field(
                 name="⚠️ Configurações de Avisos",
@@ -917,11 +904,6 @@ async def show_config(interaction: discord.Interaction):
 @allowed_roles_only()
 async def user_activity(interaction: discord.Interaction, member: discord.Member, days: int = 14):
     """Verifica as estatísticas completas de atividade de um usuário"""
-    # *** INÍCIO DA CORREÇÃO ***
-    # Removido o try...except Exception genérico para permitir que erros
-    # (como 429) sejam tratados pelo listener de erro global do bot
-    # ou por um tratador @user_activity.error dedicado, se existir.
-    
     await interaction.response.defer(thinking=True)
 
     if days < 1 or days > 30:
@@ -992,7 +974,6 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
             period_start = None
             anchor_date = None
 
-            # Tenta obter a data de atribuição do cargo como âncora principal
             tracked_roles_ids = bot.config.get('tracked_roles', [])
             member_tracked_roles = [role for role in member.roles if role.id in tracked_roles_ids]
             
@@ -1002,12 +983,10 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
                 ])
                 valid_times = [t for t in assigned_times if t is not None]
                 if valid_times:
-                    # A âncora é a data de atribuição MAIS RECENTE
                     anchor_date = max(valid_times)
                     if anchor_date.tzinfo is None:
                          anchor_date = anchor_date.replace(tzinfo=pytz.utc)
 
-            # Se não encontrou data de atribuição, usa a última verificação como fallback
             if not anchor_date:
                 last_check = await conn.fetchrow(
                     "SELECT period_start FROM checked_periods WHERE user_id = $1 AND guild_id = $2 ORDER BY period_start DESC LIMIT 1",
@@ -1019,14 +998,12 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
                         anchor_date = anchor_date.replace(tzinfo=pytz.utc)
 
             if anchor_date:
-                # Cálculo direto para encontrar o período atual
                 time_since_anchor = now - anchor_date
                 periods_passed = time_since_anchor.days // period_duration_days
                 
                 period_start = anchor_date + timedelta(days=periods_passed * period_duration_days)
                 period_end = period_start + timedelta(days=period_duration_days)
 
-                # Obter sessões de voz para o período atual calculado
                 valid_days_current_period = set()
                 current_period_sessions = await conn.fetch(
                     "SELECT join_time, duration FROM voice_sessions WHERE user_id = $1 AND guild_id = $2 AND join_time >= $3 AND join_time < $4",
@@ -1034,7 +1011,6 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
                 )
                 
                 for session in current_period_sessions:
-                    # O requisito de minutos deve ser aplicado por sessão, não por dia
                     if session['duration'] >= (required_min * 60):
                         valid_days_current_period.add(session['join_time'].date())
 
@@ -1063,7 +1039,6 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
                     inline=False
                 )
             else:
-                # Fallback caso o membro não tenha cargos rastreados ou histórico de verificação
                  embed.add_field(
                     name="🔄 Status Atual",
                     value="Não foi possível determinar o período (sem cargos monitorados ou histórico).",
@@ -1127,9 +1102,6 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
             "❌ Erro ao acessar o banco de dados. Tente novamente mais tarde.",
             ephemeral=True)
         return
-    # *** FIM DA CORREÇÃO ***
-    # O bloco "except Exception as e:" foi removido.
-    
 
 @bot.tree.command(name="activity_ranking", description="Mostra o ranking dos usuários mais ativos")
 @app_commands.describe(
@@ -1140,11 +1112,6 @@ async def user_activity(interaction: discord.Interaction, member: discord.Member
 @app_commands.checks.cooldown(1, 60.0, key=lambda i: (i.guild_id, i.user.id))
 async def activity_ranking(interaction: discord.Interaction, days: int = 7, limit: int = 5):
     """Mostra os usuários mais ativos no servidor"""
-    # *** INÍCIO DA CORREÇÃO ***
-    # Removido o try...except Exception genérico para permitir que o
-    # tratador @activity_ranking.error lide com o erro 429.
-    
-    # Validar parâmetros
     if days < 1 or days > 30:
         await interaction.response.send_message(
             "⚠️ O período deve ser entre 1 e 30 dias.", ephemeral=True)
@@ -1157,16 +1124,13 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
 
     await interaction.response.defer(thinking=True)
 
-    # Verificar se o banco está disponível
     if not await check_db_connection(interaction):
         return
 
-    # Definir período de análise em UTC
     end_date = datetime.now(pytz.utc)
     start_date = end_date - timedelta(days=days)
 
     async with bot.db.pool.acquire() as conn:
-        # Consulta otimizada para buscar apenas o top N de usuários
         top_results = await conn.fetch('''
             SELECT
                 user_id,
@@ -1183,7 +1147,6 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
             LIMIT $4
         ''', interaction.guild.id, start_date, end_date, limit)
 
-        # Consulta para obter as estatísticas gerais de todos os usuários no período
         general_stats = await conn.fetchrow('''
             SELECT
                 COUNT(DISTINCT user_id) as total_users,
@@ -1195,7 +1158,6 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
             AND leave_time <= $3
         ''', interaction.guild.id, start_date, end_date)
 
-    # Processar resultados
     if not top_results:
         embed = discord.Embed(
             title=f"🏆 Ranking de Atividade (últimos {days} dias)",
@@ -1205,24 +1167,14 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
         await interaction.followup.send(embed=embed)
         return
 
-    # --- INÍCIO DA CORREÇÃO DE RATE LIMIT ---
-    #
-    # Em vez de iterar e fazer fetch_member (chamada de API) para quem não
-    # está no cache, vamos apenas usar o cache (get_member) e, se falhar,
-    # usar a menção do ID do usuário, que não custa nenhuma chamada de API.
-
     ranking = []
     for idx, row in enumerate(top_results, 1):
         user_id = row['user_id']
-        # Tenta obter o membro do cache (rápido, sem API)
         member = interaction.guild.get_member(user_id) 
 
         if member:
-            # Se encontrou no cache, usa o nome de exibição
             member_name = member.display_name
         else:
-            # Se não encontrou (provavelmente saiu do servidor), usa a menção do ID
-            # Isso evita completamente a chamada `fetch_member` e o rate limit.
             member_name = f"<@{user_id}>"
 
         total_hours = row['total_time'] / 3600
@@ -1235,22 +1187,18 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
             f"{row['session_count']} sessões, "
             f"⌀ {avg_session:.1f} min/sessão)"
         )
-    # --- FIM DA CORREÇÃO DE RATE LIMIT ---
 
-    # Calcular estatísticas gerais a partir da segunda consulta
     total_users_active = general_stats['total_users'] if general_stats else 0
     total_sessions_all = general_stats['total_sessions'] if general_stats else 0
     total_time_all = general_stats['total_time'] if general_stats else 0
     avg_time_per_user = total_time_all / total_users_active if total_users_active > 0 else 0
 
-    # Criar embed
     embed = discord.Embed(
         title=f"🏆 Ranking de Atividade (últimos {days} dias)",
         description="\n".join(ranking),
         color=discord.Color.gold(),
         timestamp=datetime.now(pytz.utc))
 
-    # Adicionar estatísticas gerais
     embed.add_field(
         name="📊 Estatísticas Gerais",
         value=(
@@ -1264,12 +1212,8 @@ async def activity_ranking(interaction: discord.Interaction, days: int = 7, limi
 
     embed.set_footer(text=f"Top {limit} usuários mais ativos | Período: {days} dias")
 
-    # O tratador de erros `activity_ranking_error` já lida com
-    # rate limits de envio (429), então esta parte está segura.
     await interaction.followup.send(embed=embed)
 
-    # *** FIM DA CORREÇÃO ***
-    # O bloco "except Exception as e:" foi removido.
 
 @activity_ranking.error
 async def activity_ranking_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
@@ -1313,17 +1257,11 @@ async def activity_ranking_error(interaction: discord.Interaction, error: app_co
 @commands.has_permissions(administrator=True)
 async def force_check(interaction: discord.Interaction, member: discord.Member):
     """Força uma verificação imediata de inatividade para um usuário específico"""
-    # *** INÍCIO DA CORREÇÃO ***
-    # Removido o try...except Exception genérico para permitir que o
-    # tratador @force_check.error lide com os erros.
-    
     await interaction.response.defer(thinking=True)
 
-    # Verificar se o banco está disponível
     if not await check_db_connection(interaction):
         return
 
-    # Usar UTC para todas as datas
     now = datetime.now(pytz.utc)
     period_end = now
     period_start = now - timedelta(days=bot.config['monitoring_period'])
@@ -1331,7 +1269,6 @@ async def force_check(interaction: discord.Interaction, member: discord.Member):
     from tasks import _execute_force_check
     result = await _execute_force_check(member)
 
-    # Verificar se o usuário tem cargos monitorados
     tracked_roles = bot.config['tracked_roles']
     member_tracked_roles = [role for role in member.roles if role.id in tracked_roles]
 
@@ -1352,7 +1289,6 @@ async def force_check(interaction: discord.Interaction, member: discord.Member):
         )
         embed.color = discord.Color.orange()
 
-        # Adicionar informações sobre o período
         embed.add_field(
             name="Período Analisado",
             value=(
@@ -1363,7 +1299,6 @@ async def force_check(interaction: discord.Interaction, member: discord.Member):
             inline=True
         )
 
-        # Adicionar informações sobre os requisitos
         embed.add_field(
             name="Requisitos do Servidor",
             value=(
@@ -1373,7 +1308,6 @@ async def force_check(interaction: discord.Interaction, member: discord.Member):
             inline=True
         )
 
-        # Criar view com botões se o usuário tiver cargos monitorados e não cumprir requisitos
         if member_tracked_roles:
             view = discord.ui.View()
             button = discord.ui.Button(
@@ -1403,7 +1337,6 @@ async def force_check(interaction: discord.Interaction, member: discord.Member):
                         f"✅ Cargos removidos com sucesso: {removed_roles}",
                         ephemeral=True)
 
-                    # Atualizar a mensagem original
                     embed.color = discord.Color.red()
                     embed.description = f"🚨 Cargos removidos de {member.mention} por inatividade."
                     await interaction.message.edit(embed=embed, view=None)
@@ -1432,8 +1365,6 @@ async def force_check(interaction: discord.Interaction, member: discord.Member):
         f"Verificação manual executada para {member.mention}\n"
         f"Resultado: {'Cumpre' if result['meets_requirements'] else 'Não cumpre'} requisitos"
     )
-    # *** FIM DA CORREÇÃO ***
-    # O bloco "except Exception as e:" foi removido.
 
 @force_check.error
 async def force_check_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
@@ -1475,25 +1406,21 @@ async def cleanup_data(interaction: discord.Interaction, days: int = 60):
 
         await interaction.response.defer(thinking=True)
 
-        # Verificar se o banco está disponível
         if not await check_db_connection(interaction):
             return
 
         async with bot.db.pool.acquire() as conn:
             async with conn.transaction():
-                # Limpar sessões de voz antigas
                 voice_result = await conn.execute(
                     "DELETE FROM voice_sessions WHERE leave_time < NOW() - $1::interval",
                     f"{days} days"
                 )
 
-                # Limpar verificações de período antigas
                 checks_result = await conn.execute(
                     "DELETE FROM checked_periods WHERE period_end < NOW() - $1::interval",
                     f"{days} days"
                 )
 
-                # Limpar avisos antigos
                 warnings_result = await conn.execute(
                     "DELETE FROM user_warnings WHERE warning_date < NOW() - $1::interval",
                     f"{days} days"
@@ -1562,15 +1489,9 @@ async def set_log_channel(interaction: discord.Interaction, channel: discord.Tex
         else:
             await interaction.followup.send(embed=embed)
 
-# --- INÍCIO DO NOVO COMANDO INTELIGENTE DE DEVOLUÇÃO DE CARGOS ---
-
 class SmartRestoreView(discord.ui.View):
-    """
-    View com botões de confirmação para a devolução de cargos.
-    Esta view inicia um processo em segundo plano que fornece feedback em tempo real.
-    """
     def __init__(self, author: discord.User, roles_to_restore: Dict[discord.Member, List[discord.Role]], periodo_horas: int):
-        super().__init__(timeout=300)  # 5 minutos para confirmar
+        super().__init__(timeout=300)
         self.author = author
         self.roles_to_restore = roles_to_restore
         self.periodo_horas = periodo_horas
@@ -1596,111 +1517,106 @@ class SmartRestoreView(discord.ui.View):
         self.stop()
 
     async def _run_restore_process(self, interaction: discord.Interaction):
-        """Função que executa a devolução em segundo plano com feedback."""
+        """Executa a devolução com controle estrito de Rate Limit."""
         total_members = len(self.roles_to_restore)
         processed_count = 0
         restored_count = 0
-        dm_sent_count = 0
         error_count = 0
-        failure_logs = []
-
-        # Processar em lotes para evitar rate limits
-        batch_size = 5
-        delay_between_batches = 2.5  # Segundos
-
+        
+        batch_size = 3 
+        
         member_items = list(self.roles_to_restore.items())
+
+        # Tenta editar a resposta original para iniciar o feedback
+        # Se a interação inicial foi a de confirmar os botões, usamos interaction.response ou followup
+        # Aqui estamos respondendo à interação do botão "Confirmar Devolução"
+        
+        # Como 'interaction' vem do clique no botão, use edit_original_response se já houve defer/reply
+        # No callback do botão fazemos response.send_message(ephemeral=True), então aqui vamos editar a mensagem original que contem a view
+        # Mas como passamos self.message.channel.last_message.edit lá em baixo, a lógica está um pouco misturada
+        # Vamos simplificar: A view recebe a interação do botão. 
+        
+        # Feedback inicial na mensagem original (onde estava a view)
+        try:
+            await self.message.edit(
+                embed=discord.Embed(
+                    title="⏳ Iniciando Devolução...",
+                    description=f"Processando {total_members} membros. Isso pode levar alguns instantes para evitar bloqueios do Discord.",
+                    color=discord.Color.blue()
+                ), view=None
+            )
+        except:
+            pass
 
         for i in range(0, total_members, batch_size):
             batch = member_items[i:i + batch_size]
             
-            # Atualizar feedback de progresso para o admin
-            progress_embed = discord.Embed(
-                title="⏳ Devolvendo Cargos...",
-                description=f"Progresso: {processed_count}/{total_members} membros processados.",
-                color=discord.Color.blue()
-            )
-            # Use followup.edit_original_response se a interação original já foi respondida
-            if interaction.response.is_done():
-                await interaction.edit_original_response(embed=progress_embed, view=None)
-            else:
-                # Se for a primeira atualização, responda à interação
-                await interaction.response.edit_message(embed=progress_embed, view=None)
-
-
             for member, roles in batch:
+                if not roles:
+                    continue
+                    
                 try:
-                    await member.add_roles(*roles, reason=f"Reversão via /devolver_cargos por {interaction.user.name}.")
+                    await member.add_roles(*roles, reason=f"Reversão via /devolver_cargos por {self.author.name}.")
                     restored_count += len(roles)
                     
-                    # Enviar uma única mensagem de perdão consolidada
                     await send_forgiveness_message(member, roles)
-                    dm_sent_count += 1
+                    
                 except discord.Forbidden:
-                    error_count += len(roles)
-                    failure_logs.append(f"🔒 {member.display_name} (Permissão/Hierarquia)")
-                except discord.HTTPException as http_err:
-                    error_count += len(roles)
-                    failure_logs.append(f"🌐 {member.display_name} (Erro HTTP: {http_err.status})")
+                    error_count += 1
+                    logger.warning(f"Permissão negada ao devolver cargos para {member.display_name}")
+                except discord.HTTPException as e:
+                    error_count += 1
+                    if e.status == 429:
+                        retry_after = float(e.response.headers.get('Retry-After', 5))
+                        logger.warning(f"Rate limit atingido na devolução. Pausando por {retry_after}s")
+                        await asyncio.sleep(retry_after + 1)
+                    else:
+                        logger.error(f"Erro HTTP ao devolver cargos para {member.display_name}: {e}")
                 except Exception as e:
-                    error_count += len(roles)
-                    failure_logs.append(f"❓ {member.display_name} (Erro: {type(e).__name__})")
+                    error_count += 1
+                    logger.error(f"Erro genérico ao devolver cargos: {e}")
                 
                 processed_count += 1
-                await asyncio.sleep(0.5) # Pequeno delay entre cada membro dentro do lote
+                await asyncio.sleep(1.5) 
 
-            # Delay maior entre os lotes
-            if i + batch_size < total_members:
-                await asyncio.sleep(delay_between_batches)
+            if i % (batch_size * 2) == 0:
+                try:
+                    progress_embed = discord.Embed(
+                        title="⏳ Processando...",
+                        description=f"Progresso: {processed_count}/{total_members} membros.\nSucessos: {restored_count} cargos devolvidos.",
+                        color=discord.Color.blue()
+                    )
+                    await self.message.edit(embed=progress_embed)
+                except:
+                    pass
+            
+            await asyncio.sleep(2)
 
-        # Criar o embed de resumo final
         summary_embed = discord.Embed(
-            title="✅ Operação Concluída: Devolução de Cargos",
-            description=f"A devolução de cargos para as últimas {self.periodo_horas} horas foi finalizada.",
-            color=discord.Color.green() if error_count == 0 else discord.Color.orange()
+            title="✅ Operação Concluída",
+            description=f"Processamento finalizado para as últimas {self.periodo_horas} horas.",
+            color=discord.Color.green()
         )
-        summary_embed.add_field(
-            name="📊 Resumo da Operação",
-            value=(
-                f"**Membros Processados:** {processed_count}\n"
-                f"**Total de Cargos Devolvidos:** {restored_count}\n"
-                f"**Mensagens de Perdão Enviadas:** {dm_sent_count}\n"
-                f"**Falhas (cargos não devolvidos):** {error_count}"
-            ),
-            inline=False
-        )
+        summary_embed.add_field(name="Membros", value=str(processed_count), inline=True)
+        summary_embed.add_field(name="Cargos Devolvidos", value=str(restored_count), inline=True)
+        summary_embed.add_field(name="Erros", value=str(error_count), inline=True)
 
-        if failure_logs:
-            summary_embed.add_field(
-                name="⚠️ Detalhes das Falhas",
-                value="\n".join(failure_logs[:15]), # Mostra até 15 falhas
-                inline=False
-            )
-
-        await interaction.edit_original_response(embed=summary_embed)
-
-        # Logar a ação completa no canal de logs do bot
-        log_details = (
-            f"Executou /devolver_cargos para as últimas {self.periodo_horas} horas.\n"
-            f"**Membros:** {total_members} | **Cargos Devolvidos:** {restored_count} | **Falhas:** {error_count}"
-        )
+        try:
+            await self.message.edit(embed=summary_embed)
+        except:
+            pass
+        
         await bot.log_action(
-            "Reversão de Remoção de Cargos",
-            interaction.user,
-            log_details
+            "Reversão em Massa Concluída",
+            self.author,
+            f"Membros: {processed_count} | Cargos: {restored_count} | Erros: {error_count}"
         )
 
     @discord.ui.button(label="Confirmar Devolução", style=discord.ButtonStyle.green)
     async def confirm_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Desativa os botões na mensagem original
         await self.disable_buttons()
-        # Confirma a interação e informa que o processo começou
-        # Esta é uma nova resposta, pois a original foi a mensagem com botões
         await interaction.response.send_message("✅ Confirmação recebida. Iniciando processo em segundo plano...", ephemeral=True)
-        # Inicia o processo de restauração, que enviará seu próprio feedback
-        # Passamos a *interação original* (self.message.interaction) ou uma forma de editar a *mensagem original*
-        # Vamos editar a mensagem original da view
-        asyncio.create_task(self._run_restore_process(self.message.channel.last_message.edit))
-
+        asyncio.create_task(self._run_restore_process(interaction))
 
     @discord.ui.button(label="Cancelar", style=discord.ButtonStyle.red)
     async def cancel_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1709,27 +1625,24 @@ class SmartRestoreView(discord.ui.View):
 
 
 @bot.tree.command(name="devolver_cargos", description="Devolve cargos removidos por inatividade em um período recente.")
-@app_commands.describe(
-    periodo_horas="Período em horas para buscar remoções (1-168, padrão: 24)."
-)
+@app_commands.describe(periodo_horas="Período em horas para buscar remoções (1-168).")
 @allowed_roles_only()
 @commands.has_permissions(administrator=True)
-@app_commands.checks.cooldown(1, 300.0, key=lambda i: (i.guild_id, i.user.id))
+@app_commands.checks.cooldown(1, 60.0, key=lambda i: (i.guild_id, i.user.id))
 async def devolver_cargos(interaction: discord.Interaction, periodo_horas: int = 24):
-    """Devolve cargos removidos pelo bot por inatividade de forma segura e inteligente."""
+    """Devolve cargos removidos de forma OTIMIZADA (sem fetch API)."""
     await interaction.response.defer(thinking=True, ephemeral=True)
 
     if not await check_db_connection(interaction):
         return
 
-    if not (1 <= periodo_horas <= 168): # 1 hora a 7 dias
+    if not (1 <= periodo_horas <= 168):
         await interaction.followup.send("⚠️ O período deve ser entre 1 e 168 horas.", ephemeral=True)
         return
 
     guild = interaction.guild
     start_date = datetime.now(pytz.utc) - timedelta(hours=periodo_horas)
 
-    # 1. Obter dados do banco
     async with bot.db.pool.acquire() as conn:
         removals = await conn.fetch(
             'SELECT user_id, role_id FROM removed_roles WHERE guild_id = $1 AND removal_date >= $2',
@@ -1737,81 +1650,58 @@ async def devolver_cargos(interaction: discord.Interaction, periodo_horas: int =
         )
 
     if not removals:
-        await interaction.followup.send(f"ℹ️ Nenhuma remoção de cargo encontrada nas últimas {periodo_horas} horas.", ephemeral=True)
+        await interaction.followup.send(f"ℹ️ Nenhuma remoção encontrada nas últimas {periodo_horas} horas.", ephemeral=True)
         return
 
-    # 2. Resolver membros e cargos, com prevenção de rate limit
     roles_to_restore = defaultdict(list)
     unique_user_ids = {r['user_id'] for r in removals}
     
+    found_count = 0
+    missing_count = 0
+
     for uid in unique_user_ids:
-        try:
-            member = guild.get_member(uid) or await guild.fetch_member(uid)
-            if member:
-                for record in removals:
-                    if record['user_id'] == uid:
-                        role = guild.get_role(record['role_id'])
-                        if role and role not in member.roles:
-                            roles_to_restore[member].append(role)
-            # Pausa estratégica para não sobrecarregar a API ao buscar múltiplos membros
-            await asyncio.sleep(0.7) 
-        except discord.NotFound:
-            logger.info(f"Membro {uid} não encontrado no servidor durante a busca para devolução de cargos.")
-        except discord.HTTPException as e:
-            logger.warning(f"Erro HTTP ao buscar membro {uid}: {e.status}")
-            await asyncio.sleep(1.5) # Pausa maior em caso de erro HTTP
+        member = guild.get_member(uid)
+        
+        if member:
+            found_count += 1
+            user_removals = [r for r in removals if r['user_id'] == uid]
+            for record in user_removals:
+                role = guild.get_role(record['role_id'])
+                if role and role not in member.roles:
+                    roles_to_restore[member].append(role)
+        else:
+            missing_count += 1
 
     if not roles_to_restore:
-        await interaction.followup.send("ℹ️ Todos os cargos removidos já foram devolvidos ou os membros/cargos não existem mais.", ephemeral=True)
+        msg = "ℹ️ Nenhum cargo pendente de devolução encontrado nos membros atuais."
+        if missing_count > 0:
+            msg += f" ({missing_count} membros não foram encontrados no servidor/cache)."
+        await interaction.followup.send(msg, ephemeral=True)
         return
 
-    # --- INÍCIO DA MODIFICAÇÃO ---
-    # 3. Formatar lista de membros para exibição no embed
-    members_to_restore_list = list(roles_to_restore.keys())
-    member_mentions = []
-    char_count = 0
-    # Limite de 1000 para dar espaço para a mensagem "... e mais X"
-    max_chars = 1000
-
-    for member in members_to_restore_list:
-        mention = f"• {member.mention}\n"
-        if char_count + len(mention) > max_chars:
-            remaining_count = len(members_to_restore_list) - len(member_mentions)
-            member_mentions.append(f"... e mais {remaining_count} membro(s).")
-            break
-        member_mentions.append(mention)
-        char_count += len(mention)
-    
-    members_text = "".join(member_mentions)
-    # --- FIM DA MODIFICAÇÃO ---
-
-    # 4. Mostrar embed de confirmação
     total_roles = sum(len(roles) for roles in roles_to_restore.values())
+    
+    preview_lines = []
+    for m, r_list in list(roles_to_restore.items())[:10]:
+        role_names = ", ".join([r.name for r in r_list])
+        preview_lines.append(f"• {m.display_name}: {role_names}")
+    
+    if len(roles_to_restore) > 10:
+        preview_lines.append(f"... e mais {len(roles_to_restore) - 10} membros.")
+
     embed = discord.Embed(
-        title="⚠️ Confirmação de Devolução de Cargos",
+        title="⚠️ Confirmar Devolução",
         description=(
-            f"Encontrei **{total_roles} cargo(s)** para devolver a **{len(roles_to_restore)} membro(s)** "
-            f"com base nas remoções das últimas **{periodo_horas} horas**.\n\n"
-            "O processo será executado em segundo plano com feedback de progresso."
+            f"Encontrados **{total_roles} cargos** para **{len(roles_to_restore)} membros**.\n"
+            f"Membros fora do cache/servidor ignorados: {missing_count}\n\n"
+            "**Prévia:**\n" + "\n".join(preview_lines)
         ),
         color=discord.Color.orange()
     )
-    
-    # --- INÍCIO DA MODIFICAÇÃO ---
-    # Adiciona o campo com a lista de membros ao embed
-    embed.add_field(
-        name="👥 Membros Afetados",
-        value=members_text if members_text else "Nenhum membro encontrado para restauração.",
-        inline=False
-    )
-    # --- FIM DA MODIFICAÇÃO ---
-
-    embed.set_footer(text="Esta ação não pode ser desfeita. A confirmação expira em 5 minutos.")
 
     view = SmartRestoreView(author=interaction.user, roles_to_restore=roles_to_restore, periodo_horas=periodo_horas)
-    
     message = await interaction.followup.send(embed=embed, view=view, ephemeral=True)
-    view.message = message if message is not None else await interaction.original_response()
+    view.message = message
 
 @devolver_cargos.error
 async def devolver_cargos_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
@@ -1826,5 +1716,3 @@ async def devolver_cargos_error(interaction: discord.Interaction, error: app_com
         await interaction.followup.send(msg, ephemeral=True)
     else:
         await interaction.response.send_message(msg, ephemeral=True)
-
-# --- FIM DO NOVO COMANDO ---
