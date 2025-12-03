@@ -178,6 +178,8 @@ class RateLimitMonitor:
 
 # Configurações iniciais
 CONFIG_FILE = 'config.json'
+
+# --- ALTERAÇÃO 1: DEFAULT_CONFIG ATUALIZADO COM MENSAGENS MELHORADAS ---
 DEFAULT_CONFIG = {
     "required_minutes": 15,
     "required_days": 2,
@@ -198,9 +200,27 @@ DEFAULT_CONFIG = {
         "first_warning": 3,
         "second_warning": 1,
         "messages": {
-            "first": "⚠️ **Aviso de Inatividade** ⚠️\nVocê está prestes a perder seus cargos por inatividade. Entre em um canal de voz por pelo menos {required_minutes} minutos em {required_days} dias diferentes nos próximos {days} dias para evitar isso.",
-            "second": "🔴 **Último Aviso** 🔴\nVocê perderá seus cargos {days_remaining} por inatividade se não cumprir os requisitos de atividade em voz ({required_minutes} minutos em {required_days} dias diferentes).",
-            "final": "❌ **Cargos Removidos** ❌\nVocê perdeu seus cargos no servidor {guild} por inatividade. Você não cumpriu os requisitos de atividade de voz ({required_minutes} minutos em {required_days} dias diferentes dentro de {monitoring_period} dias)."
+            "first": (
+                "⚠️ **Aviso de Inatividade**\n\n"
+                "Olá! Notei que sua atividade em voz está baixa recentemente.\n"
+                "Para manter seus cargos: **{roles_list}**, você precisa cumprir a meta.\n\n"
+                "⏳ **Prazo:** O ciclo atual encerra {time_relative} ({time_full}).\n"
+                "🎯 **Meta:** {required_minutes} minutos em {required_days} dias diferentes.\n"
+                "💡 *Dica: Entre em um canal de voz agora para garantir sua presença!*"
+            ),
+            "second": (
+                "🔴 **Último Aviso: Risco de Perda de Cargo**\n\n"
+                "Atenção! Você está prestes a perder os seguintes cargos por inatividade:\n"
+                "**{roles_list}**\n\n"
+                "⏰ **Tempo Restante:** {time_relative}!\n"
+                "Seus cargos serão removidos automaticamente se a meta não for atingida até lá."
+            ),
+            "final": (
+                "❌ **Cargos Removidos**\n\n"
+                "Seus cargos no servidor **{guild}** foram removidos devido à inatividade no período de monitoramento.\n"
+                "Cargos afetados: **{roles_list}**.\n\n"
+                "🔄 **Como recuperar:** Volte a ser ativo ({required_minutes}min em {required_days} dias) e o sistema devolverá seus cargos automaticamente no próximo ciclo."
+            )
         }
     }
 }
@@ -614,6 +634,30 @@ class InactivityBot(commands.Bot):
             f"**Detalhes:**\n```python\n{tb_details[:1800]}\n```"
         )
         await self.log_action("Erro Crítico de Evento", details=log_message)
+
+    # --- ALTERAÇÃO 2: MÉTODO ON_MEMBER_JOIN ADICIONADO ---
+    async def on_member_join(self, member: discord.Member):
+        """
+        Reseta o rastreamento de inatividade quando um membro entra no servidor.
+        Isso evita que membros que saíram e voltaram sejam punidos por inatividade antiga.
+        """
+        if member.bot:
+            return
+
+        try:
+            if hasattr(self, 'db') and self.db:
+                # Usa a função reset_user_tracking que já existe no seu database.py
+                await self.db.reset_user_tracking(member.id, member.guild.id)
+                logger.info(f"Rastreamento de inatividade resetado para {member.display_name} (Rejoin).")
+                
+                # Opcional: Logar no canal de logs que o usuário teve o histórico limpo
+                await self.log_action(
+                    "Reset por Reentrada", 
+                    member, 
+                    "Histórico de inatividade e avisos limpo automaticamente ao reentrar no servidor."
+                )
+        except Exception as e:
+            logger.error(f"Erro ao processar reentrada de {member}: {e}")
 
     async def check_audio_states(self):
         await self.wait_until_ready()
@@ -1288,6 +1332,7 @@ class InactivityBot(commands.Bot):
         except Exception as e:
             logger.error(f"Erro ao enviar DM para {member}: {e}")
 
+    # --- ALTERAÇÃO 3: MÉTODO SEND_WARNING ATUALIZADO ---
     async def send_warning(self, member: discord.Member, warning_type: str):
         try:
             warnings_config = self.config.get('warnings', {})
@@ -1298,91 +1343,120 @@ class InactivityBot(commands.Bot):
                 logger.warning(f"Template de mensagem de aviso para '{warning_type}' não encontrado.")
                 return
 
+            # Obter dados do período para calcular datas exatas
             last_check = None
+            period_end = None
             try:
                 if hasattr(self, 'db') and self.db:
                     last_check = await self.db.get_last_period_check(member.id, member.guild.id)
             except Exception:
                 last_check = None
             
-            format_args = {
-                'days': warnings_config.get('first_warning', 'N/A'),
-                'monitoring_period': self.config.get('monitoring_period', 'N/A'),
-                'required_minutes': self.config.get('required_minutes', 'N/A'),
-                'required_days': self.config.get('required_days', 'N/A'),
-                'guild': member.guild.name,
-                'days_remaining': 'N/A'
-            }
-            
+            # Calcular variáveis de tempo
+            now = datetime.now(pytz.UTC)
+            time_relative = "em breve"
+            time_full = "data desconhecida"
+            days_remaining_str = "N/A"
+
             if last_check:
-                period_end = None
                 if isinstance(last_check, dict):
                     period_end = last_check.get('period_end')
                 else:
                     period_end = getattr(last_check, 'period_end', None)
                 
                 if period_end:
-                    now = datetime.now(pytz.UTC)
-                    
                     if getattr(period_end, 'tzinfo', None) is None:
-                        try:
-                            period_end = period_end.replace(tzinfo=pytz.UTC)
-                        except Exception:
-                            pass
+                        period_end = period_end.replace(tzinfo=pytz.UTC)
+                    
+                    # Gerar timestamps do Discord
+                    # <t:TIMESTAMP:R> gera "em 2 dias", "em 5 horas", etc.
+                    # <t:TIMESTAMP:F> gera "Quarta-feira, 2 de Outubro de 2024 às 14:00"
+                    timestamp = int(period_end.timestamp())
+                    time_relative = f"<t:{timestamp}:R>"
+                    time_full = f"<t:{timestamp}:F>"
                     
                     try:
-                        days_remaining = max(0, (period_end - now).days)
+                        days_rem_val = max(0, (period_end - now).days)
+                        days_remaining_str = f"{days_rem_val} dias"
                     except Exception:
-                        days_remaining = 0
-                    
-                    if days_remaining == 0:
-                        format_args['days_remaining'] = "HOJE"
-                    elif days_remaining == 1:
-                        format_args['days_remaining'] = "AMANHÃ"
-                    else:
-                        format_args['days_remaining'] = f"{days_remaining} dias"
+                        days_remaining_str = "N/A"
+
+            # Listar cargos monitorados que o usuário possui
+            tracked_role_ids = self.config.get('tracked_roles', [])
+            user_tracked_roles = [role.name for role in member.roles if role.id in tracked_role_ids]
             
-            message = message_template.format(**format_args)
+            if not user_tracked_roles:
+                roles_list = "seus cargos monitorados"
+            else:
+                roles_list = ", ".join(user_tracked_roles)
+
+            # Preparar argumentos de formatação
+            format_args = {
+                'days': warnings_config.get('first_warning', 'N/A'),
+                'monitoring_period': self.config.get('monitoring_period', 'N/A'),
+                'required_minutes': self.config.get('required_minutes', 'N/A'),
+                'required_days': self.config.get('required_days', 'N/A'),
+                'guild': member.guild.name,
+                'days_remaining': days_remaining_str,
+                # Novos argumentos adicionados
+                'time_relative': time_relative,
+                'time_full': time_full,
+                'roles_list': roles_list
+            }
             
+            # Tenta formatar a mensagem
+            try:
+                message = message_template.format(**format_args)
+            except KeyError as e:
+                # Fallback se o template exigir uma chave que falhou
+                logger.warning(f"Erro de formatação na mensagem de aviso (chave faltando): {e}")
+                message = message_template # Envia sem formatar em caso de erro crítico
+            
+            # Configuração Visual do Embed
             if warning_type == 'first':
-                title = "⚠️ Primeiro Aviso de Inatividade"
+                title = "⚠️ Aviso de Inatividade"
                 color = discord.Color.gold()
             elif warning_type == 'second':
-                title = "🔴 Último Aviso de Inatividade"
-                color = discord.Color.red()
+                title = "🔴 Último Aviso: Risco de Perda"
+                color = discord.Color.orange() # Laranja para urgência
             else:
-                title = "❌ Cargos Removidos por Inatividade"
+                title = "❌ Cargos Removidos"
                 color = discord.Color.dark_red()
             
             embed = discord.Embed(
                 title=title,
                 description=message,
                 color=color,
-                timestamp=datetime.now(pytz.UTC))
+                timestamp=now)
             
             if member.guild.icon:
                 embed.set_author(name=member.guild.name, icon_url=member.guild.icon.url)
             
+            # Enviar DM
             await self.send_dm(member, message, embed)
             
+            # Registrar no Banco
             try:
                 if hasattr(self, 'db') and self.db:
                     await self.db.log_warning(member.id, member.guild.id, warning_type)
             except Exception as e:
                 logger.error(f"Erro ao registrar aviso no DB para {member}: {e}")
             
+            # Log Interno
             await self.log_action(f"Aviso Enviado ({warning_type})", member)
             
+            # Notificar Admins se necessário
             if warning_type in ['first', 'second']:
                 admin_embed = discord.Embed(
                     title=f"🔔 Relatório de Aviso: {warning_type.capitalize()}",
                     description=f"Um aviso de inatividade foi enviado para {member.mention}.",
                     color=discord.Color.blue(),
-                    timestamp=datetime.now(pytz.UTC)
+                    timestamp=now
                 )
                 admin_embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
                 admin_embed.add_field(name="Usuário", value=f"{member.mention} (`{member.id}`)", inline=False)
-                admin_embed.add_field(name="Tipo de Aviso", value=warning_type.capitalize(), inline=True)
+                admin_embed.add_field(name="Cargos em Risco", value=roles_list, inline=False)
+                admin_embed.add_field(name="Prazo", value=time_full, inline=False)
                 admin_embed.set_footer(text=f"Servidor: {member.guild.name}")
                 
                 await self.notify_admins_dm(member.guild, embed=admin_embed)
