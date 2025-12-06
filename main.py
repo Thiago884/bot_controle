@@ -179,7 +179,6 @@ class RateLimitMonitor:
 # Configurações iniciais
 CONFIG_FILE = 'config.json'
 
-# --- ALTERAÇÃO 1: DEFAULT_CONFIG ATUALIZADO COM MENSAGENS MELHORADAS ---
 DEFAULT_CONFIG = {
     "required_minutes": 15,
     "required_days": 2,
@@ -372,7 +371,6 @@ class InactivityBot(commands.Bot):
         
     async def clear_queues(self):
         """Limpa todas as filas de eventos de forma segura"""
-        # Esvazia a fila de voz
         while not self.voice_event_queue.empty():
             try:
                 self.voice_event_queue.get_nowait()
@@ -380,7 +378,6 @@ class InactivityBot(commands.Bot):
             except (asyncio.QueueEmpty, ValueError):
                 pass
         
-        # Reinicia a fila de mensagens (SmartPriorityQueue é complexa para limpar item a item)
         self.message_queue = SmartPriorityQueue()
         
         self.event_counter = 0
@@ -635,22 +632,15 @@ class InactivityBot(commands.Bot):
         )
         await self.log_action("Erro Crítico de Evento", details=log_message)
 
-    # --- ALTERAÇÃO 2: MÉTODO ON_MEMBER_JOIN ADICIONADO ---
     async def on_member_join(self, member: discord.Member):
-        """
-        Reseta o rastreamento de inatividade quando um membro entra no servidor.
-        Isso evita que membros que saíram e voltaram sejam punidos por inatividade antiga.
-        """
         if member.bot:
             return
 
         try:
             if hasattr(self, 'db') and self.db:
-                # Usa a função reset_user_tracking que já existe no seu database.py
                 await self.db.reset_user_tracking(member.id, member.guild.id)
                 logger.info(f"Rastreamento de inatividade resetado para {member.display_name} (Rejoin).")
                 
-                # Opcional: Logar no canal de logs que o usuário teve o histórico limpo
                 await self.log_action(
                     "Reset por Reentrada", 
                     member, 
@@ -765,7 +755,6 @@ class InactivityBot(commands.Bot):
         await self.wait_until_ready()
         while True:
             try:
-                # Verificar rate limits antes de processar
                 if self.rate_limit_monitor.should_delay():
                     delay = self.rate_limit_monitor.adaptive_delay
                     logger.debug(f"Delay ativado por rate limit. Esperando {delay:.2f} segundos")
@@ -783,7 +772,6 @@ class InactivityBot(commands.Bot):
                         try:
                             self.voice_event_queue.task_done()
                         except ValueError:
-                            # Ignora erro se a fila foi limpa durante reconexão
                             pass
                 
                 item, priority = await self.message_queue.get_next_message()
@@ -816,7 +804,6 @@ class InactivityBot(commands.Bot):
                     if "Cloudflare" in str(e) or "1015" in str(e):
                         self.rate_limit_monitor.handle_cloudflare_block()
                 
-                # Tratamento de erro seguro para task_done
                 try:
                     self.message_queue.task_done(priority)
                 except ValueError:
@@ -1332,8 +1319,11 @@ class InactivityBot(commands.Bot):
         except Exception as e:
             logger.error(f"Erro ao enviar DM para {member}: {e}")
 
-    # --- ALTERAÇÃO 3: MÉTODO SEND_WARNING ATUALIZADO ---
-    async def send_warning(self, member: discord.Member, warning_type: str):
+    async def send_warning(self, member: discord.Member, warning_type: str, target_date: datetime = None):
+        """
+        Envia um aviso para o membro.
+        :param target_date: A data final do ciclo atual (futuro). Se None, tentamos calcular.
+        """
         try:
             warnings_config = self.config.get('warnings', {})
             messages = warnings_config.get('messages', {})
@@ -1343,43 +1333,50 @@ class InactivityBot(commands.Bot):
                 logger.warning(f"Template de mensagem de aviso para '{warning_type}' não encontrado.")
                 return
 
-            # Obter dados do período para calcular datas exatas
-            last_check = None
-            period_end = None
-            try:
-                if hasattr(self, 'db') and self.db:
-                    last_check = await self.db.get_last_period_check(member.id, member.guild.id)
-            except Exception:
-                last_check = None
-            
             # Calcular variáveis de tempo
             now = datetime.now(pytz.UTC)
             time_relative = "em breve"
             time_full = "data desconhecida"
             days_remaining_str = "N/A"
+            period_end = None
 
-            if last_check:
-                if isinstance(last_check, dict):
-                    period_end = last_check.get('period_end')
-                else:
-                    period_end = getattr(last_check, 'period_end', None)
+            # 1. Se recebermos a data alvo diretamente, usamos ela (Ideal)
+            if target_date:
+                period_end = target_date
+            
+            # 2. Fallback: Se não recebermos, tentamos buscar no banco (Pode pegar o ciclo anterior)
+            elif hasattr(self, 'db') and self.db:
+                try:
+                    last_check = await self.db.get_last_period_check(member.id, member.guild.id)
+                    if last_check:
+                        if isinstance(last_check, dict):
+                            period_end = last_check.get('period_end')
+                        else:
+                            period_end = getattr(last_check, 'period_end', None)
+                        
+                        # Se pegarmos do banco e já estiver no passado, precisamos projetar o PRÓXIMO fim
+                        if period_end and period_end < now:
+                            monitoring_days = self.config.get('monitoring_period', 14)
+                            # Adiciona dias até ficar no futuro (estimativa simples para fallback)
+                            while period_end < now:
+                                period_end += timedelta(days=monitoring_days)
+                except Exception as e:
+                    logger.error(f"Erro ao buscar last_check no fallback: {e}")
+
+            if period_end:
+                if getattr(period_end, 'tzinfo', None) is None:
+                    period_end = period_end.replace(tzinfo=pytz.UTC)
                 
-                if period_end:
-                    if getattr(period_end, 'tzinfo', None) is None:
-                        period_end = period_end.replace(tzinfo=pytz.UTC)
-                    
-                    # Gerar timestamps do Discord
-                    # <t:TIMESTAMP:R> gera "em 2 dias", "em 5 horas", etc.
-                    # <t:TIMESTAMP:F> gera "Quarta-feira, 2 de Outubro de 2024 às 14:00"
-                    timestamp = int(period_end.timestamp())
-                    time_relative = f"<t:{timestamp}:R>"
-                    time_full = f"<t:{timestamp}:F>"
-                    
-                    try:
-                        days_rem_val = max(0, (period_end - now).days)
-                        days_remaining_str = f"{days_rem_val} dias"
-                    except Exception:
-                        days_remaining_str = "N/A"
+                # Gerar timestamps do Discord
+                timestamp = int(period_end.timestamp())
+                time_relative = f"<t:{timestamp}:R>"
+                time_full = f"<t:{timestamp}:F>"
+                
+                try:
+                    days_rem_val = max(0, (period_end - now).days)
+                    days_remaining_str = f"{days_rem_val} dias"
+                except Exception:
+                    days_remaining_str = "N/A"
 
             # Listar cargos monitorados que o usuário possui
             tracked_role_ids = self.config.get('tracked_roles', [])
@@ -1398,7 +1395,6 @@ class InactivityBot(commands.Bot):
                 'required_days': self.config.get('required_days', 'N/A'),
                 'guild': member.guild.name,
                 'days_remaining': days_remaining_str,
-                # Novos argumentos adicionados
                 'time_relative': time_relative,
                 'time_full': time_full,
                 'roles_list': roles_list
@@ -1410,7 +1406,7 @@ class InactivityBot(commands.Bot):
             except KeyError as e:
                 # Fallback se o template exigir uma chave que falhou
                 logger.warning(f"Erro de formatação na mensagem de aviso (chave faltando): {e}")
-                message = message_template # Envia sem formatar em caso de erro crítico
+                message = message_template 
             
             # Configuração Visual do Embed
             if warning_type == 'first':
@@ -1418,7 +1414,7 @@ class InactivityBot(commands.Bot):
                 color = discord.Color.gold()
             elif warning_type == 'second':
                 title = "🔴 Último Aviso: Risco de Perda"
-                color = discord.Color.orange() # Laranja para urgência
+                color = discord.Color.orange()
             else:
                 title = "❌ Cargos Removidos"
                 color = discord.Color.dark_red()
@@ -1741,7 +1737,7 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
     except Exception as e:
         logger.error(f"Erro ao enfileirar evento de voz: {e}")
 
-# --- CÓDIGO DO SERVIDOR WEB PARA UPTIMEROBOT ---
+# --- SERVIDOR WEB ---
 app = Flask(__name__)
 
 @app.route('/')
@@ -1756,7 +1752,7 @@ def start_web_server():
     t = Thread(target=run)
     t.daemon = True
     t.start()
-# --- FIM DO CÓDIGO DO SERVIDOR WEB ---
+# --- FIM DO SERVIDOR WEB ---
 
 # Importar comandos
 from bot_commands import *

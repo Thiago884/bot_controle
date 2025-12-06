@@ -319,7 +319,10 @@ class BatchProcessor:
 
             # 4. Checar o período ATUAL para enviar avisos
             final_period_start = current_period_start
+            
+            # --- CORREÇÃO: Esta é a data exata do fim do ciclo atual ---
             final_period_end = final_period_start + period_duration
+            
             days_remaining = (final_period_end - now).days
 
             warnings_config = self.bot.config.get('warnings', {})
@@ -359,13 +362,18 @@ class BatchProcessor:
                     ) or []
 
                     if days_remaining <= first_warning_days and 'first' not in warnings_in_period:
-                        await self.bot.send_warning(member, 'first')
+                        # --- CORREÇÃO: Passando final_period_end como target_date ---
+                        await self.bot.send_warning(member, 'first', target_date=final_period_end)
+                        
                         result['warnings']['first'] += 1
-                        logger.info(f"Primeiro aviso enviado para {member.display_name}. Days remaining: {days_remaining}")
+                        logger.info(f"Primeiro aviso enviado para {member.display_name}. Prazo: {final_period_end}")
+                    
                     elif days_remaining <= second_warning_days and 'second' not in warnings_in_period:
-                        await self.bot.send_warning(member, 'second')
+                        # --- CORREÇÃO: Passando final_period_end como target_date ---
+                        await self.bot.send_warning(member, 'second', target_date=final_period_end)
+                        
                         result['warnings']['second'] += 1
-                        logger.info(f"Segundo aviso enviado para {member.display_name}. Days remaining: {days_remaining}")
+                        logger.info(f"Segundo aviso enviado para {member.display_name}. Prazo: {final_period_end}")
             
             except Exception as e:
                 logger.error(f"Erro ao avaliar/decidir avisos para {member.display_name}: {e}", exc_info=True)
@@ -1740,7 +1748,7 @@ async def _cleanup_old_bot_messages():
         # --- INÍCIO DA CORREÇÃO PARA O ERRO 10008 ---
         except discord.NotFound as e:
             # Isso é uma condição de corrida (race condition)
-            # A mensagem já foi apagada, mas o purge() tentou apagá-la de novo
+            # A mensagem já foi apagada, mais o purge() tentou apagá-la de novo
             # ao deletar mensagens com mais de 14 dias (uma por uma).
             logger.warning(f"Erro 'NotFound' (10008) ao limpar canal {channel_id}. Isso é normal se mensagens são apagadas rapidamente. Erro: {e}")
         # --- FIM DA CORREÇÃO PARA O ERRO 10008 ---
