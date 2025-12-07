@@ -204,6 +204,26 @@ class Database:
         self._is_closing = False
         self._restart_lock = asyncio.Lock()
 
+    async def check_if_user_exists(self, user_id: int, guild_id: int) -> bool:
+        """Verifica se o usuário tem algum registro prévio no banco de dados."""
+        conn = None
+        try:
+            conn = await self.acquire_connection()
+            # Verifica na tabela de atividade ou de cargos removidos
+            result = await conn.fetchrow('''
+                SELECT 1 FROM user_activity WHERE user_id = $1 AND guild_id = $2
+                UNION
+                SELECT 1 FROM removed_roles WHERE user_id = $1 AND guild_id = $2
+                LIMIT 1
+            ''', user_id, guild_id)
+            return bool(result)
+        except Exception as e:
+            logger.error(f"Erro ao verificar existência do usuário: {e}")
+            return False
+        finally:
+            if conn:
+                await self.pool.release(conn)
+
     async def initialize(self):
         """Inicializa a conexão com o banco de dados"""
         if self._is_initialized:

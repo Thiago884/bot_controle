@@ -638,16 +638,23 @@ class InactivityBot(commands.Bot):
 
         try:
             if hasattr(self, 'db') and self.db:
-                await self.db.reset_user_tracking(member.id, member.guild.id)
-                logger.info(f"Rastreamento de inatividade resetado para {member.display_name} (Rejoin).")
+                # VERIFICAÇÃO DE HISTÓRICO ANTES DO RESET
+                user_exists = await self.db.check_if_user_exists(member.id, member.guild.id)
                 
-                await self.log_action(
-                    "Reset por Reentrada", 
-                    member, 
-                    "Histórico de inatividade e avisos limpo automaticamente ao reentrar no servidor."
-                )
+                if user_exists:
+                    await self.db.reset_user_tracking(member.id, member.guild.id)
+                    logger.info(f"Rastreamento resetado para {member.display_name} (Usuário retornando ao servidor).")
+                    
+                    await self.log_action(
+                        "Reset por Retorno", 
+                        member, 
+                        "Usuário identificado como antigo membro. Histórico de inatividade limpo."
+                    )
+                else:
+                    logger.info(f"Novo usuário {member.display_name} entrou. Nenhum reset necessário.")
+                    
         except Exception as e:
-            logger.error(f"Erro ao processar reentrada de {member}: {e}")
+            logger.error(f"Erro ao processar entrada de {member}: {e}")
 
     async def check_audio_states(self):
         await self.wait_until_ready()
@@ -964,6 +971,24 @@ class InactivityBot(commands.Bot):
     async def _handle_voice_move(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState, absence_channel_id: int):
         audio_key = (member.id, member.guild.id)
         
+        # --- LÓGICA PARA DETECTAR QUEM MOVEU ---
+        mover_text = "Desconhecido/Próprio usuário"
+        try:
+            # Verifica se o bot tem permissão para ver logs de auditoria
+            if member.guild.me.guild_permissions.view_audit_log:
+                # Busca o log mais recente de "Member Move" nos últimos 5 segundos
+                async for entry in member.guild.audit_logs(limit=1, action=discord.AuditLogAction.member_move):
+                    # Verifica se o alvo do movimento é o membro em questão
+                    if entry.target.id == member.id:
+                        # Verifica se o log é recente (dentro de 5 segundos)
+                        time_diff = datetime.now(pytz.utc) - entry.created_at.replace(tzinfo=pytz.utc)
+                        if time_diff.total_seconds() < 5:
+                            mover_text = f"Movido por: {entry.user.mention}"
+                        break
+        except Exception as e:
+            logger.warning(f"Não foi possível buscar audit logs para movimento: {e}")
+        # ---------------------------------------
+
         if (before.channel is not None and 
             before.channel.id != absence_channel_id and 
             after.channel is not None and 
@@ -987,6 +1012,8 @@ class InactivityBot(commands.Bot):
                 embed.add_field(name="Usuário", value=member.mention, inline=True)
                 embed.add_field(name="De", value=before.channel.name, inline=True)
                 embed.add_field(name="Para", value=after.channel.name, inline=True)
+                embed.add_field(name="Ação", value=mover_text, inline=False)
+                
                 embed.add_field(name="Tempo Ativo", 
                               value=f"{int(current_duration//60)} minutos {int(current_duration%60)} segundos", 
                               inline=False)
@@ -1053,6 +1080,7 @@ class InactivityBot(commands.Bot):
                 embed.add_field(name="Usuário", value=member.mention, inline=True)
                 embed.add_field(name="De", value=before.channel.name, inline=True)
                 embed.add_field(name="Para", value=after.channel.name, inline=True)
+                embed.add_field(name="Ação", value=mover_text, inline=False)
                 embed.add_field(name="Tempo Pausado", 
                               value=f"{int(pause_duration//60)} minutos {int(pause_duration%60)} segundos", 
                               inline=False)
@@ -1074,6 +1102,7 @@ class InactivityBot(commands.Bot):
                 embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
                 embed.add_field(name="De", value=before.channel.name, inline=True)
                 embed.add_field(name="Para", value=after.channel.name, inline=True)
+                embed.add_field(name="Ação", value=mover_text, inline=False)
                 embed.set_footer(text=f"ID: {member.id}")
                 await self.log_action(None, None, embed=embed)
         
