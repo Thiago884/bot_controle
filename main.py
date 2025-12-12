@@ -984,7 +984,7 @@ class InactivityBot(commands.Bot):
                 found_entry = False
                 async for entry in member.guild.audit_logs(limit=5, action=discord.AuditLogAction.member_move):
                     # Verifica se o alvo é o membro e se aconteceu nos últimos 15 segundos
-                    if entry.target.id == member.id:
+                    if entry.target and entry.target.id == member.id:
                         entry_time = entry.created_at.replace(tzinfo=pytz.utc)
                         time_diff = datetime.now(pytz.utc) - entry_time
                         
