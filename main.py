@@ -971,22 +971,34 @@ class InactivityBot(commands.Bot):
     async def _handle_voice_move(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState, absence_channel_id: int):
         audio_key = (member.id, member.guild.id)
         
-        # --- LÓGICA PARA DETECTAR QUEM MOVEU ---
-        mover_text = "Desconhecido/Próprio usuário"
+        # --- LÓGICA CORRIGIDA PARA DETECTAR QUEM MOVEU ---
+        # Padrão: Se não acharmos log, foi o próprio usuário (Discord não gera log para self-move)
+        mover_text = "Próprio usuário" 
         try:
             # Verifica se o bot tem permissão para ver logs de auditoria
             if member.guild.me.guild_permissions.view_audit_log:
-                # Busca o log mais recente de "Member Move" nos últimos 5 segundos
-                async for entry in member.guild.audit_logs(limit=1, action=discord.AuditLogAction.member_move):
-                    # Verifica se o alvo do movimento é o membro em questão
+                # IMPORTANTE: Espera um pouco para o Discord registrar o log na API
+                await asyncio.sleep(1.5) 
+                
+                # Busca logs recentes (aumentamos o limit para garantir)
+                found_entry = False
+                async for entry in member.guild.audit_logs(limit=5, action=discord.AuditLogAction.member_move):
+                    # Verifica se o alvo é o membro e se aconteceu nos últimos 15 segundos
                     if entry.target.id == member.id:
-                        # Verifica se o log é recente (dentro de 5 segundos)
-                        time_diff = datetime.now(pytz.utc) - entry.created_at.replace(tzinfo=pytz.utc)
-                        if time_diff.total_seconds() < 5:
+                        entry_time = entry.created_at.replace(tzinfo=pytz.utc)
+                        time_diff = datetime.now(pytz.utc) - entry_time
+                        
+                        if time_diff.total_seconds() < 15:
                             mover_text = f"Movido por: {entry.user.mention}"
-                        break
+                            found_entry = True
+                            break
+                
+                if not found_entry:
+                    mover_text = "Próprio usuário"
+
         except Exception as e:
             logger.warning(f"Não foi possível buscar audit logs para movimento: {e}")
+            mover_text = "Desconhecido (Erro Log)"
         # ---------------------------------------
 
         if (before.channel is not None and 
