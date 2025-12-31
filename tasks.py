@@ -13,6 +13,7 @@ import time
 import pytz
 import json
 import os
+import asyncpg  # Necessário para tratar exceções específicas do banco
 
 logger = logging.getLogger('inactivity_bot')
 
@@ -411,20 +412,29 @@ async def execute_task_with_persistent_interval(task_name: str, monitoring_perio
     """Executa a task mantendo intervalo persistente de 24h, de forma mais robusta."""
     await bot.wait_until_ready()
     
-    # Esperar até que o banco de dados esteja inicializado
+    # Loop de espera inicial mais robusto
     while not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
-        await asyncio.sleep(5)
-        logger.info(f"Aguardando inicialização do banco de dados para a task {task_name}...")
+        await asyncio.sleep(10)
+        logger.info(f"Aguardando banco de dados para iniciar task {task_name}...")
     
     while True:
         try:
+            # Verificação de segurança da conexão antes de tentar queries
+            if not bot.db.pool or bot.db.pool.is_closing():
+                logger.warning(f"Task {task_name} pausada: aguardando recuperação do pool de conexões.")
+                await asyncio.sleep(30)
+                continue
+
             # Verificar última execução
             last_exec = None
-            if hasattr(bot.db, 'get_last_task_execution'):
-                try:
+            try:
+                if hasattr(bot.db, 'get_last_task_execution'):
                     last_exec = await bot.db.get_last_task_execution(task_name)
-                except AttributeError:
-                    logger.warning(f"Método get_last_task_execution não disponível no banco de dados")
+            except Exception as e:
+                logger.warning(f"Erro ao obter última execução para {task_name}: {e}")
+                # Se falhar ao ler o estado, espera um pouco e tenta de novo em vez de executar
+                await asyncio.sleep(60)
+                continue
             
             now = datetime.now(pytz.UTC)
             should_execute = False
@@ -448,9 +458,9 @@ async def execute_task_with_persistent_interval(task_name: str, monitoring_perio
                     should_execute = True
                     logger.info(f"Próxima execução agendada ({next_scheduled_run.strftime('%Y-%m-%d %H:%M')}) foi atingida. Executando task {task_name}")
                 else:
-                    # Log para informar por que a task não está rodando
+                    # Log reduzido para DEBUG para não poluir
                     remaining_time = next_scheduled_run - now
-                    logger.info(f"Task '{task_name}' não precisa ser executada ainda. Próxima execução em: {str(remaining_time).split('.')[0]}")
+                    logger.debug(f"Task '{task_name}' aguardando. Próxima: {next_scheduled_run}")
                 # *** FIM DA LÓGICA CORRIGIDA ***
 
             if should_execute:
@@ -475,8 +485,11 @@ async def execute_task_with_persistent_interval(task_name: str, monitoring_perio
             # Esperar 1h antes de verificar novamente (evita loops muito rápidos)
             await asyncio.sleep(3600)
                 
+        except (ConnectionError, asyncpg.PostgresError) as db_err:
+            logger.error(f"Erro de Banco de Dados na task {task_name}: {db_err}. Tentando novamente em 5 minutos.")
+            await asyncio.sleep(300) 
         except Exception as e:
-            logger.error(f"Erro na task {task_name}: {e}", exc_info=True)
+            logger.error(f"Erro genérico na task {task_name}: {e}", exc_info=True)
             await asyncio.sleep(3600)  # Esperar 1h antes de tentar novamente
 
 async def execute_task_with_retry(task_name: str, task_func: callable, max_retries: int = 3):
