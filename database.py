@@ -226,20 +226,23 @@ class Database:
                 await self.pool.release(conn)
 
     async def initialize(self):
-        """Inicializa a conexão com o banco de dados"""
+        """Inicializa a conexão com o banco de dados de forma robusta"""
         # Se já está inicializado e o pool está saudável, retorna
         if self._is_initialized and self.pool and not self.pool.is_closing():
             return True
             
-        max_retries = 5
+        max_retries = 10
         initial_delay = 5
         
         for attempt in range(max_retries):
             try:
                 db_url = os.getenv('DATABASE_URL')
-                
                 if not db_url:
                     raise ValueError("Variável de ambiente DATABASE_URL não definida")
+                
+                # Fix para SQLAlchemy/AsyncPG em versões novas que exigem postgresql://
+                if db_url.startswith("postgres://"):
+                    db_url = db_url.replace("postgres://", "postgresql://", 1)
                     
                 logger.info(f"Tentando conectar ao banco de dados (Tentativa {attempt + 1}/{max_retries})")
                 
@@ -249,34 +252,22 @@ class Database:
 
                 self.pool = await create_pool(
                     dsn=db_url,
-                    min_size=2,
-                    max_size=50,
-                    command_timeout=90,
+                    min_size=1,        # Reduzido para evitar erro se o DB tiver limite baixo
+                    max_size=20,       # Reduzido para economizar conexões e evitar sobrecarga
+                    command_timeout=60,
                     max_inactive_connection_lifetime=300,
                     ssl='require',
-                    timeout=60,
+                    timeout=30.0,      # Timeout de conexão aumentado
                     server_settings={
                         'application_name': 'inactivity_bot',
-                        'statement_timeout': '90000'
+                        'statement_timeout': '60000',
+                        'idle_in_transaction_session_timeout': '60000'
                     }
                 )
 
                 # Testar a conexão com timeout
-                conn_test = None
-                try:
-                    # Tenta adquirir e executar query simples para garantir
-                    async with self.pool.acquire() as conn_test:
-                        await asyncio.wait_for(conn_test.execute("SELECT 1"), timeout=10)
-                except asyncio.TimeoutError:
-                    logger.error("Timeout ao testar a nova conexão com o banco.")
-                    if self.pool:
-                        await self.pool.close()
-                    raise
-                except Exception as e:
-                    logger.error(f"Erro ao testar conexão: {e}")
-                    if self.pool:
-                        await self.pool.close()
-                    raise
+                async with self.pool.acquire() as conn_test:
+                    await conn_test.execute("SELECT 1")
                     
                 await self.create_tables()
                 self._is_initialized = True
@@ -292,8 +283,8 @@ class Database:
                 
                 return True
                 
-            except (OSError, asyncpg.PostgresError, asyncio.TimeoutError) as e:
-                logger.error(f"Tentativa {attempt + 1} de conexão falhou: {e}", exc_info=True)
+            except (OSError, asyncpg.PostgresError, asyncio.TimeoutError, asyncio.CancelledError) as e:
+                logger.error(f"Tentativa {attempt + 1} de conexão falhou: {e}")
                 if hasattr(self, 'pool') and self.pool:
                     try:
                         await self.pool.close()
@@ -301,62 +292,61 @@ class Database:
                         pass
                 
                 if attempt == max_retries - 1:
-                    logger.critical("Falha ao conectar ao banco de dados após várias tentativas.")
-                    raise ConnectionError("Não foi possível conectar ao banco de dados")
+                    logger.critical("Falha persistente na conexão com o DB.")
+                    return False
                 
-                sleep_time = initial_delay * (2 ** attempt)
-                logger.info(f"Tentando novamente em {sleep_time} segundos...")
+                # Backoff exponencial limitado a 60s
+                sleep_time = min(initial_delay * (1.5 ** attempt), 60)
+                logger.info(f"Aguardando {sleep_time:.1f}s antes da próxima tentativa...")
                 await asyncio.sleep(sleep_time)
+        return False
 
     async def acquire_connection(self, timeout: int = 30) -> Connection:
-        """
-        Adquire uma conexão do pool com lógica de retry robusta.
-        Se o pool estiver fechando ou nulo, tenta reiniciar automaticamente.
-        """
+        """Adquire uma conexão do pool com lógica de retry e proteção de reinicialização"""
         start_time = time.time()
         
         while (time.time() - start_time) < timeout:
-            # 1. Verificar se o bot está desligando intencionalmente
             if self._is_closing:
                 raise ConnectionError("O banco de dados está sendo fechado pelo bot.")
 
-            # 2. Verificar estado do pool
+            # Verificar estado do pool
             if not self.pool or self.pool.is_closing():
-                if not self._restart_lock.locked():
-                    logger.warning("Pool de conexões inválido detectado em acquire_connection. Tentando reiniciar...")
-                    try:
-                        # Tenta reiniciar (background task ou await dependendo da urgência)
-                        # Aqui usamos await para garantir que temos pool antes de prosseguir
-                        await self.restart_pool()
-                    except Exception as e:
-                        logger.error(f"Falha ao reiniciar pool automaticamente: {e}")
+                if self._restart_lock.locked():
+                    # Se já está reiniciando, espera pacientemente
+                    await asyncio.sleep(1)
+                    continue
+
+                logger.warning("Pool de conexões inválido detectado. Tentando recuperar...")
+                try:
+                    await self.restart_pool()
+                except Exception as e:
+                    logger.error(f"Falha ao reiniciar pool automaticamente: {e}")
                 
                 # Aguarda um pouco para o pool voltar
                 await asyncio.sleep(1)
                 continue
 
-            # 3. Tentar adquirir conexão
             try:
-                return await asyncio.wait_for(self.pool.acquire(), timeout=5.0)
+                return await asyncio.wait_for(self.pool.acquire(), timeout=10.0)
             except (asyncio.TimeoutError, asyncpg.InterfaceError, asyncpg.PostgresError) as e:
-                # Se falhar (ex: pool fechou durante o acquire), loga e tenta de novo no loop
-                logger.warning(f"Dificuldade ao adquirir conexão ({type(e).__name__}). Tentando novamente em breve...")
-                await asyncio.sleep(0.5)
+                logger.warning(f"Dificuldade ao adquirir conexão ({type(e).__name__}). Retentando...")
+                await asyncio.sleep(1)
                 continue
             except Exception as e:
                 logger.error(f"Erro inesperado ao adquirir conexão: {e}")
-                raise
+                # Pequeno delay antes de tentar de novo para evitar loop rápido
+                await asyncio.sleep(1)
+                continue
 
         raise ConnectionError(f"Timeout ({timeout}s) aguardando pool de conexões ficar disponível.")
 
     async def restart_pool(self):
         """Reinicia o pool de conexões de forma segura usando Lock."""
         if self._restart_lock.locked():
-            # Se já está reiniciando, apenas retorna para que quem chamou espere
             return
 
         async with self._restart_lock:
-            logger.info("Iniciando reinicialização segura do pool de conexões...")
+            logger.info("♻️ Iniciando reinicialização segura do pool de conexões...")
             try:
                 if self.pool and not self.pool.is_closing():
                     try:
@@ -364,16 +354,17 @@ class Database:
                     except Exception as e:
                         logger.warning(f"Erro ao fechar pool antigo: {e}")
                 
-                self.pool = None # Força estado nulo
+                self.pool = None
+                self._is_initialized = False
                 
-                # Reutiliza a lógica de initialize
-                await self.initialize()
-                logger.info("Pool de conexões reiniciado com sucesso via restart_pool.")
-                
+                success = await self.initialize()
+                if success:
+                    logger.info("✅ Pool recuperado com sucesso via restart_pool.")
+                else:
+                    logger.error("❌ Falha na recuperação do pool.")
+                    
             except Exception as e:
                 logger.error(f"Falha crítica ao reiniciar pool: {e}", exc_info=True)
-                # Não relança o erro para não quebrar tasks chamadoras, 
-                # o loop de acquire_connection tentará novamente.
 
     async def check_pool_health(self):
         """Verifica a saúde do pool de conexões de forma mais robusta"""
@@ -398,7 +389,7 @@ class Database:
                 await self.pool.release(conn)
 
     async def _db_heartbeat(self, interval: int = 60):
-        """Envia um ping periódico para manter conexões ativas com melhor tratamento de erro"""
+        """Envia um ping periódico para manter conexões ativas"""
         while True:
             try:
                 await asyncio.sleep(interval)
@@ -409,7 +400,6 @@ class Database:
 
                 async with self.pool.acquire() as conn:
                     await asyncio.wait_for(conn.execute("SELECT 1"), timeout=10)
-                    # logger.debug("Heartbeat do banco de dados executado com sucesso")
 
             except asyncio.CancelledError:
                 logger.info("Heartbeat do banco de dados cancelado.")
@@ -449,8 +439,7 @@ class Database:
         async with self.semaphore:
             conn = None
             try:
-                # Aqui usamos self.pool.acquire diretamente pois estamos dentro do initialize
-                # (ou acquire_connection, mas initialize chama create_tables antes de setar _is_initialized)
+                # Usa o pool existente
                 if self.pool:
                     conn = await self.pool.acquire()
                 else:

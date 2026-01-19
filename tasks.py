@@ -414,11 +414,18 @@ async def execute_task_with_persistent_interval(task_name: str, monitoring_perio
     
     # Loop de espera inicial mais robusto
     while not hasattr(bot, 'db') or not bot.db or not bot.db._is_initialized:
-        await asyncio.sleep(10)
-        logger.info(f"Aguardando banco de dados para iniciar task {task_name}...")
+        # Aumentado para 60s para reduzir spam no log quando o DB está offline
+        await asyncio.sleep(60)
+        logger.info(f"Task {task_name} aguardando inicialização do banco de dados...")
     
     while True:
         try:
+            # Verificação de segurança da conexão
+            if not bot.db.pool or bot.db.pool.is_closing():
+                logger.warning(f"Task {task_name} pausada: pool de conexões indisponível.")
+                await asyncio.sleep(60) # Espera 1 minuto antes de checar de novo
+                continue
+
             # Verificação de segurança da conexão antes de tentar queries
             if not bot.db.pool or bot.db.pool.is_closing():
                 logger.warning(f"Task {task_name} pausada: aguardando recuperação do pool de conexões.")
@@ -486,8 +493,8 @@ async def execute_task_with_persistent_interval(task_name: str, monitoring_perio
             await asyncio.sleep(3600)
                 
         except (ConnectionError, asyncpg.PostgresError) as db_err:
-            logger.error(f"Erro de Banco de Dados na task {task_name}: {db_err}. Tentando novamente em 5 minutos.")
-            await asyncio.sleep(300) 
+            logger.error(f"Erro de Banco de Dados na task {task_name}: {db_err}.")
+            await asyncio.sleep(300) # Espera 5 minutos em caso de erro de DB
         except Exception as e:
             logger.error(f"Erro genérico na task {task_name}: {e}", exc_info=True)
             await asyncio.sleep(3600)  # Esperar 1h antes de tentar novamente
@@ -970,7 +977,7 @@ async def process_member_cleanup(member: discord.Member, guild: discord.Guild, k
                 # Ainda não atingiu o tempo necessário para expulsão, não faz nada.
                 return False
         else:
-            # É a primeira vez que vemos este membro sem cargos. Iniciar a contagem.
+            # É a primeira vez que vimos este membro sem cargos. Iniciar a contagem.
             try:
                 await bot.db.pool.execute(
                     """
